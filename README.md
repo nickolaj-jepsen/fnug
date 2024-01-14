@@ -2,7 +2,7 @@
 
 ## Installation
 
-> ![CAUTION]
+> [!CAUTION]
 > This is a work in progress. Probably not ready for use.
 
 ```bash
