@@ -1,0 +1,8 @@
+#lint-tree {
+  width: 30;
+}
+
+#terminal {
+  width: 100%;
+  height: 100%;
+}

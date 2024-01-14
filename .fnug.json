@@ -1,0 +1,50 @@
+{
+  "fnug_version": "0.1.0",
+  "name": "fnug",
+  "commands": [
+    {
+      "name": "ruff",
+      "cmd": "rye run ruff --fix src",
+      "autorun": {
+        "type": "git",
+        "git_root": ".",
+        "regex": [
+          "\\.py$"
+        ]
+      }
+    },
+    {
+      "name": "black",
+      "cmd": "rye run black .",
+      "autorun": {
+        "type": "git",
+        "git_root": ".",
+        "regex": [
+          "\\.py$"
+        ]
+      }
+    },
+    {
+      "name": "pyright",
+      "cmd": "rye run pyright src",
+      "autorun": {
+        "type": "git",
+        "git_root": ".",
+        "regex": [
+          "\\.py$"
+        ]
+      }
+    }
+  ],
+  "children": [
+    {
+      "name": "fnug-test",
+      "commands": [
+        {
+          "name": "test",
+          "cmd": "cat src/fnug/terminal_emulator.py"
+        }
+      ]
+    }
+  ]
+}

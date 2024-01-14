@@ -1,0 +1,67 @@
+[project]
+name = "fnug"
+version = "0.0.1"
+description = "A nice lint runner"
+authors = [
+    { name = "Nickolaj Jepsen", email = "nickolaj@fireproof.website" }
+]
+dependencies = [
+    "click>=8.1.7",
+    "textual>=0.40.0",
+    "rich>=0.47.1",
+    "pydantic>=2.5.3",
+    "pyte>=0.8.1",
+]
+readme = "README.md"
+requires-python = ">= 3.11"
+license = "GPL-3.0-or-later"
+
+[project.scripts]
+fnug = "fnug.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = [
+    "black>=23.12.1",
+    "ruff>=0.1.11",
+    "pyright>=1.1.345",
+    "textual-dev>=1.4.0",
+]
+
+[tool.rye.scripts]
+# Use console and debug to run the app with the textual debugger attached
+console = "textual console -x event -x system"
+debug = "textual run --dev -c fnug"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fnug"]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 120
+select = [
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "PGH",  # pygrep-hooks
+    "RUF",  # ruff
+    "W",    # pycodestyle
+    "YTT",  # flake8-2020
+]
+src = ["src"]
+target-version = "py311"
+
+[tool.pyright]
+include = ["src"]
+strict = ["src"]
