@@ -38,7 +38,6 @@ class TerminalEmulator:
             loop.remove_reader(self.out)
 
     def echo(self, text: Text):
-        """Convert text formatted with rich markup to standard string."""
         tmp_console = Console(file=None, highlight=False, color_system="standard")
         with tmp_console.capture() as capture:
             tmp_console.print(text, soft_wrap=True, end="")

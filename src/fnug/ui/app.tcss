@@ -1,8 +1,32 @@
+$background: #1e1e1e;
+$primary: #cf6a4c;
+$primary-dark: #a64c38;
+$primary-darker: #8c3a2d;
+
 #lint-tree {
   width: 30;
+  background: $background;
+  border-right: panel $primary;
 }
 
 #terminal {
   width: 100%;
   height: 100%;
+  background: $background;
+}
+
+Footer {
+  background: $primary;
+}
+
+Footer .footer--key {
+  background: $primary-dark;
+}
+
+Footer .footer--highlight {
+  background: $primary-dark;
+}
+
+Footer .footer--highlight-key {
+  background: $primary-darker;
 }

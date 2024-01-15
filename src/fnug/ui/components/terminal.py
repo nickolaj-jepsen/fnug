@@ -63,7 +63,10 @@ def color_translator(color: str) -> str:
 
 def style_from_pyte(char: Char) -> Style:
     foreground = color_translator(char.fg)
-    background = color_translator(char.bg)
+    if char.bg == "default":
+        background = "#1e1e1e"
+    else:
+        background = color_translator(char.bg)
 
     style = Style(
         color=foreground,

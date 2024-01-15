@@ -47,7 +47,9 @@ def attach_command(
         command_id = ".".join([*new_path, command.name])
         selected = False
         if command.autorun:
-            selected = detect_repo_changes(cwd / command.autorun.git_root, command.autorun.sub_path, command.autorun.regex)
+            selected = detect_repo_changes(
+                cwd / command.autorun.git_root, command.autorun.sub_path, command.autorun.regex
+            )
 
         command_leafs[command_id] = new_root.add_leaf(
             command.name,
