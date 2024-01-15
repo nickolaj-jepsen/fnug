@@ -40,7 +40,7 @@ class FnugApp(App[None]):
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
-        with Horizontal():
+        with Horizontal(id="main"):
             yield LintTree(self.config, cwd=self.cwd, id="lint-tree")
             yield Terminal(id="terminal")
             yield ScrollBar()
