@@ -54,7 +54,7 @@ def attach_command(
             data=LintTreeDataType(name=command.name, type="command", command=command, id=command_id, selected=selected),
         )
     for child in command_group.children:
-        command_leafs.update(attach_command(new_root, child, path=new_path))
+        command_leafs.update(attach_command(new_root, child, cwd, path=new_path))
     new_root.expand()
     return command_leafs
 
