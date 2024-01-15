@@ -7,6 +7,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.geometry import Size
+from textual.scrollbar import ScrollBar, ScrollTo, ScrollDown, ScrollUp
 from textual.widgets import Footer
 
 from fnug.config import ConfigRoot
@@ -28,6 +29,7 @@ class FnugApp(App[None]):
     CSS_PATH = "app.tcss"
 
     terminals: ClassVar[dict[str, TerminalInstance]] = {}
+    active_terminal_id: str | None = None
     display_task: asyncio.Task[None] | None = None
     update_ready = asyncio.Event()
 
@@ -41,7 +43,15 @@ class FnugApp(App[None]):
         with Horizontal():
             yield LintTree(self.config, cwd=self.cwd, id="lint-tree")
             yield Terminal(id="terminal")
+            yield ScrollBar()
         yield Footer()
+
+    @property
+    def active_terminal(self) -> TerminalInstance | None:
+        if self.active_terminal_id is None:
+            return None
+
+        return self.terminals[self.active_terminal_id]
 
     @on(LintTree.NodeHighlighted, "#lint-tree")
     def _switch_terminal(self, event: LintTree.NodeHighlighted[LintTreeDataType]):
@@ -67,14 +77,30 @@ class FnugApp(App[None]):
             if node.data is not None:
                 self.run_command(node.data)
 
+    @on(ScrollDown)
+    def _scroll_down(self, event: ScrollTo) -> None:
+        if self.active_terminal is not None:
+            self.active_terminal.emulator.scroll("down")
+            self.update_ready.set()
+
+    @on(ScrollUp)
+    def _scroll_up(self, event: ScrollTo) -> None:
+        if self.active_terminal is not None:
+            self.active_terminal.emulator.scroll("up")
+            self.update_ready.set()
+
     async def display_terminal(self, command_id: str):
+        scrollbar = self.query_one("ScrollBar", ScrollBar)
         terminal = self.terminals.get(command_id)
         if terminal is None:
+            scrollbar.window_virtual_size = 0
             return
 
         ui = self.query_one("#terminal", Terminal)
-        self.update_ready.set()
-        await ui.attach_emulator(terminal.emulator, self.update_ready)
+        self.active_terminal_id = command_id
+        task = ui.attach_emulator(terminal.emulator, self.update_ready, scrollbar)
+        ui.update_scrollbar(scrollbar)
+        await task
 
     def run_command(self, command: LintTreeDataType):
         if command.type != "command":
@@ -120,8 +146,17 @@ class FnugApp(App[None]):
             tree.update_status(command_id, "pending")
 
     def terminal_size(self) -> Size:
-        return Size(width=self.size.width - 30, height=self.size.height - 1)
+        return Size(width=self.size.width - 31, height=self.size.height - 1)
+
+    def on_mount(self):
+        size = self.terminal_size()
+        scrollbar = self.query_one("ScrollBar", ScrollBar)
+        scrollbar.window_size = size.height
+        scrollbar.window_virtual_size = 0
 
     async def on_resize(self, event: None) -> None:
+        scrollbar = self.query_one("ScrollBar", ScrollBar)
+        size = self.terminal_size()
         for terminal in self.terminals.values():
-            terminal.emulator.dimensions = self.terminal_size()
+            scrollbar.window_size = size.height
+            terminal.emulator.dimensions = size

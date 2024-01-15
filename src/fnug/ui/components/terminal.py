@@ -8,6 +8,8 @@ from rich.text import Text
 from rich.style import Style
 from textual.binding import Binding, BindingType
 from textual.events import Key, MouseMove
+from textual.reactive import reactive
+from textual.scrollbar import ScrollBar
 
 from textual.widget import Widget
 
@@ -127,6 +129,7 @@ class Terminal(Widget, can_focus=True):
     """Terminal textual widget."""
 
     emulator: TerminalEmulator | None = None
+    show_vertical_scrollbar = reactive(True)
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("tab", "unfocus", "Switch focus"),
@@ -138,23 +141,36 @@ class Terminal(Widget, can_focus=True):
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        self._display = TerminalDisplay([Text()])
+        self.terminal_display = TerminalDisplay([Text()])
 
         super().__init__(name=name, id=id, classes=classes)
 
     def render(self):
-        return self._display
+        return self.terminal_display
 
     def clear(self):
-        self._display = TerminalDisplay([Text()])
+        self.terminal_display = TerminalDisplay([Text()])
         self.refresh()
 
-    async def attach_emulator(self, emulator: TerminalEmulator, event: asyncio.Event):
+    def update_scrollbar(self, scrollbar: ScrollBar):
+        if self.emulator is None:
+            return
+
+        scrollbar.position = len(self.emulator.screen.history.top)
+        scrollbar.window_virtual_size = (
+            len(self.emulator.screen.history.top)
+            + self.emulator.screen.lines
+            + len(self.emulator.screen.history.bottom)
+        )
+        scrollbar.refresh()
+
+    async def attach_emulator(self, emulator: TerminalEmulator, event: asyncio.Event, scrollbar: ScrollBar):
         self.emulator = emulator
         while True:
             try:
                 event.clear()
-                self._display = TerminalDisplay(pyte2rich(emulator.screen))
+                self.terminal_display = TerminalDisplay(pyte2rich(emulator.screen))
+                self.update_scrollbar(scrollbar)
                 self.refresh()
                 await event.wait()
             except asyncio.CancelledError:
