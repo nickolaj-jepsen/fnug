@@ -43,6 +43,10 @@
         {
           "name": "test",
           "cmd": "cat src/fnug/terminal_emulator.py"
+        },
+        {
+          "name": "A very very very long name",
+          "cmd": "cat src/fnug/terminal_emulator.py"
         }
       ]
     }

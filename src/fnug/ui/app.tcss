@@ -8,6 +8,13 @@ $primary-darker: #8c3a2d;
   width: 30;
   background: $background;
   border-right: panel $primary;
+
+  scrollbar-background: $panel;
+  scrollbar-background-active: $panel;
+  scrollbar-background-hover: $panel;
+  scrollbar-color: $primary;
+  scrollbar-color-active: $primary-dark;
+  scrollbar-color-hover: $primary-dark;
 }
 
 #terminal {

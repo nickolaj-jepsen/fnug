@@ -5,6 +5,7 @@ from typing import ClassVar, Literal
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding, BindingType
+from textual.geometry import Region
 from textual.message import Message
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode, TOGGLE_STYLE
@@ -125,6 +126,14 @@ class LintTree(Tree[LintTreeDataType]):
         # self.root = build_command_tree(config)
         self.command_leafs = attach_command(self.root, config, cwd, root=True)
         self.root.expand()
+
+    def _get_label_region(self, line: int) -> Region | None:
+        """Like parent, but offset by 2 to account for the icon."""
+        region = super()._get_label_region(line)
+        if region is None:
+            return None
+        region = region._replace(x=region.x - 2)
+        return region
 
     def update_status(self, command_id: str, status: StatusType):
         command = self.command_leafs[command_id]
