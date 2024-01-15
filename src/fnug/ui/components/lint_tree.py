@@ -80,6 +80,7 @@ class LintTree(Tree[LintTreeDataType]):
         Binding("r", "run", "(Re)run command"),
         Binding("s", "stop", "Stop command"),
         Binding("space", "toggle_select", "Select"),
+        Binding("a", "autoselect", "Auto select"),
         Binding("enter", "run_all", "Run all selected commands"),
     ]
 
@@ -205,6 +206,22 @@ class LintTree(Tree[LintTreeDataType]):
             self.cursor_node.expand_all()
             set_children(self.cursor_node, self.cursor_node.data.selected)
         self.cursor_node.refresh()
+
+    def action_autoselect(self) -> None:
+        for _, leaf in self.command_leafs.items():
+            if leaf.data is None:
+                continue
+            if leaf.data.selected:
+                continue
+            if leaf.data.command and leaf.data.command.autorun:
+                leaf.data.selected = detect_repo_changes(
+                    leaf.data.command.autorun.git_root,
+                    leaf.data.command.autorun.sub_path,
+                    leaf.data.command.autorun.regex,
+                )
+            else:
+                leaf.data.selected = False
+            leaf.refresh()
 
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
         node_label = node._label.copy()  # pyright: ignore reportPrivateUsage=false
