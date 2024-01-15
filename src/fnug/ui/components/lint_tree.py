@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar, Literal
 
 from rich.style import Style
@@ -27,6 +28,7 @@ class LintTreeDataType:
 def attach_command(
     tree: TreeNode[LintTreeDataType],
     command_group: ConfigCommandGroup,
+    cwd: Path,
     path: list[str] | None = None,
     root: bool = False,
 ) -> dict[str, TreeNode[LintTreeDataType]]:
@@ -45,7 +47,7 @@ def attach_command(
         command_id = ".".join([*new_path, command.name])
         selected = False
         if command.autorun:
-            selected = detect_repo_changes(command.autorun.git_root, command.autorun.sub_path, command.autorun.regex)
+            selected = detect_repo_changes(cwd / command.autorun.git_root, command.autorun.sub_path, command.autorun.regex)
 
         command_leafs[command_id] = new_root.add_leaf(
             command.name,
@@ -109,6 +111,7 @@ class LintTree(Tree[LintTreeDataType]):
     def __init__(
         self,
         config: ConfigRoot,
+        cwd: Path,
         *,
         name: str | None = None,
         id: str | None = None,
@@ -117,7 +120,7 @@ class LintTree(Tree[LintTreeDataType]):
     ):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
         # self.root = build_command_tree(config)
-        self.command_leafs = attach_command(self.root, config, root=True)
+        self.command_leafs = attach_command(self.root, config, cwd, root=True)
         self.root.expand()
 
     def update_status(self, command_id: str, status: StatusType):
