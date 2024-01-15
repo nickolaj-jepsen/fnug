@@ -194,12 +194,16 @@ class LintTree(Tree[LintTreeDataType]):
         if self.cursor_node is None or self.cursor_node.data is None:
             return
 
+        def set_children(node: TreeNode[LintTreeDataType], selected: bool):
+            if node.data and node.data.type == "command":
+                node.data.selected = selected
+            for child in node.children:
+                set_children(child, selected)
+
         self.cursor_node.data.selected = not self.cursor_node.data.selected
         if self.cursor_node.children:
-            if self.cursor_node.data.selected:
-                self.cursor_node.expand_all()
-            else:
-                self.cursor_node.collapse_all()
+            self.cursor_node.expand_all()
+            set_children(self.cursor_node, self.cursor_node.data.selected)
         self.cursor_node.refresh()
 
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
