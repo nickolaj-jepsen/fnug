@@ -1,11 +1,11 @@
 from pathlib import Path
 from typing import Literal
-from pydantic import TypeAdapter, BaseModel, DirectoryPath
+from pydantic import TypeAdapter, BaseModel
 
 
 class ConfigAutoRun(BaseModel):
     type: Literal["git"]
-    git_root: DirectoryPath
+    git_root: Path
     regex: list[str]
     sub_path: Path | None = None
 
@@ -13,6 +13,7 @@ class ConfigAutoRun(BaseModel):
 class ConfigCommand(BaseModel):
     name: str
     cmd: str
+    cwd: Path | None = None
     autorun: ConfigAutoRun | None = None
 
 

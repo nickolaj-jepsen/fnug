@@ -86,7 +86,11 @@ class FnugApp(App[None]):
         te = TerminalEmulator(self.terminal_size(), self.update_ready)
 
         async def run_shell():
-            if command.command and await te.run_shell(command.command.cmd, self.cwd):
+            cwd = self.cwd
+            if command.command and command.command.cwd:
+                cwd = cwd / command.command.cwd
+
+            if command.command and await te.run_shell(command.command.cmd, cwd):
                 tree.update_status(command.id, "success")
             else:
                 tree.update_status(command.id, "failure")
