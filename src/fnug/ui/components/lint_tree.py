@@ -27,12 +27,13 @@ class LintTreeDataType:
     selected: bool = False
 
 
-def expand_node(command: TreeNode[LintTreeDataType]):
-    """Expands a node (recursively)"""
+def update_node(node: TreeNode[LintTreeDataType]):
+    """Updates a node (recursively)"""
 
-    command.expand()
-    if command.parent:
-        expand_node(command.parent)
+    node.expand()
+    node.refresh()
+    if node.parent:
+        update_node(node.parent)
 
 
 def select_node(node: TreeNode[LintTreeDataType]):
@@ -44,9 +45,7 @@ def select_node(node: TreeNode[LintTreeDataType]):
     if node.data is None:
         return
     node.data.selected = True
-    node.refresh()
-    if node.parent:
-        expand_node(node.parent)
+    update_node(node)
 
 
 def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | None = None):
@@ -59,9 +58,7 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
     if override_value is None:
         override_value = not node.data.selected
     node.data.selected = override_value
-    if override_value:
-        expand_node(node)
-    node.refresh()
+    update_node(node)
 
     for child in node.children:
         toggle_select_node(child, override_value=override_value)
@@ -110,6 +107,21 @@ def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
                 toggle_select_node(children, True)
             else:
                 select_autorun_commands(children)
+
+
+def sum_selected_commands(source_node: TreeNode[LintTreeDataType]) -> tuple[int, int]:
+    selected = 0
+    total = 0
+    for child in source_node.children:
+        if child.data and child.data.type == "command":
+            total += 1
+            if child.data.selected:
+                selected += 1
+        else:
+            child_selected, child_total = sum_selected_commands(child)
+            selected += child_selected
+            total += child_total
+    return selected, total
 
 
 def attach_command(
@@ -218,14 +230,14 @@ class LintTree(Tree[LintTreeDataType]):
         return region
 
     def update_status(self, command_id: str, status: StatusType):
-        command = self.command_leafs[command_id]
-        if command.data is None:
+        node = self.command_leafs[command_id]
+        if node.data is None:
             return
 
-        command.data.status = status
+        node.data.status = status
         if status == "success":
-            command.data.selected = False
-        command.refresh()
+            node.data.selected = False
+        update_node(node)
 
     def action_run(self) -> None:
         if self.cursor_node is None:
@@ -253,7 +265,7 @@ class LintTree(Tree[LintTreeDataType]):
             self.cursor_node.data.selected = True
         elif self.cursor_node.children:
             self.cursor_node.expand()
-        self.cursor_node.refresh()
+        update_node(self.cursor_node)
 
     def action_collapse_node(self) -> None:
         if self.cursor_node is None:
@@ -262,7 +274,7 @@ class LintTree(Tree[LintTreeDataType]):
             self.cursor_node.data.selected = False
         elif self.cursor_node.children:
             self.cursor_node.collapse()
-        self.cursor_node.refresh()
+        update_node(self.cursor_node)
 
     def action_toggle_select(self) -> None:
         if self.cursor_node is None:
@@ -274,21 +286,28 @@ class LintTree(Tree[LintTreeDataType]):
         select_autorun_commands(self.root)
 
     def action_toggle_select_click(self, command_id: str):
-        cmd = self.command_leafs.get(command_id)
-        if cmd and cmd.data:
-            cmd.data.selected = not cmd.data.selected
+        node = self.command_leafs.get(command_id)
+        if node and node.data:
+            node.data.selected = not node.data.selected
+            update_node(node)
 
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
         node_label = node._label.copy()  # pyright: ignore reportPrivateUsage=false
         node_label.stylize(style)
 
+        group_count = ("", base_style)
+        dropdown = ("", base_style)
+
         if node._allow_expand:  # pyright: ignore reportPrivateUsage=false
-            dropdown = (
-                "▾ " if node.is_expanded else "▸ ",
-                base_style + TOGGLE_STYLE,
+            selected, total = sum_selected_commands(node)
+            group_count = (
+                f" ({selected}/{total})",
+                base_style + Style(color="#808080"),
             )
-        else:
-            dropdown = ("", base_style)
+            if node.is_expanded:
+                dropdown = ("▾ ", base_style + TOGGLE_STYLE)
+            else:
+                dropdown = ("▸ ", base_style + TOGGLE_STYLE)
 
         command_status = getattr(node.data, "status", "")
         if command_status == "success":
@@ -315,5 +334,5 @@ class LintTree(Tree[LintTreeDataType]):
         else:
             selection = ("", base_style)
 
-        text = Text.assemble(dropdown, selection, node_label, status)
+        text = Text.assemble(dropdown, selection, node_label, status, group_count)
         return text
