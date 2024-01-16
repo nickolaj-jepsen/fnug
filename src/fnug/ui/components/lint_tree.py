@@ -111,23 +111,6 @@ def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
             else:
                 select_autorun_commands(children)
 
-    # for command in all_commands(source_node):
-    #     if not command.data or not command.data.command or not command.data.command.autorun:
-    #         continue
-    #
-    #     if command.data.command.autorun is True:
-    #         select_node(command)
-    #     else:
-    #         selected = detect_repo_changes(
-    #             command.data.command.autorun.git_root,
-    #             command.data.command.autorun.sub_path,
-    #             command.data.command.autorun.regex,
-    #         )
-    #         if selected:
-    #             select_node(command)
-    #
-    #     command.refresh()
-
 
 def attach_command(
     tree: TreeNode[LintTreeDataType],
