@@ -22,6 +22,7 @@ class LintTreeDataType:
     name: str
     type: Literal["group", "command"]
     command: ConfigCommand | None = None
+    group: ConfigCommandGroup | None = None
     status: StatusType | None = None
     selected: bool = False
 
@@ -59,7 +60,7 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
         override_value = not node.data.selected
     node.data.selected = override_value
     if override_value:
-        node.expand()
+        expand_node(node)
     node.refresh()
 
     for child in node.children:
@@ -80,22 +81,52 @@ def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
     """
     Select all autorun commands
     """
-    for command in all_commands(source_node):
-        if not command.data or not command.data.command or not command.data.command.autorun:
+    for children in source_node.children:
+        if not children.data:
             continue
 
-        if command.data.command.autorun is True:
-            select_node(command)
-        else:
-            selected = detect_repo_changes(
-                command.data.command.autorun.git_root,
-                command.data.command.autorun.sub_path,
-                command.data.command.autorun.regex,
-            )
-            if selected:
-                select_node(command)
+        if children.data.type == "command" and children.data.command:
+            if children.data.command.autorun is True:
+                select_node(children)
+            elif children.data.command.autorun:
+                selected = detect_repo_changes(
+                    children.data.command.autorun.git_root,
+                    children.data.command.autorun.sub_path,
+                    children.data.command.autorun.regex,
+                )
+                if selected:
+                    select_node(children)
+        elif children.data.type == "group" and children.data.group:
+            autorun = False
+            if children.data.group.autorun is True:
+                autorun = True
+            elif children.data.group.autorun:
+                autorun = detect_repo_changes(
+                    children.data.group.autorun.git_root,
+                    children.data.group.autorun.sub_path,
+                    children.data.group.autorun.regex,
+                )
+            if autorun:
+                toggle_select_node(children, True)
+            else:
+                select_autorun_commands(children)
 
-        command.refresh()
+    # for command in all_commands(source_node):
+    #     if not command.data or not command.data.command or not command.data.command.autorun:
+    #         continue
+    #
+    #     if command.data.command.autorun is True:
+    #         select_node(command)
+    #     else:
+    #         selected = detect_repo_changes(
+    #             command.data.command.autorun.git_root,
+    #             command.data.command.autorun.sub_path,
+    #             command.data.command.autorun.regex,
+    #         )
+    #         if selected:
+    #             select_node(command)
+    #
+    #     command.refresh()
 
 
 def attach_command(
@@ -111,7 +142,7 @@ def attach_command(
     if not root:
         new_root = tree.add(
             command_group.name,
-            data=LintTreeDataType(name=command_group.name, type="group", id=".".join(new_path)),
+            data=LintTreeDataType(name=command_group.name, group=command_group, type="group", id=".".join(new_path)),
         )
     else:
         new_root = tree

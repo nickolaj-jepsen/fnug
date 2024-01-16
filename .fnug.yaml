@@ -1,0 +1,29 @@
+fnug_version: 0.1.0
+name: fnug
+children:
+  - name: lint
+    autorun:
+      type: git
+      git_root: "."
+      regex:
+        - "\\.py$"
+    commands:
+      - name: black
+        cmd: rye run black .
+      - name: pyright
+        cmd: rye run pyright src
+      - name: ruff
+        cmd: rye run ruff --fix src
+  - name: fnug-test
+    commands:
+      - name: test
+        cmd: cat src/fnug/terminal_emulator.py
+      - name: A very very very long name
+        autorun: true
+        cmd: cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py ; cat
+          src/fnug/terminal_emulator.py
+    children:
+      - name: fnug-test-2
+        commands:
+          - name: test
+            cmd: cat src/fnug/terminal_emulator.py
