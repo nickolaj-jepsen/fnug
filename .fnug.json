@@ -46,7 +46,25 @@
         },
         {
           "name": "A very very very long name",
-          "cmd": "cat src/fnug/terminal_emulator.py"
+          "cmd": "cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py"
+        }
+      ],
+      "children": [
+        {
+          "name": "fnug-test-2",
+          "commands": [
+            {
+              "name": "test",
+              "cmd": "cat src/fnug/terminal_emulator.py",
+              "autorun": {
+                "type": "git",
+                "git_root": ".",
+                "regex": [
+                  "\\.py$"
+                ]
+              }
+            }
+          ]
         }
       ]
     }

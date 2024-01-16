@@ -51,14 +51,18 @@ def attach_command(
             selected = detect_repo_changes(
                 cwd / command.autorun.git_root, command.autorun.sub_path, command.autorun.regex
             )
+            new_root.expand()
 
         command_leafs[command_id] = new_root.add_leaf(
             command.name,
             data=LintTreeDataType(name=command.name, type="command", command=command, id=command_id, selected=selected),
         )
     for child in command_group.children:
-        command_leafs.update(attach_command(new_root, child, cwd, path=new_path))
-    new_root.expand()
+        child_commands = attach_command(new_root, child, cwd, path=new_path)
+        if new_root.data and any(leaf.data and leaf.data.selected for leaf in child_commands.values()):
+            new_root.data.selected = True
+            new_root.expand()
+        command_leafs.update(child_commands)
     return command_leafs
 
 
@@ -216,21 +220,28 @@ class LintTree(Tree[LintTreeDataType]):
             set_children(self.cursor_node, self.cursor_node.data.selected)
         self.cursor_node.refresh()
 
-    def action_autoselect(self) -> None:
-        for _, leaf in self.command_leafs.items():
-            if leaf.data is None:
-                continue
-            if leaf.data.selected:
-                continue
-            if leaf.data.command and leaf.data.command.autorun:
-                leaf.data.selected = detect_repo_changes(
-                    leaf.data.command.autorun.git_root,
-                    leaf.data.command.autorun.sub_path,
-                    leaf.data.command.autorun.regex,
-                )
-            else:
-                leaf.data.selected = False
-            leaf.refresh()
+    def action_autoselect(self, root: TreeNode[LintTreeDataType] | None = None) -> bool:
+        if root is None:
+            root = self.root
+
+        has_selected = False
+        if root.data and root.data.type == "command" and root.data.command and root.data.command.autorun:
+            selected = detect_repo_changes(
+                root.data.command.autorun.git_root,
+                root.data.command.autorun.sub_path,
+                root.data.command.autorun.regex,
+            )
+            root.data.selected = selected
+            has_selected = selected or has_selected
+            root.refresh()
+
+        if root.children:
+            children_selected = [self.action_autoselect(child) for child in root.children]
+            has_selected = any(children_selected) or has_selected
+            if any(children_selected):
+                root.expand()
+
+        return has_selected
 
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
         node_label = node._label.copy()  # pyright: ignore reportPrivateUsage=false
