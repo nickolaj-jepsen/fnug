@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Iterator
 
 from rich.style import Style
 from rich.text import Text
@@ -26,6 +26,78 @@ class LintTreeDataType:
     selected: bool = False
 
 
+def expand_node(command: TreeNode[LintTreeDataType]):
+    """Expands a node (recursively)"""
+
+    command.expand()
+    if command.parent:
+        expand_node(command.parent)
+
+
+def select_node(node: TreeNode[LintTreeDataType]):
+    """
+    Selects a node
+
+    Also expands all parents
+    """
+    if node.data is None:
+        return
+    node.data.selected = True
+    node.refresh()
+    if node.parent:
+        expand_node(node.parent)
+
+
+def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | None = None):
+    """
+    Toggle a node (recursively if with children)
+    """
+    if not node.data:
+        return
+
+    if override_value is None:
+        override_value = not node.data.selected
+    node.data.selected = override_value
+    if override_value:
+        node.expand()
+    node.refresh()
+
+    for child in node.children:
+        toggle_select_node(child, override_value=override_value)
+
+
+def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
+    """
+    Get all command children of a node (recursively)
+    """
+    for child in source_node.children:
+        if child.data and child.data.type == "command":
+            yield child
+        yield from all_commands(child)
+
+
+def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
+    """
+    Select all autorun commands
+    """
+    for command in all_commands(source_node):
+        if not command.data or not command.data.command or not command.data.command.autorun:
+            continue
+
+        if command.data.command.autorun is True:
+            select_node(command)
+        else:
+            selected = detect_repo_changes(
+                command.data.command.autorun.git_root,
+                command.data.command.autorun.sub_path,
+                command.data.command.autorun.regex,
+            )
+            if selected:
+                select_node(command)
+
+        command.refresh()
+
+
 def attach_command(
     tree: TreeNode[LintTreeDataType],
     command_group: ConfigCommandGroup,
@@ -46,19 +118,9 @@ def attach_command(
 
     for command in command_group.commands:
         command_id = ".".join([*new_path, command.name])
-        selected = False
-        if command.autorun:
-            if command.autorun is True:
-                selected = True
-            else:
-                selected = detect_repo_changes(
-                    cwd / command.autorun.git_root, command.autorun.sub_path, command.autorun.regex
-                )
-            new_root.expand()
-
         command_leafs[command_id] = new_root.add_leaf(
             command.name,
-            data=LintTreeDataType(name=command.name, type="command", command=command, id=command_id, selected=selected),
+            data=LintTreeDataType(name=command.name, type="command", command=command, id=command_id),
         )
     for child in command_group.children:
         child_commands = attach_command(new_root, child, cwd, path=new_path)
@@ -130,9 +192,8 @@ class LintTree(Tree[LintTreeDataType]):
         disabled: bool = False,
     ):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
-        # self.root = build_command_tree(config)
         self.command_leafs = attach_command(self.root, config, cwd, root=True)
-        self.root.expand()
+        select_autorun_commands(self.root)
 
     def _get_label_region(self, line: int) -> Region | None:
         """Like parent, but offset by 2 to account for the icon."""
@@ -152,13 +213,6 @@ class LintTree(Tree[LintTreeDataType]):
             command.data.selected = False
         command.refresh()
 
-    def update_selected(self, command_id: str, selected: bool):
-        command = self.command_leafs[command_id]
-        if command.data is None:
-            return
-        command.data.selected = selected
-        command.refresh()
-
     def action_run(self) -> None:
         if self.cursor_node is None:
             return
@@ -169,21 +223,10 @@ class LintTree(Tree[LintTreeDataType]):
             return
         self.post_message(self.StopCommand(self.cursor_node))
 
-    def all_nodes(self, source_node: TreeNode[LintTreeDataType] | None = None) -> list[TreeNode[LintTreeDataType]]:
-        if source_node is None:
-            source_node = self.root
-
-        nodes: list[TreeNode[LintTreeDataType]] = []
-        if source_node.data and source_node.data.type == "command":
-            nodes.append(source_node)
-        for child in source_node.children:
-            nodes.extend(self.all_nodes(child))
-        return nodes
-
     def action_run_all(self) -> None:
         nodes = [
             node
-            for node in self.all_nodes()
+            for node in all_commands(self.root)
             if node.data and node.data.selected and node.data.status not in ["running"]
         ]
         if len(nodes) > 0:
@@ -208,56 +251,18 @@ class LintTree(Tree[LintTreeDataType]):
         self.cursor_node.refresh()
 
     def action_toggle_select(self) -> None:
-        if self.cursor_node is None or self.cursor_node.data is None:
+        if self.cursor_node is None:
             return
 
-        def set_children(node: TreeNode[LintTreeDataType], selected: bool):
-            if node.data and node.data.type == "command":
-                node.data.selected = selected
-            for child in node.children:
-                set_children(child, selected)
+        toggle_select_node(self.cursor_node)
 
-        self.cursor_node.data.selected = not self.cursor_node.data.selected
-        if self.cursor_node.children:
-            self.cursor_node.expand_all()
-            set_children(self.cursor_node, self.cursor_node.data.selected)
-        self.cursor_node.refresh()
+    def action_autoselect(self):
+        select_autorun_commands(self.root)
 
-    def action_autoselect(self, root: TreeNode[LintTreeDataType] | None = None) -> bool:
-        if root is None:
-            root = self.root
-
-        has_selected = False
-        if root.data and root.data.type == "command" and root.data.command and root.data.command.autorun:
-            if root.data.command.autorun is True:
-                selected = True
-            else:
-                selected = detect_repo_changes(
-                    root.data.command.autorun.git_root,
-                    root.data.command.autorun.sub_path,
-                    root.data.command.autorun.regex,
-                )
-            root.data.selected = selected
-            has_selected = selected or has_selected
-            root.refresh()
-
-        if root.children:
-            children_selected = [self.action_autoselect(child) for child in root.children]
-            has_selected = any(children_selected) or has_selected
-            if any(children_selected):
-                root.expand()
-
-        return has_selected
-
-    def action_deselect(self, command_id: str):
+    def action_toggle_select_click(self, command_id: str):
         cmd = self.command_leafs.get(command_id)
         if cmd and cmd.data:
-            cmd.data.selected = False
-
-    def action_select(self, command_id: str):
-        cmd = self.command_leafs.get(command_id)
-        if cmd and cmd.data:
-            cmd.data.selected = True
+            cmd.data.selected = not cmd.data.selected
 
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
         node_label = node._label.copy()  # pyright: ignore reportPrivateUsage=false
@@ -284,9 +289,15 @@ class LintTree(Tree[LintTreeDataType]):
         selected = getattr(node.data, "selected", False)
         is_command = getattr(node.data, "type", "") == "command"
         if selected and is_command:
-            selection = ("● ", base_style + Style(meta={"@click": f"deselect('{node.data.id}')"} if node.data else {}))
+            selection = (
+                "● ",
+                base_style + Style(meta={"@click": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
+            )
         elif is_command:
-            selection = ("○ ", base_style + Style(meta={"@click": f"select('{node.data.id}')"} if node.data else {}))
+            selection = (
+                "○ ",
+                base_style + Style(meta={"@click": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
+            )
         else:
             selection = ("", base_style)
 
