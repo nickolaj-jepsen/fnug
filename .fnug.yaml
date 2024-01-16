@@ -16,9 +16,9 @@ children:
         cmd: rye run ruff --fix src
   - name: fnug-test
     commands:
-      - name: test
-        cmd: cat src/fnug/terminal_emulator.py
-      - name: A very very very long name
+      - name: htop
+        cmd: htop
+      - name: A very very very long file
         autorun: true
         cmd: cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py ; cat
           src/fnug/terminal_emulator.py
