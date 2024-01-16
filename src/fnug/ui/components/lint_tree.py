@@ -322,12 +322,12 @@ class LintTree(Tree[LintTreeDataType]):
         if selected and is_command:
             selection = (
                 "● ",
-                base_style + Style(meta={"@click": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
+                base_style + Style(meta={"@mouse.up": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
             )
         elif is_command:
             selection = (
                 "○ ",
-                base_style + Style(meta={"@click": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
+                base_style + Style(meta={"@mouse.up": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
             )
         else:
             selection = ("", base_style)
