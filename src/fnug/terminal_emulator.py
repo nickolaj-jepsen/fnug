@@ -5,18 +5,39 @@ import struct
 import termios
 from pathlib import Path
 from typing import Literal
-
+import math
 import pyte
 from rich.console import Console
 from rich.text import Text
 from textual.geometry import Size
 
 
+class FixedHistoryScreen(pyte.HistoryScreen):
+    def prev_page(self) -> None:
+        """
+        Excatly like pyte.HistoryScreen.prev_page but allows scrolling to the top of the buffer,
+
+        This is done by loosening the condition for when to allow scrolling up.
+        """
+        if self.history.top:
+            mid = min(len(self.history.top), int(math.ceil(self.lines * self.history.ratio)))
+
+            self.history.bottom.extendleft(self.buffer[y] for y in range(self.lines - 1, self.lines - mid - 1, -1))
+            self.history = self.history._replace(position=self.history.position - mid)
+
+            for y in range(self.lines - 1, mid - 1, -1):
+                self.buffer[y] = self.buffer[y - mid]
+            for y in range(mid - 1, -1, -1):
+                self.buffer[y] = self.history.top.pop()
+
+            self.dirty = set(range(self.lines))
+
+
 class TerminalEmulator:
     def __init__(self, dimensions: Size, event: asyncio.Event):
         self.pty, self.tty = os.openpty()
         self.out = os.fdopen(self.pty, "r+b", 0)
-        self.screen = pyte.HistoryScreen(dimensions.width, dimensions.height, ratio=0.25)
+        self.screen = FixedHistoryScreen(dimensions.width, dimensions.height, history=200, ratio=0.25)
         self.stream = pyte.Stream(self.screen)
         self.update_ready = event
         self.finished = asyncio.Event()
