@@ -249,6 +249,16 @@ class LintTree(Tree[LintTreeDataType]):
 
         return has_selected
 
+    def action_deselect(self, command_id: str):
+        cmd = self.command_leafs.get(command_id)
+        if cmd and cmd.data:
+            cmd.data.selected = False
+
+    def action_select(self, command_id: str):
+        cmd = self.command_leafs.get(command_id)
+        if cmd and cmd.data:
+            cmd.data.selected = True
+
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
         node_label = node._label.copy()  # pyright: ignore reportPrivateUsage=false
         node_label.stylize(style)
@@ -274,9 +284,9 @@ class LintTree(Tree[LintTreeDataType]):
         selected = getattr(node.data, "selected", False)
         is_command = getattr(node.data, "type", "") == "command"
         if selected and is_command:
-            selection = ("● ", base_style)
+            selection = ("● ", base_style + Style(meta={"@click": f"deselect('{node.data.id}')"} if node.data else {}))
         elif is_command:
-            selection = ("○ ", base_style)
+            selection = ("○ ", base_style + Style(meta={"@click": f"select('{node.data.id}')"} if node.data else {}))
         else:
             selection = ("", base_style)
 
