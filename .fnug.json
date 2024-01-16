@@ -56,13 +56,7 @@
             {
               "name": "test",
               "cmd": "cat src/fnug/terminal_emulator.py",
-              "autorun": {
-                "type": "git",
-                "git_root": ".",
-                "regex": [
-                  "\\.py$"
-                ]
-              }
+              "autorun": true
             }
           ]
         }

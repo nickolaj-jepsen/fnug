@@ -14,7 +14,7 @@ class ConfigCommand(BaseModel):
     name: str
     cmd: str
     cwd: Path | None = None
-    autorun: ConfigAutoRun | None = None
+    autorun: ConfigAutoRun | bool | None = None
 
 
 class ConfigCommandGroup(BaseModel):

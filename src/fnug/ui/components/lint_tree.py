@@ -48,9 +48,12 @@ def attach_command(
         command_id = ".".join([*new_path, command.name])
         selected = False
         if command.autorun:
-            selected = detect_repo_changes(
-                cwd / command.autorun.git_root, command.autorun.sub_path, command.autorun.regex
-            )
+            if command.autorun is True:
+                selected = True
+            else:
+                selected = detect_repo_changes(
+                    cwd / command.autorun.git_root, command.autorun.sub_path, command.autorun.regex
+                )
             new_root.expand()
 
         command_leafs[command_id] = new_root.add_leaf(
@@ -226,11 +229,14 @@ class LintTree(Tree[LintTreeDataType]):
 
         has_selected = False
         if root.data and root.data.type == "command" and root.data.command and root.data.command.autorun:
-            selected = detect_repo_changes(
-                root.data.command.autorun.git_root,
-                root.data.command.autorun.sub_path,
-                root.data.command.autorun.regex,
-            )
+            if root.data.command.autorun is True:
+                selected = True
+            else:
+                selected = detect_repo_changes(
+                    root.data.command.autorun.git_root,
+                    root.data.command.autorun.sub_path,
+                    root.data.command.autorun.regex,
+                )
             root.data.selected = selected
             has_selected = selected or has_selected
             root.refresh()
