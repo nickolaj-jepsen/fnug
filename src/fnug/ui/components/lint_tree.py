@@ -109,19 +109,36 @@ def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
                 select_autorun_commands(children)
 
 
-def sum_selected_commands(source_node: TreeNode[LintTreeDataType]) -> tuple[int, int]:
-    selected = 0
-    total = 0
+@dataclass
+class CommandSum:
+    selected: int = 0
+    running: int = 0
+    success: int = 0
+    failure: int = 0
+    total: int = 0
+
+
+def sum_selected_commands(source_node: TreeNode[LintTreeDataType]) -> CommandSum:
+    command_sum = CommandSum()
     for child in source_node.children:
         if child.data and child.data.type == "command":
-            total += 1
+            command_sum.total += 1
             if child.data.selected:
-                selected += 1
+                command_sum.selected += 1
+            if child.data.status == "running":
+                command_sum.running += 1
+            elif child.data.status == "success":
+                command_sum.success += 1
+            elif child.data.status == "failure":
+                command_sum.failure += 1
         else:
-            child_selected, child_total = sum_selected_commands(child)
-            selected += child_selected
-            total += child_total
-    return selected, total
+            child_sum = sum_selected_commands(child)
+            command_sum.total += child_sum.total
+            command_sum.selected += child_sum.selected
+            command_sum.running += child_sum.running
+            command_sum.success += child_sum.success
+            command_sum.failure += child_sum.failure
+    return command_sum
 
 
 def attach_command(
@@ -299,11 +316,41 @@ class LintTree(Tree[LintTreeDataType]):
         dropdown = ("", base_style)
 
         if node._allow_expand:  # pyright: ignore reportPrivateUsage=false
-            selected, total = sum_selected_commands(node)
-            group_count = (
-                f" ({selected}/{total})",
-                base_style + Style(color="#808080"),
-            )
+            command_sum = sum_selected_commands(node)
+            count_style = base_style + Style(color="#808080")
+
+            group_count_pieces = [
+                Text(" (", count_style),
+                Text(str(command_sum.selected), count_style),
+                Text("/", count_style),
+                Text(str(command_sum.total), count_style),
+                Text(")", count_style),
+            ]
+
+            if any([command_sum.running, command_sum.success, command_sum.failure]):
+                status_count_pieces = [Text(" [", count_style)]
+
+                if command_sum.success:
+                    status_count_pieces.append(Text(str(command_sum.success), base_style + Style(color="green")))
+                    if command_sum.running or command_sum.failure:
+                        status_count_pieces.append(Text("|", count_style))
+
+                if command_sum.running:
+                    status_count_pieces.append(Text(str(command_sum.running), count_style))
+                    if command_sum.failure:
+                        status_count_pieces.append(Text("|", count_style))
+
+                if command_sum.failure:
+                    status_count_pieces.append(Text(str(command_sum.failure), base_style + Style(color="red")))
+
+                status_count_pieces.append(Text("]", count_style))
+
+                group_count_pieces = [
+                    *status_count_pieces,
+                    *group_count_pieces,
+                ]
+
+            group_count = Text.assemble(*group_count_pieces)
             if node.is_expanded:
                 dropdown = ("▾ ", base_style + TOGGLE_STYLE)
             else:
