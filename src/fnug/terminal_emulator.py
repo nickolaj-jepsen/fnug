@@ -37,7 +37,7 @@ class TerminalEmulator:
     def __init__(self, dimensions: Size, event: asyncio.Event):
         self.pty, self.tty = os.openpty()
         self.out = os.fdopen(self.pty, "r+b", 0)
-        self.screen = FixedHistoryScreen(dimensions.width, dimensions.height, history=200, ratio=0.25)
+        self.screen = FixedHistoryScreen(dimensions.width, dimensions.height, history=5000, ratio=0.25)
         self.stream = pyte.Stream(self.screen)
         self.update_ready = event
         self.finished = asyncio.Event()
