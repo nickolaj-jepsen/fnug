@@ -5,6 +5,7 @@ from typing import ClassVar
 
 from textual import on
 from textual.app import App, ComposeResult
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal
 from textual.geometry import Size
 from textual.scrollbar import ScrollBar, ScrollTo, ScrollDown, ScrollUp
@@ -27,6 +28,8 @@ class FnugApp(App[None]):
     """A Textual app to manage stopwatches."""
 
     CSS_PATH = "app.tcss"
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "quit", "Quit")]
 
     terminals: ClassVar[dict[str, TerminalInstance]] = {}
     active_terminal_id: str | None = None
