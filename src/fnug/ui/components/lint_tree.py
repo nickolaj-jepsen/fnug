@@ -281,18 +281,18 @@ class LintTree(Tree[LintTreeDataType]):
             return
         if self.cursor_node.data and self.cursor_node.data.type == "command":
             self.cursor_node.data.selected = True
+            update_node(self.cursor_node)
         elif self.cursor_node.children:
             self.cursor_node.expand()
-        update_node(self.cursor_node)
 
     def action_collapse_node(self) -> None:
         if self.cursor_node is None:
             return
         if self.cursor_node.data and self.cursor_node.data.type == "command":
             self.cursor_node.data.selected = False
+            update_node(self.cursor_node)
         elif self.cursor_node.children:
             self.cursor_node.collapse()
-        update_node(self.cursor_node)
 
     def action_toggle_select(self) -> None:
         if self.cursor_node is None:
