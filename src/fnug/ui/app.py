@@ -38,7 +38,7 @@ class FnugApp(App[None]):
 
     def __init__(self, config: ConfigRoot, cwd: Path | None = None):
         super().__init__()
-        self.cwd = cwd or Path.cwd()
+        self.cwd = (cwd or Path.cwd()).resolve()
         self.config = config
 
     def compose(self) -> ComposeResult:

@@ -4,7 +4,7 @@ children:
   - name: lint
     autorun:
       type: git
-      git_root: "."
+      path: "./src/fnug"
       regex:
         - "\\.py$"
     commands:

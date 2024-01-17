@@ -6,9 +6,8 @@ import yaml
 
 class ConfigAutoRun(BaseModel):
     type: Literal["git"]
-    git_root: Path
     regex: list[str]
-    sub_path: Path | None = None
+    path: Path
 
 
 class ConfigCommand(BaseModel):

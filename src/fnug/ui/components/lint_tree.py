@@ -87,8 +87,7 @@ def select_autorun_commands(cwd: Path, source_node: TreeNode[LintTreeDataType]) 
                 select_node(children)
             elif children.data.command.autorun:
                 selected = detect_repo_changes(
-                    cwd / children.data.command.autorun.git_root,
-                    children.data.command.autorun.sub_path,
+                    cwd / children.data.command.autorun.path,
                     children.data.command.autorun.regex,
                 )
                 if selected:
@@ -99,8 +98,7 @@ def select_autorun_commands(cwd: Path, source_node: TreeNode[LintTreeDataType]) 
                 autorun = True
             elif children.data.group.autorun:
                 autorun = detect_repo_changes(
-                    cwd / children.data.group.autorun.git_root,
-                    children.data.group.autorun.sub_path,
+                    cwd / children.data.group.autorun.path,
                     children.data.group.autorun.regex,
                 )
             if autorun:
