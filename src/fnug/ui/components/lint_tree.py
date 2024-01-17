@@ -353,9 +353,9 @@ class LintTree(Tree[LintTreeDataType]):
 
             group_count = Text.assemble(*group_count_pieces)
             if node.is_expanded:
-                dropdown = ("▾ ", base_style + TOGGLE_STYLE)
+                dropdown = ("▼ ", base_style + TOGGLE_STYLE)
             else:
-                dropdown = ("▸ ", base_style + TOGGLE_STYLE)
+                dropdown = ("▶ ", base_style + TOGGLE_STYLE)
 
         command_status = getattr(node.data, "status", "")
         if command_status == "success":
