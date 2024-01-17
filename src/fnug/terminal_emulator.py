@@ -59,7 +59,7 @@ class TerminalEmulator:
             loop.remove_reader(self.out)
 
     def echo(self, text: Text):
-        tmp_console = Console(file=None, highlight=False, color_system="standard")
+        tmp_console = Console(color_system="truecolor", file=None, highlight=False)
         with tmp_console.capture() as capture:
             tmp_console.print(text, soft_wrap=True, end="")
         self.stream.feed(capture.get())
@@ -78,6 +78,7 @@ class TerminalEmulator:
             start_new_session=True,
             stdout=self.tty,
             stderr=self.tty,
+            env={**os.environ, "TERM": "xterm-256color"},
         )
         try:
             code = await process.wait()
