@@ -1,6 +1,6 @@
 [project]
 name = "fnug"
-version = "0.0.8"
+version = "0.0.9"
 description = "A nice lint runner"
 authors = [
     { name = "Nickolaj Jepsen", email = "nickolaj@fireproof.website" }
