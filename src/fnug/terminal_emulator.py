@@ -118,6 +118,12 @@ class TerminalEmulator:
             self.screen.next_page()
         self.update_ready.set()
 
+    def click(self, x: int, y: int):
+        self.out.write(f"\x1b[<0;{x};{y}M".encode())
+        self.out.write(f"\x1b[<0;{x};{y}m".encode())
+        self.screen.dirty.clear()
+        self.update_ready.set()
+
     @property
     def dimensions(self):
         return self._dimensions

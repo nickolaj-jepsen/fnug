@@ -6,6 +6,7 @@ from pyte.screens import Char
 from rich.console import Console, ConsoleOptions, ConsoleRenderable
 from rich.text import Text
 from rich.style import Style
+from textual import events
 from textual.binding import Binding, BindingType
 from textual.events import Key, MouseMove
 from textual.reactive import reactive
@@ -196,3 +197,9 @@ class Terminal(Widget, can_focus=True):
     def on_mouse_scroll_up(self, event: MouseMove) -> None:
         if self.emulator:
             self.emulator.scroll("up")
+
+    async def on_click(self, event: events.MouseEvent):
+        if self.emulator is None:
+            return
+
+        self.emulator.click(event.x + 1, event.y + 1)

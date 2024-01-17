@@ -19,6 +19,8 @@ children:
     commands:
       - name: htop
         cmd: htop
+      - name: recursive?!
+        cmd: fnug
       - name: A very very very long file
         autorun: true
         cmd: cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py ; cat
