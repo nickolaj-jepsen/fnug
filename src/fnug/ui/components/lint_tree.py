@@ -2,7 +2,6 @@ import asyncio
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from functools import cached_property
 from pathlib import Path
 from typing import ClassVar, Literal, Iterator, DefaultDict
 
@@ -17,7 +16,7 @@ from textual.widgets import Tree
 from textual.widgets._tree import TreeNode, TOGGLE_STYLE
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
-from fnug.config import ConfigRoot, ConfigCommandGroup, ConfigCommand, ConfigAutoRun
+from fnug.config import ConfigRoot, ConfigCommandGroup, ConfigCommand
 from fnug.git import detect_repo_changes
 
 StatusType = Literal["success", "failure", "running", "pending"]
@@ -32,14 +31,6 @@ class LintTreeDataType:
     group: ConfigCommandGroup | None = None
     status: StatusType | None = None
     selected: bool = False
-
-    @cached_property
-    def autorun(self) -> ConfigAutoRun | bool | None:
-        if self.command and self.command.autorun:
-            return self.command.autorun
-        elif self.group and self.group.autorun:
-            return self.group.autorun
-        return None
 
 
 def update_node(node: TreeNode[LintTreeDataType]):
@@ -76,6 +67,9 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
     update_node(node)
 
     for child in node.children:
+        if child.data:
+            continue
+
         toggle_select_node(child, override_value=override_value)
 
 
@@ -98,37 +92,19 @@ def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[L
         yield from all_commands(child)
 
 
-def select_git_autorun_commands(cwd: Path, source_node: TreeNode[LintTreeDataType]) -> None:
-    """
-    Select all (initial) autorun commands
-    """
-    for children in source_node.children:
-        if not children.data:
-            continue
+def select_git_autorun(cwd: Path, node: TreeNode[LintTreeDataType]):
+    if not node.data or not node.data.command:
+        return
 
-        if children.data.type == "command" and children.data.command:
-            if children.data.autorun is True:
-                select_node(children)
-            elif children.data.autorun and children.data.autorun.git:
-                selected = detect_repo_changes(
-                    cwd / children.data.autorun.path,
-                    children.data.autorun.regex,
-                )
-                if selected:
-                    select_node(children)
-        elif children.data.type == "group" and children.data.group:
-            autorun = False
-            if children.data.autorun is True:
-                autorun = True
-            elif children.data.autorun and children.data.autorun.git:
-                autorun = detect_repo_changes(
-                    cwd / children.data.autorun.path,
-                    children.data.autorun.regex,
-                )
-            if autorun:
-                toggle_select_node(children, True)
-            else:
-                select_git_autorun_commands(cwd, children)
+    autorun = node.data.command.autorun
+
+    if autorun.always is True:
+        return select_node(node)
+
+    if autorun.git and autorun.path:
+        for path in autorun.path:
+            if detect_repo_changes(cwd / path, autorun.regex):
+                return select_node(node)
 
 
 @dataclass
@@ -189,9 +165,6 @@ def attach_command(
         )
     for child in command_group.children:
         child_commands = attach_command(new_root, child, cwd, path=new_path)
-        if new_root.data and any(leaf.data and leaf.data.selected for leaf in child_commands.values()):
-            new_root.data.selected = True
-            new_root.expand()
         command_leafs.update(child_commands)
     return command_leafs
 
@@ -200,28 +173,28 @@ async def watch_autorun_task(command_nodes: Iterator[TreeNode[LintTreeDataType]]
     paths: DefaultDict[Path, list[TreeNode[LintTreeDataType]]] = defaultdict(list)
 
     for node in command_nodes:
-        if not node.data:
+        if not node.data or not node.data.command or not node.data.command.autorun.path:
             continue
 
-        if node.data.autorun and isinstance(node.data.autorun, ConfigAutoRun) and node.data.autorun.watch:
-            paths[cwd / node.data.autorun.path].append(node)
+        for path in node.data.command.autorun.path:
+            paths[cwd / path].append(node)
 
     async for change_set in awatch(*paths.keys(), step=500, debounce=5000):
         for _, change_str in change_set:
-            # Only trigger if the path is in the tree
             change = Path(change_str)
-            active_nodes = [nodes for path, nodes in paths.items() if path in change.parents]
+            # Only trigger if the path is in the tree
+            nested_active_nodes = [nodes for path, nodes in paths.items() if path in change.parents]
+            active_nodes = [node for nodes in nested_active_nodes for node in nodes]  # Flatten
 
-            for nodes in active_nodes:
-                for node in nodes:
-                    if not node.data:
-                        continue
-                    if not isinstance(node.data.autorun, ConfigAutoRun) or not node.data.autorun.regex:
-                        # No regex, means we just toggle
-                        toggle_select_node(node, True)
-                    else:
-                        if any(re.search(r, change_str) for r in node.data.autorun.regex):
-                            toggle_select_node(node, True)
+            for node in active_nodes:
+                if not node.data or not node.data.command:
+                    continue
+
+                if node.data.command.autorun.regex:
+                    if any(re.search(r, change_str) for r in node.data.command.autorun.regex):
+                        select_node(node)
+                else:
+                    select_node(node)
 
 
 class LintTree(Tree[LintTreeDataType]):
@@ -298,7 +271,7 @@ class LintTree(Tree[LintTreeDataType]):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
         self.command_leafs = attach_command(self.root, config, cwd, root=True)
         self.cwd = cwd
-        select_git_autorun_commands(self.cwd, self.root)
+        self.action_autoselect()
 
     def _get_label_region(self, line: int) -> Region | None:
         """Like parent, but offset by 2 to account for the icon."""
@@ -362,7 +335,8 @@ class LintTree(Tree[LintTreeDataType]):
         toggle_select_node(self.cursor_node)
 
     def action_autoselect(self):
-        select_git_autorun_commands(self.cwd, self.root)
+        for command in all_commands(self.root):
+            select_git_autorun(self.cwd, command)
 
     def action_toggle_select_click(self, command_id: str):
         node = self.command_leafs.get(command_id)
@@ -447,7 +421,7 @@ class LintTree(Tree[LintTreeDataType]):
         return text
 
     def on_mount(self):
-        self.watch_task = asyncio.create_task(watch_autorun_task(all_nodes(self.root), self.cwd))
+        self.watch_task = asyncio.create_task(watch_autorun_task(all_commands(self.root), self.cwd))
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         # We don't want mouse events on the scrollbar bubbling

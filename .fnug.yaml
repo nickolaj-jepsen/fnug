@@ -3,9 +3,10 @@ name: fnug
 children:
   - name: lint
     autorun:
-      git: true
       watch: true
-      path: "./src/fnug"
+      git: true
+      path:
+        - "./src/fnug"
       regex:
         - "\\.py$"
     commands:
@@ -22,11 +23,16 @@ children:
       - name: recursive?!
         cmd: fnug
       - name: A very very very long file
-        autorun: true
         cmd: cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py ; cat
           src/fnug/terminal_emulator.py
     children:
-      - name: fnug-test-2
+      - name: nested-autorun
+        autorun:
+          always: true
         commands:
-          - name: test
+          - name: test-autorun
+            cmd: cat src/fnug/terminal_emulator.py
+          - name: test-not-autorun
+            autorun:
+              always: false
             cmd: cat src/fnug/terminal_emulator.py
