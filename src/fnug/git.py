@@ -6,11 +6,10 @@ from pathlib import Path
 
 @cache
 def _git_status(repo_path: Path, sub_path: Path | None = None) -> list[str]:
-    absolute_repo_path = repo_path.resolve()
     cmd = [
         "git",
         "-C",
-        absolute_repo_path.as_posix(),
+        repo_path.as_posix(),
         "status",
         "--porcelain=v1",
     ]

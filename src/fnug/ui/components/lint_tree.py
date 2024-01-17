@@ -74,7 +74,7 @@ def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[L
         yield from all_commands(child)
 
 
-def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
+def select_autorun_commands(cwd: Path, source_node: TreeNode[LintTreeDataType]) -> None:
     """
     Select all autorun commands
     """
@@ -87,7 +87,7 @@ def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
                 select_node(children)
             elif children.data.command.autorun:
                 selected = detect_repo_changes(
-                    children.data.command.autorun.git_root,
+                    cwd / children.data.command.autorun.git_root,
                     children.data.command.autorun.sub_path,
                     children.data.command.autorun.regex,
                 )
@@ -99,14 +99,14 @@ def select_autorun_commands(source_node: TreeNode[LintTreeDataType]) -> None:
                 autorun = True
             elif children.data.group.autorun:
                 autorun = detect_repo_changes(
-                    children.data.group.autorun.git_root,
+                    cwd / children.data.group.autorun.git_root,
                     children.data.group.autorun.sub_path,
                     children.data.group.autorun.regex,
                 )
             if autorun:
                 toggle_select_node(children, True)
             else:
-                select_autorun_commands(children)
+                select_autorun_commands(cwd, children)
 
 
 @dataclass
@@ -236,7 +236,8 @@ class LintTree(Tree[LintTreeDataType]):
     ):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
         self.command_leafs = attach_command(self.root, config, cwd, root=True)
-        select_autorun_commands(self.root)
+        self.cwd = cwd
+        select_autorun_commands(self.cwd, self.root)
 
     def _get_label_region(self, line: int) -> Region | None:
         """Like parent, but offset by 2 to account for the icon."""
@@ -300,7 +301,7 @@ class LintTree(Tree[LintTreeDataType]):
         toggle_select_node(self.cursor_node)
 
     def action_autoselect(self):
-        select_autorun_commands(self.root)
+        select_autorun_commands(self.cwd, self.root)
 
     def action_toggle_select_click(self, command_id: str):
         node = self.command_leafs.get(command_id)
