@@ -3,7 +3,8 @@ name: fnug
 children:
   - name: lint
     autorun:
-      type: git
+      git: true
+      watch: true
       path: "./src/fnug"
       regex:
         - "\\.py$"

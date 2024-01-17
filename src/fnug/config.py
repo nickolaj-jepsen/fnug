@@ -5,7 +5,8 @@ import yaml
 
 
 class ConfigAutoRun(BaseModel):
-    type: Literal["git"]
+    git: bool = True
+    watch: bool = False
     regex: list[str]
     path: Path
 

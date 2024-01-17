@@ -1,6 +1,10 @@
+import asyncio
+import re
+from collections import defaultdict
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
-from typing import ClassVar, Literal, Iterator
+from typing import ClassVar, Literal, Iterator, DefaultDict
 
 from rich.style import Style
 from rich.text import Text
@@ -9,8 +13,9 @@ from textual.geometry import Region
 from textual.message import Message
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode, TOGGLE_STYLE
+from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
-from fnug.config import ConfigRoot, ConfigCommandGroup, ConfigCommand
+from fnug.config import ConfigRoot, ConfigCommandGroup, ConfigCommand, ConfigAutoRun
 from fnug.git import detect_repo_changes
 
 StatusType = Literal["success", "failure", "running", "pending"]
@@ -25,6 +30,14 @@ class LintTreeDataType:
     group: ConfigCommandGroup | None = None
     status: StatusType | None = None
     selected: bool = False
+
+    @cached_property
+    def autorun(self) -> ConfigAutoRun | bool | None:
+        if self.command and self.command.autorun:
+            return self.command.autorun
+        elif self.group and self.group.autorun:
+            return self.group.autorun
+        return None
 
 
 def update_node(node: TreeNode[LintTreeDataType]):
@@ -64,6 +77,15 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
         toggle_select_node(child, override_value=override_value)
 
 
+def all_nodes(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
+    """
+    Get all nodes (recursively)
+    """
+    yield source_node
+    for child in source_node.children:
+        yield from all_nodes(child)
+
+
 def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
     """
     Get all command children of a node (recursively)
@@ -74,37 +96,37 @@ def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[L
         yield from all_commands(child)
 
 
-def select_autorun_commands(cwd: Path, source_node: TreeNode[LintTreeDataType]) -> None:
+def select_start_autorun_commands(cwd: Path, source_node: TreeNode[LintTreeDataType]) -> None:
     """
-    Select all autorun commands
+    Select all (initial) autorun commands
     """
     for children in source_node.children:
         if not children.data:
             continue
 
         if children.data.type == "command" and children.data.command:
-            if children.data.command.autorun is True:
+            if children.data.autorun is True:
                 select_node(children)
-            elif children.data.command.autorun:
+            elif children.data.autorun and children.data.autorun.git:
                 selected = detect_repo_changes(
-                    cwd / children.data.command.autorun.path,
-                    children.data.command.autorun.regex,
+                    cwd / children.data.autorun.path,
+                    children.data.autorun.regex,
                 )
                 if selected:
                     select_node(children)
         elif children.data.type == "group" and children.data.group:
             autorun = False
-            if children.data.group.autorun is True:
+            if children.data.autorun is True:
                 autorun = True
-            elif children.data.group.autorun:
+            elif children.data.autorun and children.data.autorun.git:
                 autorun = detect_repo_changes(
-                    cwd / children.data.group.autorun.path,
-                    children.data.group.autorun.regex,
+                    cwd / children.data.autorun.path,
+                    children.data.autorun.regex,
                 )
             if autorun:
                 toggle_select_node(children, True)
             else:
-                select_autorun_commands(cwd, children)
+                select_start_autorun_commands(cwd, children)
 
 
 @dataclass
@@ -172,9 +194,38 @@ def attach_command(
     return command_leafs
 
 
+async def watch_autorun_task(command_nodes: Iterator[TreeNode[LintTreeDataType]], cwd: Path):
+    paths: DefaultDict[Path, list[TreeNode[LintTreeDataType]]] = defaultdict(list)
+
+    for node in command_nodes:
+        if not node.data:
+            continue
+
+        if node.data.autorun and isinstance(node.data.autorun, ConfigAutoRun) and node.data.autorun.watch:
+            paths[cwd / node.data.autorun.path].append(node)
+
+    async for change_set in awatch(*paths.keys(), step=500, debounce=5000):
+        for _, change_str in change_set:
+            # Only trigger if the path is in the tree
+            change = Path(change_str)
+            active_nodes = [nodes for path, nodes in paths.items() if path in change.parents]
+
+            for nodes in active_nodes:
+                for node in nodes:
+                    if not node.data:
+                        continue
+                    if not isinstance(node.data.autorun, ConfigAutoRun) or not node.data.autorun.regex:
+                        # No regex, means we just toggle
+                        toggle_select_node(node, True)
+                    else:
+                        if any(re.search(r, change_str) for r in node.data.autorun.regex):
+                            toggle_select_node(node, True)
+
+
 class LintTree(Tree[LintTreeDataType]):
     guide_depth = 3
     show_root = False
+    watch_task: asyncio.Task[None] | None = None
 
     BINDINGS: ClassVar[list[BindingType]] = [
         # Movement
@@ -235,7 +286,7 @@ class LintTree(Tree[LintTreeDataType]):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
         self.command_leafs = attach_command(self.root, config, cwd, root=True)
         self.cwd = cwd
-        select_autorun_commands(self.cwd, self.root)
+        select_start_autorun_commands(self.cwd, self.root)
 
     def _get_label_region(self, line: int) -> Region | None:
         """Like parent, but offset by 2 to account for the icon."""
@@ -299,7 +350,7 @@ class LintTree(Tree[LintTreeDataType]):
         toggle_select_node(self.cursor_node)
 
     def action_autoselect(self):
-        select_autorun_commands(self.cwd, self.root)
+        select_start_autorun_commands(self.cwd, self.root)
 
     def action_toggle_select_click(self, command_id: str):
         node = self.command_leafs.get(command_id)
@@ -382,3 +433,6 @@ class LintTree(Tree[LintTreeDataType]):
 
         text = Text.assemble(dropdown, selection, node_label, status, group_count)
         return text
+
+    def on_mount(self):
+        self.watch_task = asyncio.create_task(watch_autorun_task(all_nodes(self.root), self.cwd))
