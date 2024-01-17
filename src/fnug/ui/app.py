@@ -94,6 +94,10 @@ class FnugApp(App[None]):
             if node.data is not None:
                 self.run_command(node.data, background=cursor_id != node.id)
 
+    @on(LintTree.Resize, "#lint-tree")
+    def _tree_resize(self, event: LintTree.Resize):
+        self.on_resize()
+
     @on(ScrollDown)
     def _scroll_down(self, event: ScrollTo) -> None:
         if self.active_terminal_emulator is not None:

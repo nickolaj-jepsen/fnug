@@ -8,9 +8,11 @@ from typing import ClassVar, Literal, Iterator, DefaultDict
 
 from rich.style import Style
 from rich.text import Text
+from textual import events
 from textual.binding import Binding, BindingType
-from textual.geometry import Region
+from textual.geometry import Region, Offset
 from textual.message import Message
+from textual.reactive import Reactive
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode, TOGGLE_STYLE
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
@@ -226,6 +228,7 @@ class LintTree(Tree[LintTreeDataType]):
     guide_depth = 3
     show_root = False
     watch_task: asyncio.Task[None] | None = None
+    grabbed: Reactive[Offset | None] = Reactive(None)
 
     BINDINGS: ClassVar[list[BindingType]] = [
         # Movement
@@ -272,6 +275,15 @@ class LintTree(Tree[LintTreeDataType]):
         @property
         def control(self) -> Tree[LintTreeDataType]:
             return self.nodes[0].tree
+
+    class Resize(Message):
+        def __init__(self, tree: Tree[LintTreeDataType]) -> None:
+            self.tree: Tree[LintTreeDataType] = tree
+            super().__init__()
+
+        @property
+        def control(self) -> Tree[LintTreeDataType]:
+            return self.tree
 
     def __init__(
         self,
@@ -436,3 +448,33 @@ class LintTree(Tree[LintTreeDataType]):
 
     def on_mount(self):
         self.watch_task = asyncio.create_task(watch_autorun_task(all_nodes(self.root), self.cwd))
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        # We don't want mouse events on the scrollbar bubbling
+        if event.x == self.size.width:
+            self.capture_mouse()
+            event.stop()
+
+    def _on_mouse_capture(self, event: events.MouseCapture) -> None:
+        self.grabbed = event.mouse_position
+
+    async def _on_mouse_up(self, event: events.MouseUp) -> None:
+        if self.grabbed:
+            self.release_mouse()
+            self.grabbed = None
+        event.stop()
+
+    def _on_mouse_move(self, event: events.MouseMove) -> None:
+        if self.grabbed:
+            self.styles.border_right = ("solid", "#a64c38")
+            self.styles.width = event.screen_x + 1
+            self.post_message(self.Resize(self))
+        elif event.screen_x == self.size.width:  # Hover highlight
+            self.styles.border_right = ("solid", "#a64c38")
+        else:
+            self.styles.border_right = ("solid", "#cf6a4c")
+        event.stop()
+
+    def _on_leave(self, event: events.Leave) -> None:
+        """Clear any highlight when the mouse leaves the widget"""
+        self.styles.border_right = ("solid", "#cf6a4c")

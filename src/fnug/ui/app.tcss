@@ -7,7 +7,7 @@ $primary-darker: #8c3a2d;
 #lint-tree {
   width: 30;
   background: $background;
-  border-right: panel $primary;
+  border-right: solid $primary;
 
   scrollbar-background: $panel;
   scrollbar-background-active: $panel;
