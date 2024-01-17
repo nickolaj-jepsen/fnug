@@ -69,7 +69,8 @@ class TerminalEmulator:
 
     async def run_shell(self, command: str, cwd: Path) -> bool:
         # Echo command to tty
-        self.echo(Text("Running the command: ", style="dim underscore") + Text(command) + Text("\n"))
+        prefix = Text("❱ ", style="#cf6a4c")
+        self.echo(Text.assemble(prefix, Text(command), Text("\n")))
 
         process = await asyncio.subprocess.create_subprocess_shell(
             command,
@@ -88,9 +89,17 @@ class TerminalEmulator:
             raise
 
         if code == 0:
-            self.echo(Text("\nSuccess!", style="dim"))
+            self.echo(Text.assemble(Text("\n"), prefix, Text("Success"), Text(" ✔", style="green")))
         else:
-            self.echo(Text("\nFailure!", style="bold") + Text(f" (exit code {code})", style="dim"))
+            self.echo(
+                Text.assemble(
+                    Text("\n"),
+                    prefix,
+                    Text("Command failed"),
+                    Text(" ✘", style="red"),
+                    Text(f" (exit code {code})", style="#808080"),
+                )
+            )
 
         self.finished.set()
         return code == 0
