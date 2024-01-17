@@ -164,16 +164,20 @@ class FnugApp(App[None]):
             tree.update_status(command_id, "pending")
 
     def terminal_size(self) -> Size:
-        return Size(width=self.size.width - 31, height=self.size.height - 1)
+        scrollbar_width = 1
+        return Size(
+            width=self.size.width - self.lint_tree.outer_size.width - scrollbar_width, height=self.size.height - 1
+        )
 
     def on_mount(self):
+        self.call_after_refresh(self.on_resize)
+
+    def on_resize(self) -> None:
         size = self.terminal_size()
         scrollbar = self.scrollbar
         scrollbar.window_size = size.height
         scrollbar.window_virtual_size = 0
 
-    async def on_resize(self, event: None) -> None:
-        size = self.terminal_size()
         for terminal in self.terminals.values():
             self.scrollbar.window_size = size.height
             terminal.emulator.dimensions = size
