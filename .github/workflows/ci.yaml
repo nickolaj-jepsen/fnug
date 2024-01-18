@@ -7,7 +7,7 @@ on:
       - main
 
 jobs:
-  build:
+  code-lint:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -22,8 +22,9 @@ jobs:
         uses: eifinger/setup-rye@v1
         with:
           enable-cache: true
+          cache-prefix: ${{ matrix.python-version }}
           version: '0.17.0'
-      - name: Pin version
+      - name: Pin python version
         run: rye pin ${{ matrix.python-version }}
       - name: Install dependencies
         run: rye sync
