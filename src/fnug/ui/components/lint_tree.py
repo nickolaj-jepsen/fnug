@@ -54,6 +54,18 @@ def select_node(node: TreeNode[LintTreeDataType]):
     update_node(node)
 
 
+def unselect_node(node: TreeNode[LintTreeDataType]):
+    """
+    Unselects a node
+
+    Also expands all parents
+    """
+    if node.data is None:
+        return
+    node.data.selected = False
+    update_node(node)
+
+
 def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | None = None):
     """
     Toggle a node (recursively if with children)
@@ -99,14 +111,18 @@ def select_git_autorun(cwd: Path, node: TreeNode[LintTreeDataType]):
     clear_git_cache()
 
     autorun = node.data.command.autorun
+    node.data.selected = False
 
     if autorun.always is True:
-        return select_node(node)
+        node.data.selected = True
 
     if autorun.git and autorun.path:
         for path in autorun.path:
             if detect_repo_changes(cwd / path, autorun.regex):
-                return select_node(node)
+                node.data.selected = True
+                continue
+
+    update_node(node)
 
 
 @dataclass
@@ -217,11 +233,11 @@ class LintTree(Tree[LintTreeDataType]):
         Binding("k", "cursor_up", "Cursor Up", show=False),
         Binding("j", "cursor_down", "Cursor Down", show=False),
         # Controls
-        Binding("r", "run", "(Re)run command"),
-        Binding("s", "stop", "Stop command"),
+        Binding("r", "run", "Run"),
+        Binding("s", "stop", "Stop"),
         Binding("space", "toggle_select", "Select"),
-        Binding("a", "autoselect", "Auto select"),
-        Binding("enter", "run_all", "Run all selected commands"),
+        Binding("g", "select_git", "Select git autorun commands", show=False),
+        Binding("enter", "run_all", "Run selected commands"),
     ]
 
     class RunCommand(Message):
@@ -273,7 +289,7 @@ class LintTree(Tree[LintTreeDataType]):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
         self.command_leafs = attach_command(self.root, config, cwd, root=True)
         self.cwd = cwd
-        self.action_autoselect()
+        self.action_select_git()
 
     def _get_label_region(self, line: int) -> Region | None:
         """Like parent, but offset by 2 to account for the icon."""
@@ -336,7 +352,7 @@ class LintTree(Tree[LintTreeDataType]):
 
         toggle_select_node(self.cursor_node)
 
-    def action_autoselect(self):
+    def action_select_git(self):
         for command in all_commands(self.root):
             select_git_autorun(self.cwd, command)
 

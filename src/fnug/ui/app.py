@@ -29,7 +29,7 @@ class FnugApp(App[None]):
 
     CSS_PATH = "app.tcss"
 
-    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "quit", "Quit")]
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "quit", "Quit", show=False)]
 
     terminals: ClassVar[dict[str, TerminalInstance]] = {}
     active_terminal_id: str | None = None
