@@ -9,6 +9,7 @@ from rich.style import Style
 from textual import events
 from textual.binding import Binding, BindingType
 from textual.events import Key, MouseMove
+from textual.keys import Keys
 from textual.reactive import reactive
 from textual.scrollbar import ScrollBar
 
@@ -20,37 +21,38 @@ from pyte import Screen
 from fnug.terminal_emulator import TerminalEmulator
 
 
-CTRL_KEYS = {
-    "up": "\x1bOA",
-    "down": "\x1bOB",
-    "right": "\x1bOC",
-    "left": "\x1bOD",
-    "home": "\x1bOH",
-    "end": "\x1b[F",
-    "delete": "\x1b[3~",
-    "pageup": "\x1b[5~",
-    "pagedown": "\x1b[6~",
-    "shift+tab": "\x1b[Z",
-    "f1": "\x1bOP",
-    "f2": "\x1bOQ",
-    "f3": "\x1bOR",
-    "f4": "\x1bOS",
-    "f5": "\x1b[15~",
-    "f6": "\x1b[17~",
-    "f7": "\x1b[18~",
-    "f8": "\x1b[19~",
-    "f9": "\x1b[20~",
-    "f10": "\x1b[21~",
-    "f11": "\x1b[23~",
-    "f12": "\x1b[24~",
-    "f13": "\x1b[25~",
-    "f14": "\x1b[26~",
-    "f15": "\x1b[28~",
-    "f16": "\x1b[29~",
-    "f17": "\x1b[31~",
-    "f18": "\x1b[32~",
-    "f19": "\x1b[33~",
-    "f20": "\x1b[34~",
+CTRL_KEYS: dict[str, str] = {
+    Keys.Up: "\x1bOA",
+    Keys.Down: "\x1bOB",
+    Keys.Right: "\x1bOC",
+    Keys.Left: "\x1bOD",
+    Keys.Home: "\x1bOH",
+    Keys.End: "\x1b[F",
+    Keys.Insert: "\x1b[2~",
+    Keys.Delete: "\x1b[3~",
+    Keys.PageUp: "\x1b[5~",
+    Keys.PageDown: "\x1b[6~",
+    Keys.BackTab: "\x1b[Z",
+    Keys.ControlF1: "\x1bOP",
+    Keys.ControlF2: "\x1bOQ",
+    Keys.ControlF3: "\x1bOR",
+    Keys.ControlF4: "\x1bOS",
+    Keys.ControlF5: "\x1b[15~",
+    Keys.ControlF6: "\x1b[17~",
+    Keys.ControlF7: "\x1b[18~",
+    Keys.ControlF8: "\x1b[19~",
+    Keys.ControlF9: "\x1b[20~",
+    Keys.ControlF10: "\x1b[21~",
+    Keys.ControlF11: "\x1b[23~",
+    Keys.ControlF12: "\x1b[24~",
+    Keys.ControlF13: "\x1b[25~",
+    Keys.ControlF14: "\x1b[26~",
+    Keys.ControlF15: "\x1b[28~",
+    Keys.ControlF16: "\x1b[29~",
+    Keys.ControlF17: "\x1b[31~",
+    Keys.ControlF18: "\x1b[32~",
+    Keys.ControlF19: "\x1b[33~",
+    Keys.ControlF20: "\x1b[34~",
 }
 
 
