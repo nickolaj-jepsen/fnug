@@ -61,11 +61,13 @@ def _git_status(path: Path) -> list[str]:
 
 
 def clear_git_cache() -> None:
+    """Clear the git command cache."""
     _detect_repo_root.cache_clear()
     _git_status.cache_clear()
 
 
 def detect_repo_changes(path: Path, regex: list[str] | None = None) -> bool:
+    """Detect if a git repository has changes."""
     files = _git_status(path)
     if regex:
         files = [file for file in files if any(re.search(r, file) for r in regex)]

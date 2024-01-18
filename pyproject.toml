@@ -61,6 +61,8 @@ select = [
     "W",    # pycodestyle
     "I",    # isort
     "N",    # pep8-naming
+    "D",    # pydocstyle
+    "D213", # pydocstyle - alternative to D212
     "UP",   # pyupgrade
     "S",    # flake8-bandit
     "B",    # flake8-bugbear
@@ -72,6 +74,14 @@ select = [
     "PGH",  # pygrep-hooks
     "PERF", # Perflint
     "RUF",  # ruff
+]
+ignore = [
+    "D100",
+    "D104",
+    "D106",
+    "D107",
+    "D203",
+    "D212",
 ]
 src = ["src"]
 target-version = "py311"

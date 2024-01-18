@@ -9,7 +9,7 @@ from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.binding import Binding, BindingType
-from textual.events import Key, MouseMove
+from textual.events import Key
 from textual.keys import Keys
 from textual.reactive import reactive
 from textual.scrollbar import ScrollBar
@@ -53,6 +53,7 @@ CTRL_KEYS: dict[str, str] = {
 
 
 def color_translator(color: str) -> str:
+    """Translate a pyte color to a rich color."""
     if color == "brown":
         return "yellow"
 
@@ -63,6 +64,7 @@ def color_translator(color: str) -> str:
 
 
 def style_from_pyte(char: Char) -> Style:
+    """Create a rich style from a pyte character."""
     foreground = color_translator(char.fg)
     background = "#1e1e1e" if char.bg == "default" else color_translator(char.bg)
 
@@ -79,6 +81,7 @@ def style_from_pyte(char: Char) -> Style:
 
 
 def pyte2rich(screen: Screen) -> list[Text]:
+    """Convert a pyte screen to a list of rich text ready to be rendered."""
     lines: list[Text] = []
     last_char: Char
     last_style: Style
@@ -115,6 +118,7 @@ class TerminalDisplay(ConsoleRenderable):
         self.lines: list[Text] = lines
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """Render the terminal display."""
         yield from self.lines
 
 
@@ -139,13 +143,16 @@ class Terminal(Widget, can_focus=True):
         super().__init__(name=name, id=id, classes=classes)
 
     def render(self):
+        """Render the terminal display."""
         return self.terminal_display
 
     def clear(self):
+        """Clear the terminal display."""
         self.terminal_display = TerminalDisplay([Text()])
         self.refresh()
 
     def update_scrollbar(self, scrollbar: ScrollBar):
+        """Update the position of the scrollbar."""
         if self.emulator is None:
             return
 
@@ -158,6 +165,7 @@ class Terminal(Widget, can_focus=True):
         scrollbar.refresh()
 
     async def attach_emulator(self, emulator: TerminalEmulator, event: asyncio.Event, scrollbar: ScrollBar):
+        """Attach a terminal emulator to this widget."""
         self.emulator = emulator
         while True:
             try:
@@ -169,7 +177,7 @@ class Terminal(Widget, can_focus=True):
             except asyncio.CancelledError:
                 break
 
-    async def on_key(self, event: Key) -> None:
+    async def _on_key(self, event: Key) -> None:
         if self.emulator is None:
             return
 
@@ -182,15 +190,15 @@ class Terminal(Widget, can_focus=True):
         if char:
             self.emulator.write(char.encode())
 
-    def on_mouse_scroll_down(self, event: MouseMove) -> None:
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self.emulator:
             self.emulator.scroll("down")
 
-    def on_mouse_scroll_up(self, event: MouseMove) -> None:
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         if self.emulator:
             self.emulator.scroll("up")
 
-    async def on_click(self, event: events.MouseEvent):
+    async def _on_click(self, event: events.Click):
         if self.emulator is None:
             return
 

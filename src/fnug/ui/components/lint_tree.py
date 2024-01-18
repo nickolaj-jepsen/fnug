@@ -25,6 +25,8 @@ StatusType = Literal["success", "failure", "running", "pending"]
 
 @dataclass
 class LintTreeDataType:
+    """Data type used by the lint tree."""
+
     id: str
     name: str
     type: Literal["group", "command"]
@@ -35,7 +37,7 @@ class LintTreeDataType:
 
 
 def update_node(node: TreeNode[LintTreeDataType]):
-    """Updates a node (recursively)"""
+    """Update/refresh a node (recursively)."""
     node.expand()
     node.refresh()
     if node.parent:
@@ -43,10 +45,7 @@ def update_node(node: TreeNode[LintTreeDataType]):
 
 
 def select_node(node: TreeNode[LintTreeDataType]):
-    """Selects a node
-
-    Also expands all parents
-    """
+    """Select a node, also expand all parents."""
     if node.data is None:
         return
     node.data.selected = True
@@ -54,10 +53,7 @@ def select_node(node: TreeNode[LintTreeDataType]):
 
 
 def unselect_node(node: TreeNode[LintTreeDataType]):
-    """Unselects a node
-
-    Also expands all parents
-    """
+    """Deselects a node."""
     if node.data is None:
         return
     node.data.selected = False
@@ -65,7 +61,7 @@ def unselect_node(node: TreeNode[LintTreeDataType]):
 
 
 def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | None = None):
-    """Toggle a node (recursively if with children)"""
+    """Toggle a node (recursively if with children)."""
     if not node.data:
         return
 
@@ -82,14 +78,14 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
 
 
 def all_nodes(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
-    """Get all nodes (recursively)"""
+    """Get all nodes (recursively)."""
     yield source_node
     for child in source_node.children:
         yield from all_nodes(child)
 
 
 def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
-    """Get all command children of a node (recursively)"""
+    """Get all command children of a node (recursively)."""
     for child in source_node.children:
         if child.data and child.data.type == "command":
             yield child
@@ -97,6 +93,7 @@ def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[L
 
 
 def select_git_autorun(cwd: Path, node: TreeNode[LintTreeDataType]):
+    """Select nodes if it has git autorun enabled and there are changes in the repos."""
     if not node.data or not node.data.command:
         return
 
@@ -119,6 +116,8 @@ def select_git_autorun(cwd: Path, node: TreeNode[LintTreeDataType]):
 
 @dataclass
 class CommandSum:
+    """A summary of the status of all selected commands."""
+
     selected: int = 0
     running: int = 0
     success: int = 0
@@ -127,6 +126,7 @@ class CommandSum:
 
 
 def sum_selected_commands(source_node: TreeNode[LintTreeDataType]) -> CommandSum:
+    """Summarize the status of all selected commands (recursively)."""
     command_sum = CommandSum()
     for child in source_node.children:
         if child.data and child.data.type == "command":
@@ -156,6 +156,7 @@ def attach_command(
     path: list[str] | None = None,
     root: bool = False,
 ) -> dict[str, TreeNode[LintTreeDataType]]:
+    """Attach a command group to a tree."""
     command_leafs: dict[str, TreeNode[LintTreeDataType]] = {}
     new_path = [command_group.name] if path is None else [*path, command_group.name]
 
@@ -180,6 +181,7 @@ def attach_command(
 
 
 async def watch_autorun_task(command_nodes: Iterator[TreeNode[LintTreeDataType]], cwd: Path):
+    """Create a task that watches for changes in the filesystem and selects autorun commands."""
     paths: defaultdict[Path, list[TreeNode[LintTreeDataType]]] = defaultdict(list)
 
     for node in command_nodes:
@@ -208,6 +210,8 @@ async def watch_autorun_task(command_nodes: Iterator[TreeNode[LintTreeDataType]]
 
 
 class LintTree(Tree[LintTreeDataType]):
+    """A tree widget for displaying lint commands."""
+
     guide_depth = 3
     show_root = False
     watch_task: asyncio.Task[None] | None = None
@@ -239,6 +243,7 @@ class LintTree(Tree[LintTreeDataType]):
 
         @property
         def control(self) -> Tree[LintTreeDataType]:
+            """The tree that sent the message."""
             return self.node.tree
 
     class StopCommand(Message):
@@ -248,6 +253,7 @@ class LintTree(Tree[LintTreeDataType]):
 
         @property
         def control(self) -> Tree[LintTreeDataType]:
+            """The tree that sent the message."""
             return self.node.tree
 
     class RunAllCommand(Message):
@@ -257,6 +263,7 @@ class LintTree(Tree[LintTreeDataType]):
 
         @property
         def control(self) -> Tree[LintTreeDataType]:
+            """The tree that sent the message."""
             return self.nodes[0].tree
 
     class Resize(Message):
@@ -266,6 +273,7 @@ class LintTree(Tree[LintTreeDataType]):
 
         @property
         def control(self) -> Tree[LintTreeDataType]:
+            """The tree that sent the message."""
             return self.tree
 
     def __init__(
@@ -291,6 +299,7 @@ class LintTree(Tree[LintTreeDataType]):
         return region._replace(x=region.x - 2)
 
     def update_status(self, command_id: str, status: StatusType):
+        """Update the status of a command."""
         node = self.command_leafs[command_id]
         if node.data is None:
             return
@@ -301,16 +310,19 @@ class LintTree(Tree[LintTreeDataType]):
         update_node(node)
 
     def action_run(self) -> None:
+        """Run a command."""
         if self.cursor_node is None:
             return
         self.post_message(self.RunCommand(self.cursor_node))
 
     def action_stop(self) -> None:
+        """Stop a running command."""
         if self.cursor_node is None:
             return
         self.post_message(self.StopCommand(self.cursor_node))
 
     def action_run_all(self) -> None:
+        """Run all selected commands."""
         nodes = [
             node
             for node in all_commands(self.root)
@@ -320,6 +332,7 @@ class LintTree(Tree[LintTreeDataType]):
             self.post_message(self.RunAllCommand(nodes))
 
     def action_expand_node(self) -> None:
+        """Expand a node (or enable it if it's a command)."""
         if self.cursor_node is None:
             return
         if self.cursor_node.data and self.cursor_node.data.type == "command":
@@ -329,6 +342,7 @@ class LintTree(Tree[LintTreeDataType]):
             self.cursor_node.expand()
 
     def action_collapse_node(self) -> None:
+        """Collapse a node (or disable it if it's a command)."""
         if self.cursor_node is None:
             return
         if self.cursor_node.data and self.cursor_node.data.type == "command":
@@ -338,22 +352,26 @@ class LintTree(Tree[LintTreeDataType]):
             self.cursor_node.collapse()
 
     def action_toggle_select(self) -> None:
+        """Toggle a node on click (recursively if with children)."""
         if self.cursor_node is None:
             return
 
         toggle_select_node(self.cursor_node)
 
     def action_select_git(self):
+        """Select all git autorun commands."""
         for command in all_commands(self.root):
             select_git_autorun(self.cwd, command)
 
     def action_toggle_select_click(self, command_id: str):
+        """Toggle a node on click."""
         node = self.command_leafs.get(command_id)
         if node and node.data:
             node.data.selected = not node.data.selected
             update_node(node)
 
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
+        """Override the default label rendering to add icons and status."""
         node_label = node._label.copy()  # pyright: ignore reportPrivateUsage=false
         node_label.stylize(style)
 
@@ -425,7 +443,7 @@ class LintTree(Tree[LintTreeDataType]):
 
         return Text.assemble(dropdown, selection, node_label, status, group_count)
 
-    def on_mount(self):
+    def _on_mount(self, event: events.Mount):
         self.watch_task = asyncio.create_task(watch_autorun_task(all_commands(self.root), self.cwd))
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
@@ -455,5 +473,5 @@ class LintTree(Tree[LintTreeDataType]):
         event.stop()
 
     def _on_leave(self, event: events.Leave) -> None:
-        """Clear any highlight when the mouse leaves the widget"""
+        """Clear any highlight when the mouse leaves the widget."""
         self.styles.border_right = ("solid", "#cf6a4c")

@@ -14,11 +14,14 @@ from textual.geometry import Size
 
 
 class FixedHistoryScreen(pyte.HistoryScreen):
-    def prev_page(self) -> None:
-        """Excatly like pyte.HistoryScreen.prev_page but allows scrolling to the top of the buffer,
+    """
+    Exactly like pyte.HistoryScreen but allows scrolling to the top of the buffer.
 
-        This is done by loosening the condition for when to allow scrolling up.
-        """
+    This is done by loosening the condition for when to allow scrolling up.
+    """
+
+    def prev_page(self) -> None:
+        """Scroll the screen up by one page."""
         if self.history.top:
             mid = min(len(self.history.top), int(math.ceil(self.lines * self.history.ratio)))
 
@@ -34,6 +37,8 @@ class FixedHistoryScreen(pyte.HistoryScreen):
 
 
 class TerminalEmulator:
+    """A terminal emulator."""
+
     def __init__(self, dimensions: Size, event: asyncio.Event):
         self.pty, self.tty = os.openpty()
         self.out = os.fdopen(self.pty, "r+b", 0)
@@ -44,6 +49,7 @@ class TerminalEmulator:
         self.dimensions = dimensions
 
     async def reader(self):
+        """Read data from the pty and feed it to the terminal."""
         loop = asyncio.get_running_loop()
 
         def on_output():
@@ -59,6 +65,7 @@ class TerminalEmulator:
             loop.remove_reader(self.out)
 
     def echo(self, text: Text):
+        """Echo text to the terminal."""
         tmp_console = Console(color_system="truecolor", file=None, highlight=False)
         with tmp_console.capture() as capture:
             tmp_console.print(text, soft_wrap=True, end="")
@@ -68,6 +75,7 @@ class TerminalEmulator:
         self.update_ready.set()
 
     async def run_shell(self, command: str, cwd: Path) -> bool:
+        """Run a shell command in a subprocess, and send the output to the tty."""
         # Echo command to tty
         prefix = Text("❱ ", style="#cf6a4c")
         self.echo(Text.assemble(prefix, Text(command), Text("\n")))
@@ -105,13 +113,16 @@ class TerminalEmulator:
         return code == 0
 
     def clear(self):
+        """Clear the terminal."""
         self.screen.reset()
         self.update_ready.set()
 
     def write(self, data: bytes):
+        """Write data to the terminal."""
         os.write(self.pty, data)
 
     def scroll(self, direction: Literal["up", "down"]):
+        """Move the scroll position up or down."""
         if direction == "up":
             self.screen.prev_page()
         else:
@@ -119,6 +130,7 @@ class TerminalEmulator:
         self.update_ready.set()
 
     def click(self, x: int, y: int):
+        """Emulate a mouse click at the given position."""
         self.out.write(f"\x1b[<0;{x};{y}M".encode())
         self.out.write(f"\x1b[<0;{x};{y}m".encode())
         self.screen.dirty.clear()
@@ -126,6 +138,7 @@ class TerminalEmulator:
 
     @property
     def dimensions(self):
+        """The dimensions of the terminal."""
         return self._dimensions
 
     @dimensions.setter

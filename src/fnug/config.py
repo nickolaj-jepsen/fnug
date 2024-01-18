@@ -6,6 +6,8 @@ from pydantic import BaseModel, TypeAdapter, model_validator
 
 
 class ConfigAutoRun(BaseModel):
+    """Config for autorun."""
+
     git: bool | None = None
     watch: bool | None = None
     always: bool | None = None
@@ -13,6 +15,7 @@ class ConfigAutoRun(BaseModel):
     path: list[Path] | None = None
 
     def merge(self, other: Self):
+        """Merge two autorun configs."""
         return ConfigAutoRun(
             git=self.git if self.git is not None else other.git,
             watch=self.watch if self.watch is not None else other.watch,
@@ -23,6 +26,7 @@ class ConfigAutoRun(BaseModel):
 
     @model_validator(mode="after")
     def ensure_path(self) -> Self:
+        """Ensure that path is set if git or watch is set."""
         if self.git and not self.path:
             raise ValueError("git autorun requires path")
         if self.watch and not self.path:
@@ -31,6 +35,8 @@ class ConfigAutoRun(BaseModel):
 
 
 class ConfigCommand(BaseModel):
+    """A command to run."""
+
     name: str
     cmd: str
     cwd: Path | None = None
@@ -38,6 +44,8 @@ class ConfigCommand(BaseModel):
 
 
 class ConfigCommandGroup(BaseModel):
+    """A group of commands or subgroups."""
+
     name: str
     commands: list[ConfigCommand] = []
     children: list["ConfigCommandGroup"] = []
@@ -54,9 +62,12 @@ class ConfigCommandGroup(BaseModel):
 
 
 class ConfigRoot(ConfigCommandGroup):
+    """The root config object."""
+
     fnug_version: Literal["0.1.0"]
 
     def model_post_init(self, __context: Any) -> None:
+        """Post-init hook to propagate autorun settings."""
         self._propagate_autorun()
 
 
@@ -64,6 +75,7 @@ RootConfigValidator = TypeAdapter(ConfigRoot)
 
 
 def load_config(path: Path) -> ConfigRoot:
+    """Load a config file."""
     if path.suffix in [".yaml", ".yml"]:
         data = yaml.safe_load(Path.open(path, "rb").read())
         return RootConfigValidator.validate_python(data)

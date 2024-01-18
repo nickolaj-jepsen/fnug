@@ -11,6 +11,7 @@ DEFAULT_FILE_NAMES = [".fnug.json", ".fnug.yaml", ".fnug.yml"]
 @click.command()
 @click.option("--config", "-c", type=click.Path(), help="Config file")
 def cli(config: str | None = None):
+    """Entrypoint for the fnug CLI."""
     if config is None:
         for file_name in DEFAULT_FILE_NAMES:
             if Path(file_name).exists():
