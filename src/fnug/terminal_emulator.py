@@ -1,11 +1,12 @@
 import asyncio
 import fcntl
+import math
 import os
 import struct
 import termios
 from pathlib import Path
 from typing import Literal
-import math
+
 import pyte
 from rich.console import Console
 from rich.text import Text
@@ -14,8 +15,7 @@ from textual.geometry import Size
 
 class FixedHistoryScreen(pyte.HistoryScreen):
     def prev_page(self) -> None:
-        """
-        Excatly like pyte.HistoryScreen.prev_page but allows scrolling to the top of the buffer,
+        """Excatly like pyte.HistoryScreen.prev_page but allows scrolling to the top of the buffer,
 
         This is done by loosening the condition for when to allow scrolling up.
         """

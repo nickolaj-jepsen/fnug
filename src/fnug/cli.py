@@ -2,9 +2,8 @@ from pathlib import Path
 
 import click
 
-from fnug.config import load_config
 from fnug import FnugApp
-
+from fnug.config import load_config
 
 DEFAULT_FILE_NAMES = [".fnug.json", ".fnug.yaml", ".fnug.yml"]
 

@@ -18,7 +18,7 @@ def _detect_repo_root(path: Path) -> Path | None:
     try:
         return Path(
             subprocess.check_output(
-                cmd,
+                cmd,  # noqa: S603
                 cwd=path.as_posix(),
                 stderr=subprocess.DEVNULL,
             )
@@ -44,12 +44,12 @@ def _git_status(path: Path) -> list[str]:
     ]
 
     sub_path = path.relative_to(repo_path)
-    if sub_path != Path("."):
+    if sub_path != Path():
         cmd.append(sub_path.as_posix())
 
     lines = (
         subprocess.check_output(
-            cmd,
+            cmd,  # noqa: S603
             stderr=subprocess.DEVNULL,
         )
         .decode()

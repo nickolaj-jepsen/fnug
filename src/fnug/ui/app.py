@@ -8,7 +8,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal
 from textual.geometry import Size
-from textual.scrollbar import ScrollBar, ScrollTo, ScrollDown, ScrollUp
+from textual.scrollbar import ScrollBar, ScrollDown, ScrollTo, ScrollUp
 from textual.widgets import Footer
 
 from fnug.config import ConfigRoot

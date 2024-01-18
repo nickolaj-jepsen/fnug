@@ -1,23 +1,24 @@
 import asyncio
 import re
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal, Iterator, DefaultDict
+from typing import ClassVar, Literal
 
 from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.binding import Binding, BindingType
-from textual.geometry import Region, Offset
+from textual.geometry import Offset, Region
 from textual.message import Message
 from textual.reactive import Reactive
 from textual.widgets import Tree
-from textual.widgets._tree import TreeNode, TOGGLE_STYLE
+from textual.widgets._tree import TOGGLE_STYLE, TreeNode
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
-from fnug.config import ConfigRoot, ConfigCommandGroup, ConfigCommand
-from fnug.git import detect_repo_changes, clear_git_cache
+from fnug.config import ConfigCommand, ConfigCommandGroup, ConfigRoot
+from fnug.git import clear_git_cache, detect_repo_changes
 
 StatusType = Literal["success", "failure", "running", "pending"]
 
@@ -35,7 +36,6 @@ class LintTreeDataType:
 
 def update_node(node: TreeNode[LintTreeDataType]):
     """Updates a node (recursively)"""
-
     node.expand()
     node.refresh()
     if node.parent:
@@ -43,8 +43,7 @@ def update_node(node: TreeNode[LintTreeDataType]):
 
 
 def select_node(node: TreeNode[LintTreeDataType]):
-    """
-    Selects a node
+    """Selects a node
 
     Also expands all parents
     """
@@ -55,8 +54,7 @@ def select_node(node: TreeNode[LintTreeDataType]):
 
 
 def unselect_node(node: TreeNode[LintTreeDataType]):
-    """
-    Unselects a node
+    """Unselects a node
 
     Also expands all parents
     """
@@ -67,9 +65,7 @@ def unselect_node(node: TreeNode[LintTreeDataType]):
 
 
 def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | None = None):
-    """
-    Toggle a node (recursively if with children)
-    """
+    """Toggle a node (recursively if with children)"""
     if not node.data:
         return
 
@@ -86,18 +82,14 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
 
 
 def all_nodes(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
-    """
-    Get all nodes (recursively)
-    """
+    """Get all nodes (recursively)"""
     yield source_node
     for child in source_node.children:
         yield from all_nodes(child)
 
 
 def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
-    """
-    Get all command children of a node (recursively)
-    """
+    """Get all command children of a node (recursively)"""
     for child in source_node.children:
         if child.data and child.data.type == "command":
             yield child
@@ -188,7 +180,7 @@ def attach_command(
 
 
 async def watch_autorun_task(command_nodes: Iterator[TreeNode[LintTreeDataType]], cwd: Path):
-    paths: DefaultDict[Path, list[TreeNode[LintTreeDataType]]] = defaultdict(list)
+    paths: defaultdict[Path, list[TreeNode[LintTreeDataType]]] = defaultdict(list)
 
     for node in command_nodes:
         if not node.data or not node.data.command or not node.data.command.autorun.path:
@@ -296,8 +288,7 @@ class LintTree(Tree[LintTreeDataType]):
         region = super()._get_label_region(line)
         if region is None:
             return None
-        region = region._replace(x=region.x - 2)
-        return region
+        return region._replace(x=region.x - 2)
 
     def update_status(self, command_id: str, status: StatusType):
         node = self.command_leafs[command_id]
@@ -405,10 +396,7 @@ class LintTree(Tree[LintTreeDataType]):
                 ]
 
             group_count = Text.assemble(*group_count_pieces)
-            if node.is_expanded:
-                dropdown = ("▼ ", base_style + TOGGLE_STYLE)
-            else:
-                dropdown = ("▶ ", base_style + TOGGLE_STYLE)
+            dropdown = ("▼ ", base_style + TOGGLE_STYLE) if node.is_expanded else ("▶ ", base_style + TOGGLE_STYLE)
 
         command_status = getattr(node.data, "status", "")
         if command_status == "success":
@@ -435,8 +423,7 @@ class LintTree(Tree[LintTreeDataType]):
         else:
             selection = ("", base_style)
 
-        text = Text.assemble(dropdown, selection, node_label, status, group_count)
-        return text
+        return Text.assemble(dropdown, selection, node_label, status, group_count)
 
     def on_mount(self):
         self.watch_task = asyncio.create_task(watch_autorun_task(all_commands(self.root), self.cwd))

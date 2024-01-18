@@ -2,24 +2,20 @@ import asyncio
 import re
 from typing import ClassVar
 
+from pyte import Screen
 from pyte.screens import Char
-from rich.console import Console, ConsoleOptions, ConsoleRenderable
-from rich.text import Text
+from rich.console import Console, ConsoleOptions, ConsoleRenderable, RenderResult
 from rich.style import Style
+from rich.text import Text
 from textual import events
 from textual.binding import Binding, BindingType
 from textual.events import Key, MouseMove
 from textual.keys import Keys
 from textual.reactive import reactive
 from textual.scrollbar import ScrollBar
-
 from textual.widget import Widget
 
-
-from pyte import Screen
-
 from fnug.terminal_emulator import TerminalEmulator
-
 
 CTRL_KEYS: dict[str, str] = {
     Keys.Up: "\x1bOA",
@@ -68,12 +64,9 @@ def color_translator(color: str) -> str:
 
 def style_from_pyte(char: Char) -> Style:
     foreground = color_translator(char.fg)
-    if char.bg == "default":
-        background = "#1e1e1e"
-    else:
-        background = color_translator(char.bg)
+    background = "#1e1e1e" if char.bg == "default" else color_translator(char.bg)
 
-    style = Style(
+    return Style(
         color=foreground,
         bgcolor=background,
         bold=char.bold,
@@ -83,8 +76,6 @@ def style_from_pyte(char: Char) -> Style:
         strike=char.strikethrough,
         reverse=char.reverse,
     )
-
-    return style
 
 
 def pyte2rich(screen: Screen) -> list[Text]:
@@ -123,9 +114,8 @@ class TerminalDisplay(ConsoleRenderable):
     def __init__(self, lines: list[Text]):
         self.lines: list[Text] = lines
 
-    def __rich_console__(self, console: Console, options: ConsoleOptions):
-        for line in self.lines:
-            yield line
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        yield from self.lines
 
 
 class Terminal(Widget, can_focus=True):

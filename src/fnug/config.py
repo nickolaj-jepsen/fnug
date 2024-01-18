@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import Literal, Any, Self
-from pydantic import TypeAdapter, BaseModel, model_validator
+from typing import Any, Literal, Self
+
 import yaml
+from pydantic import BaseModel, TypeAdapter, model_validator
 
 
 class ConfigAutoRun(BaseModel):
@@ -64,6 +65,6 @@ RootConfigValidator = TypeAdapter(ConfigRoot)
 
 def load_config(path: Path) -> ConfigRoot:
     if path.suffix in [".yaml", ".yml"]:
-        data = yaml.safe_load(open(path, "rb").read())
+        data = yaml.safe_load(Path.open(path, "rb").read())
         return RootConfigValidator.validate_python(data)
-    return RootConfigValidator.validate_json(open(path, "rb").read())
+    return RootConfigValidator.validate_json(Path.open(path, "rb").read())
