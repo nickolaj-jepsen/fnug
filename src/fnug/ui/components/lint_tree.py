@@ -17,7 +17,7 @@ from textual.widgets._tree import TreeNode, TOGGLE_STYLE
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
 from fnug.config import ConfigRoot, ConfigCommandGroup, ConfigCommand
-from fnug.git import detect_repo_changes
+from fnug.git import detect_repo_changes, clear_git_cache
 
 StatusType = Literal["success", "failure", "running", "pending"]
 
@@ -95,6 +95,8 @@ def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[L
 def select_git_autorun(cwd: Path, node: TreeNode[LintTreeDataType]):
     if not node.data or not node.data.command:
         return
+
+    clear_git_cache()
 
     autorun = node.data.command.autorun
 

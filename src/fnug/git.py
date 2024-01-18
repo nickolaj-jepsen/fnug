@@ -60,6 +60,11 @@ def _git_status(path: Path) -> list[str]:
     return [line[3:] for line in lines]
 
 
+def clear_git_cache() -> None:
+    _detect_repo_root.cache_clear()
+    _git_status.cache_clear()
+
+
 def detect_repo_changes(path: Path, regex: list[str] | None = None) -> bool:
     files = _git_status(path)
     if regex:
