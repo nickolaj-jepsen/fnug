@@ -52,14 +52,6 @@ def select_node(node: TreeNode[LintTreeDataType]):
     update_node(node)
 
 
-def unselect_node(node: TreeNode[LintTreeDataType]):
-    """Deselects a node."""
-    if node.data is None:
-        return
-    node.data.selected = False
-    update_node(node)
-
-
 def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | None = None):
     """Toggle a node (recursively if with children)."""
     if not node.data:
@@ -111,7 +103,8 @@ def select_git_autorun(cwd: Path, node: TreeNode[LintTreeDataType]):
                 node.data.selected = True
                 continue
 
-    update_node(node)
+    if node.data.selected:
+        update_node(node)
 
 
 @dataclass

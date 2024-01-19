@@ -36,3 +36,9 @@ children:
             autorun:
               always: false
             cmd: cat src/fnug/terminal_emulator.py
+      - name: not-expanded
+        autorun:
+          always: false
+        commands:
+          - name: test-not-expanded
+            cmd: cat src/fnug/terminal_emulator.py
