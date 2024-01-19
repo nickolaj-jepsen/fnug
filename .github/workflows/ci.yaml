@@ -7,7 +7,30 @@ on:
       - main
 
 jobs:
-  code-lint:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Setup Rye
+        uses: eifinger/setup-rye@v1
+        with:
+          enable-cache: true
+          cache-prefix: 3.12
+          version: '0.17.0'
+      - name: Pin python version
+        run: rye pin 3.12
+      - name: Install dependencies
+        run: rye sync
+      - name: Run lint
+        run: |
+          rye run -- ruff check --output-format=github src/
+          rye run -- black --check src/
+          rye run -- pyright src
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -28,8 +51,10 @@ jobs:
         run: rye pin ${{ matrix.python-version }}
       - name: Install dependencies
         run: rye sync
-      - name: Run lint
-        run: |
-          rye run -- ruff check --output-format=github src/
-          rye run -- black --check src/
-          rye run -- pyright src
+      - name: Run tests
+        run: rye run test
+      - name: Upload coverage
+        uses: actions/upload-artifact@v2
+        with:
+          name: coverage
+          path: .coverage

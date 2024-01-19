@@ -1,7 +1,7 @@
 fnug_version: 0.1.0
 name: fnug
 children:
-  - name: lint
+  - name: fnug
     autorun:
       watch: true
       git: true
@@ -16,7 +16,9 @@ children:
         cmd: rye run pyright src
       - name: ruff
         cmd: rye run ruff --fix src
-  - name: fnug-test
+      - name: test
+        cmd: rye run test
+  - name: debug
     commands:
       - name: htop
         cmd: htop

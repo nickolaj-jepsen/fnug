@@ -69,13 +69,6 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
         toggle_select_node(child, override_value=override_value)
 
 
-def all_nodes(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
-    """Get all nodes (recursively)."""
-    yield source_node
-    for child in source_node.children:
-        yield from all_nodes(child)
-
-
 def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[LintTreeDataType]]:
     """Get all command children of a node (recursively)."""
     for child in source_node.children:
