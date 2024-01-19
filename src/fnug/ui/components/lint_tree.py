@@ -63,7 +63,7 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
     update_node(node)
 
     for child in node.children:
-        if child.data:
+        if not child.data:
             continue
 
         toggle_select_node(child, override_value=override_value)
