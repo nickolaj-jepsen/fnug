@@ -54,13 +54,10 @@ CTRL_KEYS: dict[str, str] = {
 
 def color_translator(color: str) -> str:
     """Translate a pyte color to a rich color."""
-    if color == "brown":
-        return "yellow"
-
     if re.match("[0-9a-f]{6}", color, re.IGNORECASE):
         return f"#{color}"
 
-    return color.replace("bright", "bright_")
+    return color.replace("bright", "bright_").replace("brown", "yellow")
 
 
 def style_from_pyte(char: Char) -> Style:
