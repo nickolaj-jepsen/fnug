@@ -8,7 +8,7 @@ on:
       - "pyproject.toml"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -55,4 +55,3 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-          token: ${{ secrets.GITHUB_TOKEN }}
