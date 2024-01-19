@@ -1,0 +1,58 @@
+name: "Release"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check pypi versions
+        uses: maybe-hello-world/pyproject-check-version@v4
+        id: versioncheck
+        with:
+          pyproject-path: "./pyproject.toml"    # default value
+      - name: Setup Python
+        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Setup Rye
+        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
+        uses: eifinger/setup-rye@v1
+        with:
+          enable-cache: true
+          cache-prefix: 3.12
+          version: '0.17.0'
+      - name: Pin python version
+        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
+        run: rye pin 3.12
+      - name: Install dependencies
+        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
+        run: rye sync
+      - name: Build
+        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
+        run: rye build
+      - name: Publish
+        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
+        run: rye publish --token ${{ secrets.PYPI_API_TOKEN }} --yes
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
+        with:
+          files: |
+            dist/*
+          tag_name: ${{ steps.versioncheck.outputs.local_version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}
