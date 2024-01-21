@@ -10,6 +10,7 @@ from textual.containers import Horizontal
 from textual.geometry import Size
 from textual.scrollbar import ScrollBar, ScrollDown, ScrollTo, ScrollUp
 from textual.widgets import Footer
+from textual.worker import Worker
 
 from fnug.config import ConfigRoot
 from fnug.terminal_emulator import TerminalEmulator
@@ -22,8 +23,8 @@ class TerminalInstance:
     """A collection of tasks and emulator for a terminal."""
 
     emulator: TerminalEmulator
-    reader_task: asyncio.Task[None]
-    run_task: asyncio.Task[None]
+    reader_task: Worker[None]
+    run_task: Worker[None]
 
 
 class FnugApp(App[None]):
@@ -35,7 +36,7 @@ class FnugApp(App[None]):
 
     terminals: ClassVar[dict[str, TerminalInstance]] = {}
     active_terminal_id: str | None = None
-    display_task: asyncio.Task[None] | None = None
+    display_task: Worker[None] | None = None
     update_ready = asyncio.Event()
 
     def __init__(self, config: ConfigRoot, cwd: Path | None = None):
@@ -76,7 +77,7 @@ class FnugApp(App[None]):
             self.display_task.cancel()
             self._terminal.clear()
         if event.node.data:
-            self.display_task = asyncio.create_task(self._display_terminal(event.node.data.id))
+            self.display_task = self.run_worker(self._display_terminal(event.node.data.id), name="display_task")
 
     @on(LintTree.RunCommand, "#lint-tree")
     def _action_run_command(self, event: LintTree.RunCommand):
@@ -150,13 +151,13 @@ class FnugApp(App[None]):
 
         self.terminals[command.id] = TerminalInstance(
             emulator=te,
-            reader_task=asyncio.create_task(te.reader()),
-            run_task=asyncio.create_task(run_shell()),
+            reader_task=self.run_worker(te.reader()),
+            run_task=self.run_worker(run_shell()),
         )
         if not background and self.display_task is not None:
             self.display_task.cancel()
         if not background:
-            self.display_task = asyncio.create_task(self._display_terminal(command.id))
+            self.display_task = self.run_worker(self._display_terminal(command.id), name="display_task")
         self.update_ready.set()
 
     def _stop_command(self, command_id: str):

@@ -1,4 +1,3 @@
-import asyncio
 import re
 from collections import defaultdict
 from collections.abc import Iterator
@@ -15,6 +14,7 @@ from textual.message import Message
 from textual.reactive import Reactive
 from textual.widgets import Tree
 from textual.widgets._tree import TOGGLE_STYLE, TreeNode
+from textual.worker import Worker
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
 from fnug.config import ConfigCommand, ConfigCommandGroup, ConfigRoot
@@ -200,7 +200,7 @@ class LintTree(Tree[LintTreeDataType]):
 
     guide_depth = 3
     show_root = False
-    watch_task: asyncio.Task[None] | None = None
+    watch_task: Worker[None] | None = None
     grabbed: Reactive[Offset | None] = Reactive(None)
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -430,7 +430,7 @@ class LintTree(Tree[LintTreeDataType]):
         return Text.assemble(dropdown, selection, node_label, status, group_count)
 
     def _on_mount(self, event: events.Mount):
-        self.watch_task = asyncio.create_task(watch_autorun_task(all_commands(self.root), self.cwd))
+        self.watch_task = self.run_worker(watch_autorun_task(all_commands(self.root), self.cwd))
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         # We don't want mouse events on the scrollbar bubbling
