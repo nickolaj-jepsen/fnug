@@ -5,28 +5,32 @@
 [![image](https://img.shields.io/pypi/pyversions/fnug.svg)](https://pypi.python.org/pypi/fnug)
 [![Actions status](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
 
-Fnug /_fnuk_/ is a lint runner, well actually it's a terminal multiplexer (like e.g. [tmux](https://github.com/tmux/tmux/wiki)), but with a focus on running lint commands defined in a [`.fnug.yaml`](#config) file, and displaying the result of those command.
+Fnug /_fnuk_/ is a command runner, well actually it's a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but with a focus on running lint and test commands, and displaying the result of those command. Confused? Watch the [demo](#demo)
 
-> [!IMPORTANT]
-> This is prerelease software, breaking changes might be introduced in minor versions!
+![screenshot](https://github.com/nickolaj-jepsen/fnug/assets/1039554/3fd812fc-e1dc-4dd2-86eb-de91dc8e027f)
 
 ## Installation
 
-Currently, only Python 3.11 and 3.12 is supported. [pipx](https://github.com/pypa/pipx) is highly recommended:
+Currently, only Python 3.11 and 3.12 is supported. [pipx](https://github.com/pypa/pipx) or [rye tool](https://rye-up.com/guide/tools/) are highly recommended:
 
 ```bash
+# Recommended
 pipx install fnug
+# (or with rye tool)
+rye install fnug
+# Via pip (NOT RECOMMENDED)
+pip install fnug
 ```
 
-## Demo
+## Usage
 
-https://github.com/nickolaj-jepsen/fnug/assets/1039554/a0c47289-9670-4d81-aa24-39204caf8c89
+To start `fnug` you only need to run it in a directory with a `.fnug.yaml` configuration file (or with the argument `-c path/to/config.yaml`)
 
-## Config
+### Config
 
-Fnug is controlled by a `.fnug.yaml`, a minimal example would be:
+Fnug is controlled by a `.fnug.yaml` configuration file (or `.fnug.json` if thats more your speed).
 
-### Minimal example:
+#### Minimal example:
 
 Runs a single commands (without autorun)
 
@@ -38,7 +42,7 @@ commands:
     cmd: echo world
 ```
 
-### Git autorun example:
+#### Git autorun example:
 
 Uses git autorun to select commands (reselect by pressing "g")
 
@@ -56,7 +60,7 @@ commands:
         - "\\.fnug\\.yaml$"
 ```
 
-### Watch autorun example:
+#### Watch autorun example:
 
 Uses file autorun to monitor the file system for changes, and select commands accordingly, can be combined with git autorun
 
@@ -74,9 +78,13 @@ commands:
         - "\\.fnug\\.yaml$"
 ```
 
-### Advanced example:
+#### Advanced example:
 
 View this projects [`.fnug.yaml`](.fnug.yaml) file for an advanced example
+
+## Demo
+
+https://github.com/nickolaj-jepsen/fnug/assets/1039554/a0c47289-9670-4d81-aa24-39204caf8c89
 
 ## Development
 
