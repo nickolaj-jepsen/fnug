@@ -57,8 +57,18 @@ def toggle_select_node(node: TreeNode[LintTreeDataType], override_value: bool | 
     if not node.data:
         return
 
-    if override_value is None:
+    if node.data.type == "group" and override_value is None:
+        # Instead of basing the override value on the previous state, we base it on the children states.
+        result = sum_selected_commands(node)
+        if result.selected == 0:
+            override_value = True
+        elif result.selected == result.total:
+            override_value = False
+        else:
+            override_value = False
+    elif override_value is None:
         override_value = not node.data.selected
+
     node.data.selected = override_value
     update_node(node)
 
