@@ -216,6 +216,7 @@ class LintTree(Tree[LintTreeDataType]):
         Binding("j", "cursor_down", "Cursor Down", show=False),
         # Controls
         Binding("r", "run", "Run"),
+        Binding("ctrl+r", "exclusive_run", "Run fullscreen"),
         Binding("s", "stop", "Stop"),
         Binding("space", "toggle_select", "Select"),
         Binding("g", "select_git", "Select git autorun commands", show=False),
@@ -223,6 +224,16 @@ class LintTree(Tree[LintTreeDataType]):
     ]
 
     class RunCommand(Message):
+        def __init__(self, node: TreeNode[LintTreeDataType]) -> None:
+            self.node: TreeNode[LintTreeDataType] = node
+            super().__init__()
+
+        @property
+        def control(self) -> Tree[LintTreeDataType]:
+            """The tree that sent the message."""
+            return self.node.tree
+
+    class RunExclusiveCommand(Message):
         def __init__(self, node: TreeNode[LintTreeDataType]) -> None:
             self.node: TreeNode[LintTreeDataType] = node
             super().__init__()
@@ -300,6 +311,12 @@ class LintTree(Tree[LintTreeDataType]):
         if self.cursor_node is None:
             return
         self.post_message(self.RunCommand(self.cursor_node))
+
+    def action_exclusive_run(self) -> None:
+        """Run a command in exclusive mode."""
+        if self.cursor_node is None:
+            return
+        self.post_message(self.RunExclusiveCommand(self.cursor_node))
 
     def action_stop(self) -> None:
         """Stop a running command."""

@@ -1,10 +1,12 @@
 import asyncio
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
+import rich
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -17,7 +19,7 @@ from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
 from fnug.config import ConfigRoot
-from fnug.terminal_emulator import TerminalEmulator
+from fnug.terminal_emulator import TerminalEmulator, failure_message, start_message, success_message
 from fnug.ui.components.lint_tree import LintTree, LintTreeDataType, update_node
 from fnug.ui.components.terminal import Terminal
 
@@ -119,6 +121,29 @@ class FnugApp(App[None]):
     def _action_run_command(self, event: LintTree.RunCommand):
         if event.node.data is not None:
             self._run_command(event.node.data)
+
+    @on(LintTree.RunExclusiveCommand, "#lint-tree")
+    def _action_run_exclusive_command(self, event: LintTree.RunExclusiveCommand):
+        if event.node.data is None or event.node.data.command is None:
+            return
+
+        # stop existing command, if it's running
+        self._stop_command(event.node.data.id)
+
+        with self.suspend():
+            subprocess.run("clear")  # noqa: S603,S607
+            rich.print(start_message(event.node.data.command.cmd))
+            process = subprocess.run(event.node.data.command.cmd, shell=True)  # noqa: S602
+            exit_code = process.returncode
+            if exit_code == 0:
+                rich.print(success_message())
+                status = "success"
+            else:
+                rich.print(failure_message(exit_code))
+                status = "failure"
+
+            input("\nPress enter key to continue...")
+        self.lint_tree.update_status(event.node.data.id, status)
 
     @on(LintTree.StopCommand, "#lint-tree")
     def _action_stop_command(self, event: LintTree.RunCommand):

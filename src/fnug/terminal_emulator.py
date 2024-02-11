@@ -13,6 +13,27 @@ from rich.text import Text
 from textual.geometry import Size
 
 
+def start_message(command: str) -> Text:
+    """Create a start message for a command."""
+    return Text.assemble(Text("❱ ", style="#cf6a4c"), Text(command), Text("\n"))
+
+
+def success_message() -> Text:
+    """Create a success message."""
+    return Text.assemble(Text("\n"), Text("❱ ", style="#cf6a4c"), Text("Success"), Text(" ✔", style="green"))
+
+
+def failure_message(exit_code: int) -> Text:
+    """Create a failure message."""
+    return Text.assemble(
+        Text("\n"),
+        Text("❱ ", style="#cf6a4c"),
+        Text("Command failed"),
+        Text(" ✘", style="red"),
+        Text(f" (exit code {exit_code})", style="#808080"),
+    )
+
+
 class FixedHistoryScreen(pyte.HistoryScreen):
     """
     Exactly like pyte.HistoryScreen but allows scrolling to the top of the buffer.
@@ -78,8 +99,7 @@ class TerminalEmulator:
     async def run_shell(self, command: str, cwd: Path) -> bool:
         """Run a shell command in a subprocess, and send the output to the tty."""
         # Echo command to tty
-        prefix = Text("❱ ", style="#cf6a4c")
-        self.echo(Text.assemble(prefix, Text(command), Text("\n")))
+        self.echo(start_message(command))
 
         process = await asyncio.subprocess.create_subprocess_shell(
             command,
@@ -98,17 +118,9 @@ class TerminalEmulator:
             raise
 
         if code == 0:
-            self.echo(Text.assemble(Text("\n"), prefix, Text("Success"), Text(" ✔", style="green")))
+            self.echo(success_message())
         else:
-            self.echo(
-                Text.assemble(
-                    Text("\n"),
-                    prefix,
-                    Text("Command failed"),
-                    Text(" ✘", style="red"),
-                    Text(f" (exit code {code})", style="#808080"),
-                )
-            )
+            self.echo(failure_message(code))
 
         self.finished.set()
         return code == 0
