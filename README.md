@@ -5,9 +5,16 @@
 [![image](https://img.shields.io/pypi/pyversions/fnug.svg)](https://pypi.python.org/pypi/fnug)
 [![Actions status](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
 
-Fnug /_fnuk_/ is a command runner, well actually it's a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but with a focus on running lint and test commands, and displaying the result of those command. Confused? Watch the [demo](#demo)
+Fnug /_fnuk_/ is a command runner, well actually it's a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but with a focus on running all your lint and test commands, at once, and displaying the result of those command. Confused? Watch the [demo](#demo)
 
 ![screenshot](https://github.com/nickolaj-jepsen/fnug/assets/1039554/3fd812fc-e1dc-4dd2-86eb-de91dc8e027f)
+
+## Features
+
+- User-friendly terminal interface, with 100% support for both keyboard and mouse navigation
+- Git integration, automatically select lints and tests that's should be run, based on what files have uncommitted changes
+- Track file changes, and selects commands based on the changed files
+- Terminal emulation with scroll back, for those really long error messages
 
 ## Installation
 
