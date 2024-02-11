@@ -56,7 +56,7 @@ dev-dependencies = [
 
 [tool.rye.scripts]
 # Use console and debug to run the app with the textual debugger attached
-console = "textual console -x event -x system"
+console = "textual console -x event -x system -x worker"
 debug = "textual run --dev -c fnug"
 test = "pytest tests/"
 
