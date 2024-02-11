@@ -7,10 +7,10 @@ authors = [
 ]
 dependencies = [
     "click>=8.1.7",
-    "textual>=0.40.0",
-    "rich>=0.47.1",
-    "pydantic>=2.5.3",
-    "pyte>=0.8.1",
+    "textual>=0.50.1",
+    "rich>=13.7.0",
+    "pydantic>=2.6.1",
+    "pyte>=0.8.2",
     "pyyaml>=6.0.1",
     "watchfiles>=0.21.0",
 ]
