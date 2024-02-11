@@ -15,7 +15,7 @@ dependencies = [
     "watchfiles>=0.21.0",
 ]
 readme = "README.md"
-requires-python = ">= 3.11"
+requires-python = ">= 3.10"
 license = "GPL-3.0"
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -28,6 +28,7 @@ classifiers = [
     "Topic :: Terminals :: Terminal Emulators/X Terminals",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
@@ -68,7 +69,7 @@ packages = ["src/fnug"]
 
 [tool.black]
 line-length = 120
-target-version = ["py311"]
+target-version = ["py310"]
 
 [tool.ruff]
 line-length = 120
@@ -101,7 +102,7 @@ ignore = [
     "D212",
 ]
 src = ["src"]
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint.per-file-ignores]
 "**/{tests}/*" = ["D", "S101"]

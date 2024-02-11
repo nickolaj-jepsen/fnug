@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, TypeAdapter, model_validator
@@ -14,7 +14,7 @@ class ConfigAutoRun(BaseModel):
     regex: list[str] | None = None
     path: list[Path] | None = None
 
-    def merge(self, other: Self):
+    def merge(self, other: "ConfigAutoRun"):
         """Merge two autorun configs."""
         return ConfigAutoRun(
             git=self.git if self.git is not None else other.git,
@@ -25,7 +25,7 @@ class ConfigAutoRun(BaseModel):
         )
 
     @model_validator(mode="after")
-    def ensure_path(self) -> Self:
+    def ensure_path(self):
         """Ensure that path is set if git or watch is set."""
         if self.git and not self.path:
             raise ValueError("git autorun requires path")

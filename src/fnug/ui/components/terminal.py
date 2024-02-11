@@ -165,15 +165,15 @@ class Terminal(Widget, can_focus=False):
         """Attach a terminal emulator to this widget."""
         self.emulator = emulator
         self.can_focus = emulator.can_focus
-        while True:
-            try:
+        try:
+            while True:
                 event.clear()
                 self.terminal_display = TerminalDisplay(pyte2rich(emulator.screen))
                 self.update_scrollbar(scrollbar)
                 self.refresh()
                 await event.wait()
-            except asyncio.CancelledError:
-                break
+        except asyncio.CancelledError:
+            pass
 
     async def _on_key(self, event: Key) -> None:
         if self.emulator is None:

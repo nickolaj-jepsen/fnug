@@ -18,7 +18,9 @@ Fnug /_fnuk_/ is a command runner, well actually it's a terminal multiplexer (li
 
 ## Installation
 
-Currently, only Python 3.11 and 3.12 is supported. [pipx](https://github.com/pypa/pipx) or [rye tool](https://rye-up.com/guide/tools/) are highly recommended:
+Python 3.10 or later is required.
+
+[pipx](https://github.com/pypa/pipx) or [rye tool](https://rye-up.com/guide/tools/) are highly recommended:
 
 ```bash
 # Recommended
