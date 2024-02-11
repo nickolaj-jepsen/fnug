@@ -48,11 +48,11 @@ build-backend = "hatchling.build"
 [tool.rye]
 managed = true
 dev-dependencies = [
-    "black>=23.12.1",
-    "ruff>=0.1.11",
-    "pyright>=1.1.345",
+    "black>=24.1.1",
+    "ruff>=0.2.1",
+    "pyright>=1.1.350",
     "textual-dev>=1.4.0",
-    "pytest>=7.4.4",
+    "pytest>=8.0.0",
 ]
 
 [tool.rye.scripts]
@@ -73,6 +73,10 @@ target-version = ["py310"]
 
 [tool.ruff]
 line-length = 120
+src = ["src", "tests"]
+target-version = "py310"
+
+[tool.ruff.lint]
 select = [
     "F",    # pyflakes
     "E",    # pycodestyle
@@ -101,8 +105,6 @@ ignore = [
     "D203",
     "D212",
 ]
-src = ["src"]
-target-version = "py310"
 
 [tool.ruff.lint.per-file-ignores]
 "**/{tests}/*" = ["D", "S101"]

@@ -15,7 +15,7 @@ children:
       - name: pyright
         cmd: rye run pyright src
       - name: ruff
-        cmd: rye run ruff --fix src
+        cmd: rye run ruff --fix .
       - name: test
         cmd: rye run test
   - name: debug
