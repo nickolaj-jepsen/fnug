@@ -40,6 +40,7 @@ class ConfigCommand(BaseModel):
     name: str
     cmd: str
     cwd: Path | None = None
+    interactive: bool = False
     autorun: ConfigAutoRun = ConfigAutoRun()
 
 

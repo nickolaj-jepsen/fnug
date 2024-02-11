@@ -39,7 +39,7 @@ class FixedHistoryScreen(pyte.HistoryScreen):
 class TerminalEmulator:
     """A terminal emulator."""
 
-    def __init__(self, dimensions: Size, event: asyncio.Event):
+    def __init__(self, dimensions: Size, event: asyncio.Event, can_focus: bool = False):
         self.pty, self.tty = os.openpty()
         self.out = os.fdopen(self.pty, "r+b", 0)
         self.screen = FixedHistoryScreen(dimensions.width, dimensions.height, history=5000, ratio=0.25)
@@ -47,6 +47,7 @@ class TerminalEmulator:
         self.update_ready = event
         self.finished = asyncio.Event()
         self.dimensions = dimensions
+        self.can_focus = can_focus
 
     async def reader(self):
         """Read data from the pty and feed it to the terminal."""

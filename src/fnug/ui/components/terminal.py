@@ -119,14 +119,14 @@ class TerminalDisplay(ConsoleRenderable):
         yield from self.lines
 
 
-class Terminal(Widget, can_focus=True):
+class Terminal(Widget, can_focus=False):
     """Terminal textual widget."""
 
     emulator: TerminalEmulator | None = None
     show_vertical_scrollbar = reactive(True)
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("tab", "unfocus", "Switch focus"),
+        Binding("shift+tab", "unfocus", "Switch focus"),
     ]
 
     def __init__(
@@ -164,6 +164,7 @@ class Terminal(Widget, can_focus=True):
     async def attach_emulator(self, emulator: TerminalEmulator, event: asyncio.Event, scrollbar: ScrollBar):
         """Attach a terminal emulator to this widget."""
         self.emulator = emulator
+        self.can_focus = emulator.can_focus
         while True:
             try:
                 event.clear()
@@ -178,7 +179,7 @@ class Terminal(Widget, can_focus=True):
         if self.emulator is None:
             return
 
-        if event.key == "tab":
+        if event.key == "shift+tab":
             self.app.set_focus(None)
             return
 

@@ -185,7 +185,11 @@ class FnugApp(App[None]):
         tree = self.lint_tree
         tree.update_status(command.id, "running")
 
-        te = TerminalEmulator(self._terminal_size(), self.update_ready)
+        te = TerminalEmulator(
+            self._terminal_size(),
+            self.update_ready,
+            can_focus=command.command.interactive if command.command else False,
+        )
 
         async def run_shell():
             cwd = self.cwd

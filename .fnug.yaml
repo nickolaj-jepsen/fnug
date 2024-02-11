@@ -22,8 +22,10 @@ children:
     commands:
       - name: htop
         cmd: htop
+        interactive: true
       - name: recursive?!
         cmd: fnug
+        interactive: true
       - name: A very very very long file
         cmd: cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py ; cat
           src/fnug/terminal_emulator.py
