@@ -1,21 +1,58 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal
 from textual.geometry import Size
 from textual.scrollbar import ScrollBar, ScrollDown, ScrollTo, ScrollUp
 from textual.widgets import Footer
+from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
 from fnug.config import ConfigRoot
 from fnug.terminal_emulator import TerminalEmulator
-from fnug.ui.components.lint_tree import LintTree, LintTreeDataType
+from fnug.ui.components.lint_tree import LintTree, LintTreeDataType, update_node
 from fnug.ui.components.terminal import Terminal
+
+
+class _CommandProvider(Provider):
+    commands: dict[str, TreeNode[LintTreeDataType]]
+
+    async def startup(self) -> None:
+        app = self.app
+        if not isinstance(app, FnugApp):
+            return
+
+        self.commands = app.lint_tree.command_leafs
+
+    async def search(self, query: str) -> Hits:
+        """Search for Python files."""
+        app = self.app
+        if not isinstance(app, FnugApp):
+            return
+
+        matcher = self.matcher(query)
+
+        for node_id, node in self.commands.items():
+            if not node.data:
+                continue
+
+            score = matcher.match(node_id)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(node.data.name),
+                    partial(app.display_terminal, node_id),
+                    text=node.data.name,
+                    help=node_id,
+                )
 
 
 @dataclass
@@ -30,6 +67,7 @@ class TerminalInstance:
 class FnugApp(App[None]):
     """A Textual app to manage stopwatches."""
 
+    COMMANDS: ClassVar[set[type[Provider] | Callable[[], type[Provider]]]] = {_CommandProvider}
     CSS_PATH = "app.tcss"
 
     BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "quit", "Quit", show=False)]
@@ -60,7 +98,8 @@ class FnugApp(App[None]):
         return self.terminals[self.active_terminal_id]
 
     @property
-    def _lint_tree(self) -> LintTree:
+    def lint_tree(self) -> LintTree:
+        """The lint tree."""
         return self.query_one("#lint-tree", LintTree)
 
     @property
@@ -73,11 +112,8 @@ class FnugApp(App[None]):
 
     @on(LintTree.NodeHighlighted, "#lint-tree")
     def _switch_terminal(self, event: LintTree.NodeHighlighted[LintTreeDataType]):
-        if self.display_task is not None:
-            self.display_task.cancel()
-            self._terminal.clear()
-        if event.node.data:
-            self.display_task = self.run_worker(self._display_terminal(event.node.data.id), name="display_task")
+        if event.node.data is not None:
+            self.display_terminal(event.node.data.id)
 
     @on(LintTree.RunCommand, "#lint-tree")
     def _action_run_command(self, event: LintTree.RunCommand):
@@ -91,7 +127,7 @@ class FnugApp(App[None]):
 
     @on(LintTree.RunAllCommand, "#lint-tree")
     def _run_all(self, event: LintTree.RunAllCommand):
-        cursor_id = getattr(self._lint_tree.cursor_node, "id", None)
+        cursor_id = getattr(self.lint_tree.cursor_node, "id", None)
 
         for node in event.nodes:
             if node.data is not None:
@@ -126,11 +162,27 @@ class FnugApp(App[None]):
         ui.update_scrollbar(scrollbar)
         await task
 
+    def display_terminal(self, command_id: str):
+        """Display the terminal for a command."""
+        if self.display_task is not None:
+            self.display_task.cancel()
+            self._terminal.clear()
+
+        tree = self.lint_tree
+
+        if tree.cursor_node and tree.cursor_node.data and tree.cursor_node.data.id != command_id:
+            new_node = tree.command_leafs.get(command_id)
+            if new_node:
+                update_node(new_node)
+                self.lint_tree.select_node(new_node)
+
+        self.display_task = self.run_worker(self._display_terminal(command_id), name="display_task")
+
     def _run_command(self, command: LintTreeDataType, background: bool = False):
         if command.type != "command":
             return
 
-        tree = self._lint_tree
+        tree = self.lint_tree
         tree.update_status(command.id, "running")
 
         te = TerminalEmulator(self._terminal_size(), self.update_ready)
@@ -154,14 +206,12 @@ class FnugApp(App[None]):
             reader_task=self.run_worker(te.reader()),
             run_task=self.run_worker(run_shell()),
         )
-        if not background and self.display_task is not None:
-            self.display_task.cancel()
         if not background:
-            self.display_task = self.run_worker(self._display_terminal(command.id), name="display_task")
+            self.display_terminal(command.id)
         self.update_ready.set()
 
     def _stop_command(self, command_id: str):
-        tree = self._lint_tree
+        tree = self.lint_tree
 
         if command_id in self.terminals:
             self.terminals[command_id].emulator.clear()
@@ -173,7 +223,7 @@ class FnugApp(App[None]):
     def _terminal_size(self) -> Size:
         scrollbar_width = 1
         return Size(
-            width=self.size.width - self._lint_tree.outer_size.width - scrollbar_width, height=self.size.height - 1
+            width=self.size.width - self.lint_tree.outer_size.width - scrollbar_width, height=self.size.height - 1
         )
 
     def _on_mount(self):
