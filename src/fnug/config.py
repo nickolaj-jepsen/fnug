@@ -1,8 +1,9 @@
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, TypeAdapter, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
 
 class ConfigAutoRun(BaseModel):
@@ -37,6 +38,7 @@ class ConfigAutoRun(BaseModel):
 class ConfigCommand(BaseModel):
     """A command to run."""
 
+    id: str = Field(default_factory=lambda: uuid4().hex)
     name: str
     cmd: str
     cwd: Path | None = None
@@ -47,6 +49,7 @@ class ConfigCommand(BaseModel):
 class ConfigCommandGroup(BaseModel):
     """A group of commands or subgroups."""
 
+    id: str = Field(default_factory=lambda: uuid4().hex)
     name: str
     commands: list[ConfigCommand] = []
     children: list["ConfigCommandGroup"] = []

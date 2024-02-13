@@ -149,29 +149,26 @@ def attach_command(
     tree: TreeNode[LintTreeDataType],
     command_group: ConfigCommandGroup,
     cwd: Path,
-    path: list[str] | None = None,
     root: bool = False,
 ) -> dict[str, TreeNode[LintTreeDataType]]:
     """Attach a command group to a tree."""
     command_leafs: dict[str, TreeNode[LintTreeDataType]] = {}
-    new_path = [command_group.name] if path is None else [*path, command_group.name]
 
     if not root:
         new_root = tree.add(
             command_group.name,
-            data=LintTreeDataType(name=command_group.name, group=command_group, type="group", id=".".join(new_path)),
+            data=LintTreeDataType(name=command_group.name, group=command_group, type="group", id=command_group.id),
         )
     else:
         new_root = tree
 
     for command in command_group.commands:
-        command_id = ".".join([*new_path, command.name])
-        command_leafs[command_id] = new_root.add_leaf(
+        command_leafs[command.id] = new_root.add_leaf(
             command.name,
-            data=LintTreeDataType(name=command.name, type="command", command=command, id=command_id),
+            data=LintTreeDataType(name=command.name, type="command", command=command, id=command.id),
         )
     for child in command_group.children:
-        child_commands = attach_command(new_root, child, cwd, path=new_path)
+        child_commands = attach_command(new_root, child, cwd)
         command_leafs.update(child_commands)
     return command_leafs
 
