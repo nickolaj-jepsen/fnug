@@ -21,7 +21,7 @@ from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 from fnug.config import Config, ConfigCommand, ConfigCommandGroup
 from fnug.git import clear_git_cache, detect_repo_changes
 
-StatusType = Literal["success", "failure", "running", "pending"]
+StatusType = Literal["success", "failure", "running", "pending", "waiting"]
 
 
 @dataclass
@@ -505,6 +505,8 @@ class LintTree(Tree[LintTreeDataType]):
             status = (" ✘ ", base_style + Style(color="red"))
         elif command_status == "running":
             status = (" 🕑", base_style + Style(color="yellow"))
+        elif command_status == "waiting":
+            status = (" ⏸ ︎", base_style)
         else:
             status = ("", base_style)
 

@@ -3,7 +3,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 
 
 class ConfigAuto(BaseModel):
@@ -35,6 +35,20 @@ class ConfigAuto(BaseModel):
         return self
 
 
+class Dependency(BaseModel):
+    """A dependency between commands."""
+
+    path: Path
+    always: bool = False
+    once: bool = False
+
+
+class _InternalDependency(Dependency):
+    """Like dependency, but with the command object."""
+
+    command: "ConfigCommand"
+
+
 class ConfigCommand(BaseModel):
     """A command to run."""
 
@@ -44,6 +58,21 @@ class ConfigCommand(BaseModel):
     cwd: Path | None = None
     interactive: bool = False
     auto: ConfigAuto = ConfigAuto()
+    raw_dependencies: list[Dependency] = Field(default_factory=list, alias="depends")
+    dependencies: list[_InternalDependency] = Field(default_factory=list, exclude=True, alias="__internal_dependencies")
+    path: Path = Field(default_factory=Path)
+
+    @field_validator("raw_dependencies", mode="before")
+    @classmethod
+    def _parse_simple_dependencies(cls, v: Any) -> list[Dependency]:
+        result: list[Dependency] = []
+        for dep in v:
+            if isinstance(dep, str):
+                result.append(Dependency(path=Path(dep)))
+            else:
+                result.append(dep)
+
+        return result
 
 
 class ConfigCommandGroup(BaseModel):
@@ -54,6 +83,7 @@ class ConfigCommandGroup(BaseModel):
     commands: list[ConfigCommand] = []
     children: list["ConfigCommandGroup"] = []
     auto: ConfigAuto = ConfigAuto()
+    path: Path = Field(default_factory=Path)
 
     def _propagate_auto(self):
         """Propagate auto settings to all children."""
@@ -64,6 +94,35 @@ class ConfigCommandGroup(BaseModel):
             child.auto = child.auto.merge(self.auto)
             child._propagate_auto()
 
+    def all_commands(self) -> list[ConfigCommand]:
+        """Get all commands."""
+        commands = list(self.commands)
+        for group in self.children:
+            commands.extend(group.all_commands())
+        return commands
+
+    def _dependency_map(self, path: Path = Path()) -> dict[Path, ConfigCommand]:
+        """Get all commands."""
+        commands: dict[Path, ConfigCommand] = {}
+        for command in self.commands:
+            commands[path / command.name] = command
+        for group in self.children:
+            commands.update(group._dependency_map(path / group.name))
+
+        return commands
+
+    def _resolve_dependencies(self, commands: dict[Path, ConfigCommand] | None = None):
+        """Resolve dependencies."""
+        commands = commands or self._dependency_map()
+
+        for path, command in commands.items():
+            for dep in command.raw_dependencies:
+                dep_path = path.parent / dep.path
+                if dep_path not in commands:
+                    raise ValueError(f"Dependency {dep} not found for command {command.name}")
+
+                command.dependencies.append(_InternalDependency(**dep.model_dump(), command=commands[dep_path]))
+
 
 class Config(ConfigCommandGroup):
     """The root config object."""
@@ -71,7 +130,8 @@ class Config(ConfigCommandGroup):
     fnug_version: Literal["0.1.0"]
 
     def model_post_init(self, __context: Any) -> None:
-        """Post-init hook to propagate auto settings."""
+        """Post-init hook to propagate autorun settings."""
+        self._resolve_dependencies()
         self._propagate_auto()
 
 

@@ -10,14 +10,19 @@ children:
       regex:
         - "\\.py$"
     commands:
-      - name: pyright
-        cmd: rye run pyright src
-      - name: lint
-        cmd: rye run ruff check --fix .
       - name: format
         cmd: rye run ruff format .
+      - name: lint
+        cmd: rye run ruff check --fix .
+        depends:
+          - format
+      - name: pyright
+        cmd: rye run pyright src
+        id: fnug.pyright
       - name: test
         cmd: rye run test
+        depends:
+          - pyright
   - name: debug
     commands:
       - name: htop
