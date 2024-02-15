@@ -13,9 +13,9 @@ from rich.text import Text
 from textual.geometry import Size
 
 
-def start_message(command: str) -> Text:
+def start_message(commands: str) -> list[Text]:
     """Create a start message for a command."""
-    return Text.assemble(Text("❱ ", style="#cf6a4c"), Text(command), Text("\n"))
+    return [Text.assemble(Text("❱ ", style="#cf6a4c"), Text(command)) for command in commands.strip().split("\n")]
 
 
 def success_message() -> Text:
@@ -86,12 +86,17 @@ class TerminalEmulator:
         finally:
             loop.remove_reader(self.out)
 
-    def echo(self, text: Text):
+    def echo(self, text: Text | list[Text]):
         """Echo text to the terminal."""
-        tmp_console = Console(color_system="truecolor", file=None, highlight=False)
-        with tmp_console.capture() as capture:
-            tmp_console.print(text, soft_wrap=True, end="")
-        self.stream.feed(capture.get())
+        if isinstance(text, list):
+            for line in text:
+                self.echo(line)
+        else:
+            tmp_console = Console(color_system="truecolor", file=None, highlight=False)
+            with tmp_console.capture() as capture:
+                tmp_console.print(text, soft_wrap=True, end="")
+            self.stream.feed(capture.get())
+
         self.stream.feed("\n\r")
         self.screen.dirty.clear()
         self.update_ready.set()

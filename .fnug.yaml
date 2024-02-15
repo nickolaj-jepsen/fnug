@@ -27,8 +27,10 @@ children:
         cmd: fnug
         interactive: true
       - name: A very very very long file
-        cmd: cat src/fnug/terminal_emulator.py ; cat src/fnug/terminal_emulator.py ; cat
-          src/fnug/terminal_emulator.py
+        cmd: |
+          cat src/fnug/terminal_emulator.py
+          cat src/fnug/terminal_emulator.py
+          cat src/fnug/terminal_emulator.py
     children:
       - name: nested-autorun
         autorun:
