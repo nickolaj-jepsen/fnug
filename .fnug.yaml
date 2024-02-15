@@ -10,12 +10,12 @@ children:
       regex:
         - "\\.py$"
     commands:
-      - name: black
-        cmd: rye run black .
       - name: pyright
         cmd: rye run pyright src
-      - name: ruff
+      - name: lint
         cmd: rye run ruff --fix .
+      - name: format
+        cmd: rye run ruff format .
       - name: test
         cmd: rye run test
   - name: debug

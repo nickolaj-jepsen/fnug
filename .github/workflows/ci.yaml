@@ -28,7 +28,7 @@ jobs:
       - name: Run lint
         run: |
           rye run -- ruff check --output-format=github src/
-          rye run -- black --check src/
+          rye run -- ruff format --check src/
           rye run -- pyright src
   test:
     runs-on: ubuntu-latest
