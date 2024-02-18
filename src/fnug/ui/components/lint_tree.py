@@ -17,7 +17,7 @@ from textual.widgets._tree import TOGGLE_STYLE, TreeNode
 from textual.worker import Worker
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
-from fnug.config import ConfigCommand, ConfigCommandGroup, ConfigRoot
+from fnug.config import Config, ConfigCommand, ConfigCommandGroup
 from fnug.git import clear_git_cache, detect_repo_changes
 
 StatusType = Literal["success", "failure", "running", "pending"]
@@ -282,7 +282,7 @@ class LintTree(Tree[LintTreeDataType]):
 
     def __init__(
         self,
-        config: ConfigRoot,
+        config: Config,
         cwd: Path,
         *,
         name: str | None = None,

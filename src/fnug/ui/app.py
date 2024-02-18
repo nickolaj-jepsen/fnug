@@ -18,7 +18,7 @@ from textual.widgets import Footer
 from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
-from fnug.config import ConfigRoot
+from fnug.config import Config
 from fnug.terminal_emulator import TerminalEmulator, failure_message, start_message, success_message
 from fnug.ui.components.lint_tree import LintTree, LintTreeDataType, update_node
 from fnug.ui.components.terminal import Terminal
@@ -79,7 +79,7 @@ class FnugApp(App[None]):
     display_task: Worker[None] | None = None
     update_ready = asyncio.Event()
 
-    def __init__(self, config: ConfigRoot, cwd: Path | None = None):
+    def __init__(self, config: Config, cwd: Path | None = None):
         super().__init__()
         self.cwd = (cwd or Path.cwd()).resolve()
         self.config = config

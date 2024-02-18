@@ -65,7 +65,7 @@ class ConfigCommandGroup(BaseModel):
             child._propagate_autorun()
 
 
-class ConfigRoot(ConfigCommandGroup):
+class Config(ConfigCommandGroup):
     """The root config object."""
 
     fnug_version: Literal["0.1.0"]
@@ -75,12 +75,12 @@ class ConfigRoot(ConfigCommandGroup):
         self._propagate_autorun()
 
 
-RootConfigValidator = TypeAdapter(ConfigRoot)
+ConfigValidator = TypeAdapter(Config)
 
 
-def load_config(path: Path) -> ConfigRoot:
+def load_config(path: Path) -> Config:
     """Load a config file."""
     if path.suffix in [".yaml", ".yml"]:
         data = yaml.safe_load(Path.open(path, "rb").read())
-        return RootConfigValidator.validate_python(data)
-    return RootConfigValidator.validate_json(Path.open(path, "rb").read())
+        return ConfigValidator.validate_python(data)
+    return ConfigValidator.validate_json(Path.open(path, "rb").read())
