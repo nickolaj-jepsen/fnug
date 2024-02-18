@@ -7,7 +7,7 @@ authors = [
 ]
 dependencies = [
     "click>=8.1.7",
-    "textual>=0.50.1",
+    "textual>=0.51.0",
     "rich>=13.7.0",
     "pydantic>=2.6.1",
     "pyte>=0.8.2",
@@ -48,10 +48,10 @@ build-backend = "hatchling.build"
 [tool.rye]
 managed = true
 dev-dependencies = [
-    "ruff>=0.2.1",
+    "ruff>=0.2.2",
     "pyright>=1.1.350",
     "textual-dev>=1.4.0",
-    "pytest>=8.0.0",
+    "pytest>=8.0.1",
 ]
 
 [tool.rye.scripts]
