@@ -93,7 +93,7 @@ View this projects [`.fnug.yaml`](.fnug.yaml) file for an advanced example
 
 ## Demo
 
-https://github.com/nickolaj-jepsen/fnug/assets/1039554/a0c47289-9670-4d81-aa24-39204caf8c89
+https://github.com/nickolaj-jepsen/fnug/assets/1039554/8f8a4d34-8beb-4fb4-9bbc-6fd0a4a384be
 
 ## Development
 
