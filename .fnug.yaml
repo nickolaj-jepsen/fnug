@@ -13,7 +13,7 @@ children:
       - name: pyright
         cmd: rye run pyright src
       - name: lint
-        cmd: rye run ruff --fix .
+        cmd: rye run ruff check --fix .
       - name: format
         cmd: rye run ruff format .
       - name: test
