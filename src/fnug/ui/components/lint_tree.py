@@ -211,6 +211,7 @@ class LintTree(Tree[LintTreeDataType]):
     watch_task: Worker[None] | None = None
     grabbed: Reactive[Offset | None] = Reactive(None)
     last_click: Reactive[dict[int, float | Literal["invalid"]]] = Reactive({})  # used for double click detection
+    command_leafs: dict[str, TreeNode[LintTreeDataType]] = {}
 
     BINDINGS: ClassVar[list[BindingType]] = [
         # Movement
@@ -309,9 +310,8 @@ class LintTree(Tree[LintTreeDataType]):
         disabled: bool = False,
     ):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
-        self.command_leafs = attach_command(self.root, config, cwd, root=True)
+        self.config = config
         self.cwd = cwd
-        self.action_select_git()
 
     def _get_label_region(self, line: int) -> Region | None:
         """Like parent, but offset by 2 to account for the icon."""
@@ -509,8 +509,13 @@ class LintTree(Tree[LintTreeDataType]):
 
         return Text.assemble(dropdown, selection, node_label, status, group_count)
 
+    def _setup(self):
+        self.command_leafs = attach_command(self.root, self.config, self.cwd, root=True)
+        self.action_select_git()
+
     def _on_mount(self, event: events.Mount):
         self.watch_task = self.run_worker(watch_autorun_task(all_commands(self.root), self.cwd))
+        self.call_after_refresh(self._setup)
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         # We don't want mouse events on the scrollbar bubbling
