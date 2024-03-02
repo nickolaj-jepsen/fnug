@@ -41,6 +41,11 @@ def stopped_message() -> Text:
     return Text.assemble(Text("\n"), Text("❱ ", style="#cf6a4c"), Text("Stopped"), Text(" ✘", style="red"))
 
 
+def any_key_message() -> Text:
+    """Create a message to press any key."""
+    return Text.assemble(Text("❱ ", style="#cf6a4c"), Text("Press any key to continue"))
+
+
 class FixedHistoryScreen(pyte.HistoryScreen):
     """
     Exactly like pyte.HistoryScreen but allows scrolling to the top of the buffer.

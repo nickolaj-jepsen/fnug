@@ -6,6 +6,7 @@ from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
+import click
 import rich
 from textual import events, on
 from textual.app import App, ComposeResult
@@ -19,7 +20,14 @@ from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
 from fnug.config import Config
-from fnug.terminal_emulator import TerminalEmulator, failure_message, start_message, stopped_message, success_message
+from fnug.terminal_emulator import (
+    TerminalEmulator,
+    any_key_message,
+    failure_message,
+    start_message,
+    stopped_message,
+    success_message,
+)
 from fnug.ui.components.context_menu import ContextMenu
 from fnug.ui.components.lint_tree import LintTree, LintTreeDataType, update_node
 from fnug.ui.components.terminal import Terminal
@@ -293,8 +301,8 @@ class FnugApp(App[None]):
             return
 
         with self.suspend():
-            subprocess.run("clear")  # noqa: S603,S607
-            rich.print(start_message(command.command.cmd))
+            click.clear()
+            rich.print(start_message(command.command.cmd), end="")
             process = subprocess.run(command.command.cmd, shell=True)  # noqa: S602
             exit_code = process.returncode
             if exit_code == 0:
@@ -304,7 +312,8 @@ class FnugApp(App[None]):
                 rich.print(failure_message(exit_code))
                 status = "failure"
 
-            input("\nPress enter key to continue...")
+            rich.print(any_key_message())
+            click.pause("")
         self.lint_tree.update_status(command.id, status)
 
     def _stop_command(self, command_id: str):
