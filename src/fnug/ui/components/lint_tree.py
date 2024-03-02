@@ -231,6 +231,7 @@ class LintTree(Tree[LintTreeDataType]):
         Binding("space", "toggle_select", "Select"),
         Binding("g", "select_git", "Select git autorun commands", show=False),
         Binding("enter", "run_all", "Run selected commands"),
+        Binding("c", "clear", "Clear terminal"),
     ]
 
     class RunCommand(Message):
@@ -283,6 +284,16 @@ class LintTree(Tree[LintTreeDataType]):
             """The tree that sent the message."""
             return self.tree
 
+    class ClearTerminal(Message):
+        def __init__(self, node: TreeNode[LintTreeDataType]) -> None:
+            self.node: TreeNode[LintTreeDataType] = node
+            super().__init__()
+
+        @property
+        def control(self) -> Tree[LintTreeDataType]:
+            """The tree that sent the message."""
+            return self.node.tree
+
     class OpenContextMenu(Message):
         def __init__(self, node: TreeNode[LintTreeDataType], event: events.Click) -> None:
             self.node: TreeNode[LintTreeDataType] = node
@@ -330,6 +341,12 @@ class LintTree(Tree[LintTreeDataType]):
         if status == "success":
             node.data.selected = False
         update_node(node)
+
+    def get_command(self, command_id: str) -> LintTreeDataType | None:
+        """Get a command by ID."""
+        if command_id not in self.command_leafs:
+            return None
+        return self.command_leafs[command_id].data
 
     def action_run(self) -> None:
         """Run a command."""
@@ -398,6 +415,13 @@ class LintTree(Tree[LintTreeDataType]):
         if node and node.data:
             node.data.selected = not node.data.selected
             update_node(node)
+
+    def action_clear(self):
+        """Clear the terminal."""
+        if self.cursor_node is None:
+            return
+
+        self.post_message(self.ClearTerminal(self.cursor_node))
 
     async def _right_click(self, event: events.Click, node: TreeNode[LintTreeDataType]) -> None:
         """Handle right click."""

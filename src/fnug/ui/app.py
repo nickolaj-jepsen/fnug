@@ -19,7 +19,7 @@ from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
 from fnug.config import Config
-from fnug.terminal_emulator import TerminalEmulator, failure_message, start_message, success_message
+from fnug.terminal_emulator import TerminalEmulator, failure_message, start_message, stopped_message, success_message
 from fnug.ui.components.context_menu import ContextMenu
 from fnug.ui.components.lint_tree import LintTree, LintTreeDataType, update_node
 from fnug.ui.components.terminal import Terminal
@@ -135,6 +135,11 @@ class FnugApp(App[None]):
         if event.node.data:
             self._stop_command(event.node.data.id)
 
+    @on(LintTree.ClearTerminal, "#lint-tree")
+    def _action_clear_terminal(self, event: LintTree.ClearTerminal):
+        if event.node.data:
+            self._clear_terminal(event.node.data.id)
+
     @on(LintTree.RunAllCommand, "#lint-tree")
     def _run_all(self, event: LintTree.RunAllCommand):
         cursor_id = getattr(self.lint_tree.cursor_node, "id", None)
@@ -155,6 +160,8 @@ class FnugApp(App[None]):
                 self._run_command_fullscreen(data)
             elif selection == "stop":
                 self._stop_command(data.id)
+            elif selection == "clear":
+                self._clear_terminal(data.id)
 
         if data.status == "running":
             commands = {
@@ -164,6 +171,7 @@ class FnugApp(App[None]):
             commands = {
                 "run": "Re-run",
                 "run-fullscreen": "Re-run (fullscreen)",
+                "clear": "Clear",
             }
         else:
             commands = {
@@ -294,10 +302,27 @@ class FnugApp(App[None]):
     def _stop_command(self, command_id: str):
         tree = self.lint_tree
 
+        command = tree.get_command(command_id)
+        if command is None or command.status != "running":
+            return
+
         if command_id in self.terminals:
-            self.terminals[command_id].emulator.clear()
+            self.terminals[command_id].emulator.echo("")  # makes sure the cursor position is reset
+            self.terminals[command_id].emulator.echo(stopped_message())
             self.terminals[command_id].run_task.cancel()
             self.terminals[command_id].reader_task.cancel()
+            self.update_ready.set()
+            tree.update_status(command_id, "failure")
+
+    def _clear_terminal(self, command_id: str):
+        tree = self.lint_tree
+
+        command = tree.get_command(command_id)
+        if command is None or command.status == "running":
+            return
+
+        if command_id in self.terminals:
+            self.terminals[command_id].emulator.clear()
             self.update_ready.set()
             tree.update_status(command_id, "pending")
 

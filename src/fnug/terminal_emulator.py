@@ -34,6 +34,11 @@ def failure_message(exit_code: int) -> Text:
     )
 
 
+def stopped_message() -> Text:
+    """Create a failure message."""
+    return Text.assemble(Text("\n"), Text("❱ ", style="#cf6a4c"), Text("Stopped"), Text(" ✘", style="red"))
+
+
 class FixedHistoryScreen(pyte.HistoryScreen):
     """
     Exactly like pyte.HistoryScreen but allows scrolling to the top of the buffer.
@@ -86,8 +91,11 @@ class TerminalEmulator:
         finally:
             loop.remove_reader(self.out)
 
-    def echo(self, text: Text | list[Text]):
+    def echo(self, text: str | Text | list[Text]):
         """Echo text to the terminal."""
+        if isinstance(text, str):
+            text = Text(text)
+
         if isinstance(text, list):
             for line in text:
                 self.echo(line)
