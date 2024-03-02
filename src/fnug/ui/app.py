@@ -20,6 +20,7 @@ from textual.worker import Worker
 
 from fnug.config import Config
 from fnug.terminal_emulator import TerminalEmulator, failure_message, start_message, success_message
+from fnug.ui.components.context_menu import ContextMenu
 from fnug.ui.components.lint_tree import LintTree, LintTreeDataType, update_node
 from fnug.ui.components.terminal import Terminal
 
@@ -127,23 +128,7 @@ class FnugApp(App[None]):
         if event.node.data is None or event.node.data.command is None:
             return
 
-        # stop existing command, if it's running
-        self._stop_command(event.node.data.id)
-
-        with self.suspend():
-            subprocess.run("clear")  # noqa: S603,S607
-            rich.print(start_message(event.node.data.command.cmd))
-            process = subprocess.run(event.node.data.command.cmd, shell=True)  # noqa: S602
-            exit_code = process.returncode
-            if exit_code == 0:
-                rich.print(success_message())
-                status = "success"
-            else:
-                rich.print(failure_message(exit_code))
-                status = "failure"
-
-            input("\nPress enter key to continue...")
-        self.lint_tree.update_status(event.node.data.id, status)
+        self._run_command_fullscreen(event.node.data)
 
     @on(LintTree.StopCommand, "#lint-tree")
     def _action_stop_command(self, event: LintTree.RunCommand):
@@ -161,6 +146,40 @@ class FnugApp(App[None]):
     @on(LintTree.Resize, "#lint-tree")
     async def _tree_resize(self, event: LintTree.Resize):
         await self._on_resize()
+
+    @on(LintTree.OpenContextMenu, "#lint-tree")
+    async def _open_context_menu(self, event: LintTree.OpenContextMenu):
+        if event.node.data is None:
+            return
+
+        def handle_selection(selection: str | None):
+            if event.node.data is None:
+                return
+
+            if selection == "run":
+                self._run_command(event.node.data, background=not event.is_active_node)
+            elif selection == "run-fullscreen":
+                self._run_command_fullscreen(event.node.data)
+            elif selection == "stop":
+                self._stop_command(event.node.data.id)
+
+        if event.node.data.status == "running":
+            commands = {
+                "stop": "Stop",
+            }
+        else:
+            commands = {
+                "run": "Run",
+                "run-fullscreen": "Run (fullscreen)",
+            }
+
+        await self.push_screen(
+            ContextMenu(
+                commands,
+                event.click_event,
+            ),
+            handle_selection,
+        )
 
     @on(ScrollDown)
     def _scroll_down(self, event: ScrollTo) -> None:
@@ -238,6 +257,28 @@ class FnugApp(App[None]):
         if not background:
             self.display_terminal(command.id)
         self.update_ready.set()
+
+    def _run_command_fullscreen(self, command: LintTreeDataType):
+        # stop existing command, if it's running
+        self._stop_command(command.id)
+
+        if not command.command:
+            return
+
+        with self.suspend():
+            subprocess.run("clear")  # noqa: S603,S607
+            rich.print(start_message(command.command.cmd))
+            process = subprocess.run(command.command.cmd, shell=True)  # noqa: S602
+            exit_code = process.returncode
+            if exit_code == 0:
+                rich.print(success_message())
+                status = "success"
+            else:
+                rich.print(failure_message(exit_code))
+                status = "failure"
+
+            input("\nPress enter key to continue...")
+        self.lint_tree.update_status(command.id, status)
 
     def _stop_command(self, command_id: str):
         tree = self.lint_tree

@@ -282,6 +282,22 @@ class LintTree(Tree[LintTreeDataType]):
             """The tree that sent the message."""
             return self.tree
 
+    class OpenContextMenu(Message):
+        def __init__(self, node: TreeNode[LintTreeDataType], event: events.Click) -> None:
+            self.node: TreeNode[LintTreeDataType] = node
+            self.click_event: events.Click = event
+            super().__init__()
+
+        @property
+        def control(self) -> Tree[LintTreeDataType]:
+            """The tree that sent the message."""
+            return self.node.tree
+
+        @property
+        def is_active_node(self) -> bool:
+            """Check if the node is the currently selected node."""
+            return self.node.tree.cursor_node == self.node
+
     def __init__(
         self,
         config: Config,
@@ -383,6 +399,10 @@ class LintTree(Tree[LintTreeDataType]):
             node.data.selected = not node.data.selected
             update_node(node)
 
+    async def _right_click(self, event: events.Click, node: TreeNode[LintTreeDataType]) -> None:
+        """Handle right click."""
+        self.post_message(self.OpenContextMenu(node, event))
+
     async def _on_click(self, event: events.Click) -> None:
         # Handle double click
         meta = event.style.meta
@@ -391,8 +411,17 @@ class LintTree(Tree[LintTreeDataType]):
 
         line = meta["line"]
         node = self._get_node(line)
+
+        if event.button == 3:
+            event.prevent_default()
+            event.stop()
+
         if node and node.data and node.data.type == "group":
             return  # No need to handle double click on groups
+
+        if event.button == 3 and node:
+            await self._right_click(event, node)
+            return
 
         last_click = self.last_click.get(line)
 
