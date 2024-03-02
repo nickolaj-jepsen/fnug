@@ -537,9 +537,9 @@ class LintTree(Tree[LintTreeDataType]):
     def _setup(self):
         self.command_leafs = attach_command(self.root, self.config, self.cwd, root=True)
         self.action_select_git()
+        self.watch_task = self.run_worker(watch_autorun_task(all_commands(self.root), self.cwd))
 
     def _on_mount(self, event: events.Mount):
-        self.watch_task = self.run_worker(watch_autorun_task(all_commands(self.root), self.cwd))
         self.call_after_refresh(self._setup)
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
