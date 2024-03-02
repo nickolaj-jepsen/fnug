@@ -158,14 +158,22 @@ class FnugApp(App[None]):
                 self._run_command(data, background=not active_node)
             elif selection == "run-fullscreen":
                 self._run_command_fullscreen(data)
+            elif selection == "restart":
+                self._stop_command(data.id)
+                self._run_command(data)
             elif selection == "stop":
                 self._stop_command(data.id)
+            elif selection == "stop-clear":
+                self._stop_command(data.id)
+                self._clear_terminal(data.id)
             elif selection == "clear":
                 self._clear_terminal(data.id)
 
         if data.status == "running":
             commands = {
+                "restart": "Restart",
                 "stop": "Stop",
+                "stop-clear": "Stop and clear",
             }
         elif data.status in ("failure", "success"):
             commands = {
