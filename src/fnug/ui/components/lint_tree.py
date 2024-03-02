@@ -1,4 +1,5 @@
 import re
+import time
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -209,6 +210,7 @@ class LintTree(Tree[LintTreeDataType]):
     show_root = False
     watch_task: Worker[None] | None = None
     grabbed: Reactive[Offset | None] = Reactive(None)
+    last_click: Reactive[dict[int, float | Literal["invalid"]]] = Reactive({})  # used for double click detection
 
     BINDINGS: ClassVar[list[BindingType]] = [
         # Movement
@@ -373,12 +375,39 @@ class LintTree(Tree[LintTreeDataType]):
         for command in all_commands(self.root):
             select_git_autorun(self.cwd, command)
 
-    def action_toggle_select_click(self, command_id: str):
+    def action_toggle_select_click(self, line: int, node: TreeNode[LintTreeDataType] | None = None):
         """Toggle a node on click."""
-        node = self.command_leafs.get(command_id)
+        node = node or self._get_node(line)
+        self.last_click[line] = "invalid"
         if node and node.data:
             node.data.selected = not node.data.selected
             update_node(node)
+
+    async def _on_click(self, event: events.Click) -> None:
+        # Handle double click
+        meta = event.style.meta
+        if "line" not in meta:
+            return
+
+        line = meta["line"]
+        node = self._get_node(line)
+        if node and node.data and node.data.type == "group":
+            return  # No need to handle double click on groups
+
+        last_click = self.last_click.get(line)
+
+        if last_click == "invalid":
+            # if last "click" was from toggle_select_click, we don't want to handle it as a double click as it's either:
+            # 1) already been double-clicked and handled by the rest of the method
+            # 2) a single click on the "selection icon", and shouldn't be used to calculate a double click
+            self.last_click.pop(line)
+        elif last_click and time.time() - last_click < 0.5:
+            self.action_toggle_select_click(line, node)
+            self.last_click.pop(line, None)
+        else:
+            self.last_click[line] = time.time()
+
+        await super()._on_click(event)
 
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
         """Override the default label rendering to add icons and status."""
@@ -441,12 +470,12 @@ class LintTree(Tree[LintTreeDataType]):
         if selected and is_command:
             selection = (
                 "● ",
-                base_style + Style(meta={"@mouse.up": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
+                base_style + Style(meta={"@mouse.up": f"toggle_select_click({node.line})"} if node.data else {}),
             )
         elif is_command:
             selection = (
                 "○ ",
-                base_style + Style(meta={"@mouse.up": f"toggle_select_click('{node.data.id}')"} if node.data else {}),
+                base_style + Style(meta={"@mouse.up": f"toggle_select_click({node.line})"} if node.data else {}),
             )
         else:
             selection = ("", base_style)
