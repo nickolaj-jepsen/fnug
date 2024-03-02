@@ -212,7 +212,7 @@ class Terminal(Widget, can_focus=False):
         if self.emulator is None:
             return
 
-        if event.button == 3:
+        if event.button in [2, 3]:
             self.post_message(self.OpenContextMenu(self, event))
         else:
             self.emulator.click(event.x + 1, event.y + 1)

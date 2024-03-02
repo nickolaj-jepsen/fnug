@@ -440,7 +440,7 @@ class LintTree(Tree[LintTreeDataType]):
         if node is None or node.data is None:
             return
 
-        if event.button == 3:
+        if event.button in [2, 3]:
             event.prevent_default()
             event.stop()
             await self._right_click(event, node)
