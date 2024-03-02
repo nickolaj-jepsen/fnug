@@ -407,8 +407,6 @@ class LintTree(Tree[LintTreeDataType]):
         else:
             self.last_click[line] = time.time()
 
-        await super()._on_click(event)
-
     def render_label(self, node: TreeNode[LintTreeDataType], base_style: Style, style: Style) -> Text:
         """Override the default label rendering to add icons and status."""
         node_label = node._label.copy()  # pyright: ignore reportPrivateUsage=false
