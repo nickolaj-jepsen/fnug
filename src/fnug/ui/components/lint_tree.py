@@ -226,12 +226,12 @@ class LintTree(Tree[LintTreeDataType]):
         Binding("j", "cursor_down", "Cursor Down", show=False),
         # Controls
         Binding("r", "run", "Run"),
-        Binding("ctrl+r", "exclusive_run", "Run fullscreen"),
-        Binding("s", "stop", "Stop"),
+        Binding("ctrl+r", "exclusive_run", "Run fullscreen", show=False),
+        Binding("s", "stop", "Stop", show=False),
         Binding("space", "toggle_select", "Select"),
         Binding("g", "select_git", "Select git autorun commands", show=False),
         Binding("enter", "run_all", "Run selected commands"),
-        Binding("c", "clear", "Clear terminal"),
+        Binding("c", "clear", "Clear terminal", show=False),
         Binding("q", "quit", "Quit", show=False),
     ]
 
