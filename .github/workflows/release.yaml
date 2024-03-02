@@ -20,7 +20,7 @@ jobs:
         uses: maybe-hello-world/pyproject-check-version@v4
         id: versioncheck
         with:
-          pyproject-path: "./pyproject.toml"    # default value
+          pyproject-path: "./pyproject.toml"
       - name: Setup Python
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
         uses: actions/setup-python@v5
@@ -32,13 +32,12 @@ jobs:
         with:
           enable-cache: true
           cache-prefix: 3.12
-          version: '0.17.0'
-      - name: Pin python version
-        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
-        run: rye pin 3.12
+          version: '0.27.0'
       - name: Install dependencies
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
-        run: rye sync
+        run: |
+          rye pin 3.12
+          rye sync --no-lock
       - name: Build
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
         run: rye build

@@ -20,11 +20,11 @@ jobs:
         with:
           enable-cache: true
           cache-prefix: 3.12
-          version: '0.17.0'
-      - name: Pin python version
-        run: rye pin 3.12
+          version: '0.27.0'
       - name: Install dependencies
-        run: rye sync
+        run: |
+          rye pin 3.12
+          rye sync --no-lock
       - name: Run lint
         run: |
           rye run -- ruff check --output-format=github src/
@@ -46,11 +46,11 @@ jobs:
         with:
           enable-cache: true
           cache-prefix: ${{ matrix.python-version }}
-          version: '0.17.0'
-      - name: Pin python version
-        run: rye pin ${{ matrix.python-version }}
+          version: '0.27.0'
       - name: Install dependencies
-        run: rye sync
+        run: |
+          rye pin ${{ matrix.python-version }}
+          rye sync --no-lock
       - name: Run tests
         run: rye run test
       - name: Upload coverage
