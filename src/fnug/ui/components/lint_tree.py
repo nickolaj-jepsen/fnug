@@ -457,7 +457,7 @@ class LintTree(Tree[LintTreeDataType]):
             # 2) a single click on the "selection icon", and shouldn't be used to calculate a double click
             self.last_click.pop(line)
         elif last_click and time.time() - last_click < 0.5:
-            self.action_toggle_select_click(line, node)
+            self.action_run()
             self.last_click.pop(line, None)
         else:
             self.last_click[line] = time.time()
