@@ -211,7 +211,7 @@ class LintTree(Tree[LintTreeDataType]):
     watch_task: Worker[None] | None = None
     grabbed: Reactive[Offset | None] = Reactive(None)
     last_click: Reactive[dict[int, float | Literal["invalid"]]] = Reactive({})  # used for double click detection
-    command_leafs: dict[str, TreeNode[LintTreeDataType]] = {}
+    command_leafs: Reactive[dict[str, TreeNode[LintTreeDataType]]] = Reactive({})
 
     BINDINGS: ClassVar[list[BindingType]] = [
         # Movement

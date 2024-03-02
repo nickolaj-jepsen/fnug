@@ -11,6 +11,7 @@ from textual import events
 from textual.binding import Binding, BindingType
 from textual.events import Key
 from textual.keys import Keys
+from textual.message import Message
 from textual.reactive import reactive
 from textual.scrollbar import ScrollBar
 from textual.widget import Widget
@@ -129,6 +130,17 @@ class Terminal(Widget, can_focus=False):
         Binding("shift+tab", "unfocus", "Switch focus"),
     ]
 
+    class OpenContextMenu(Message):
+        def __init__(self, this: "Terminal", event: events.Click) -> None:
+            self.this: "Terminal" = this
+            self.click_event: events.Click = event
+            super().__init__()
+
+        @property
+        def control(self) -> "Terminal":
+            """The tree that sent the message."""
+            return self.this
+
     def __init__(
         self,
         name: str | None = None,
@@ -200,4 +212,7 @@ class Terminal(Widget, can_focus=False):
         if self.emulator is None:
             return
 
-        self.emulator.click(event.x + 1, event.y + 1)
+        if event.button == 3:
+            self.post_message(self.OpenContextMenu(self, event))
+        else:
+            self.emulator.click(event.x + 1, event.y + 1)

@@ -51,8 +51,8 @@ class ContextMenu(ModalScreen[str | None]):
         self.options = options
         self.width = max(len(label) for label in options.values()) + 2
         self.height = len(options)
-        self.offset_x = click_event.x
-        self.offset_y = click_event.y
+        self.offset_x = click_event.screen_x
+        self.offset_y = click_event.screen_y
         super().__init__()
 
     def _on_mount(self, event: events.Mount) -> None:

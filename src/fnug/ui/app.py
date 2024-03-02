@@ -147,25 +147,23 @@ class FnugApp(App[None]):
     async def _tree_resize(self, event: LintTree.Resize):
         await self._on_resize()
 
-    @on(LintTree.OpenContextMenu, "#lint-tree")
-    async def _open_context_menu(self, event: LintTree.OpenContextMenu):
-        if event.node.data is None:
-            return
-
+    async def _handle_context_menu(self, data: LintTreeDataType, event: events.Click, active_node: bool = False):
         def handle_selection(selection: str | None):
-            if event.node.data is None:
-                return
-
             if selection == "run":
-                self._run_command(event.node.data, background=not event.is_active_node)
+                self._run_command(data, background=not active_node)
             elif selection == "run-fullscreen":
-                self._run_command_fullscreen(event.node.data)
+                self._run_command_fullscreen(data)
             elif selection == "stop":
-                self._stop_command(event.node.data.id)
+                self._stop_command(data.id)
 
-        if event.node.data.status == "running":
+        if data.status == "running":
             commands = {
                 "stop": "Stop",
+            }
+        elif data.status in ("failure", "success"):
+            commands = {
+                "run": "Re-run",
+                "run-fullscreen": "Re-run (fullscreen)",
             }
         else:
             commands = {
@@ -176,10 +174,23 @@ class FnugApp(App[None]):
         await self.push_screen(
             ContextMenu(
                 commands,
-                event.click_event,
+                event,
             ),
             handle_selection,
         )
+
+    @on(LintTree.OpenContextMenu, "#lint-tree")
+    async def _linttree_open_context_menu(self, event: LintTree.OpenContextMenu):
+        if event.node.data is None:
+            return
+        await self._handle_context_menu(event.node.data, event.click_event, active_node=event.is_active_node)
+
+    @on(Terminal.OpenContextMenu, "#terminal")
+    async def _terminal_open_context_menu(self, event: Terminal.OpenContextMenu):
+        node = self.lint_tree.cursor_node
+        if node is None or node.data is None:
+            return
+        await self._handle_context_menu(node.data, event.click_event, active_node=True)
 
     @on(ScrollDown)
     def _scroll_down(self, event: ScrollTo) -> None:
