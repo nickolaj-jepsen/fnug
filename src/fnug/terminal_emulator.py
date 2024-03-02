@@ -13,9 +13,11 @@ from rich.text import Text
 from textual.geometry import Size
 
 
-def start_message(commands: str) -> list[Text]:
+def start_message(commands: str) -> Text:
     """Create a start message for a command."""
-    return [Text.assemble(Text("❱ ", style="#cf6a4c"), Text(command)) for command in commands.strip().split("\n")]
+    return Text.assemble(
+        *[Text.assemble(Text("❱ ", style="#cf6a4c"), Text(command)) for command in commands.strip().split("\n")]
+    )
 
 
 def success_message() -> Text:
