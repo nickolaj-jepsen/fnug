@@ -29,7 +29,14 @@ from fnug.terminal_emulator import (
     success_message,
 )
 from fnug.ui.components.context_menu import ContextMenu
-from fnug.ui.components.lint_tree import LintTree, LintTreeDataType, update_node
+from fnug.ui.components.lint_tree import (
+    LintTree,
+    LintTreeDataType,
+    all_commands,
+    sum_selected_commands,
+    toggle_select_node,
+    update_node,
+)
 from fnug.ui.components.terminal import Terminal
 
 
@@ -160,30 +167,72 @@ class FnugApp(App[None]):
     async def _tree_resize(self, event: LintTree.Resize):
         await self._on_resize()
 
-    async def _handle_context_menu(self, data: LintTreeDataType, event: events.Click, active_node: bool = False):
-        def handle_selection(selection: str | None):
-            if selection == "run":
-                self._run_command(data, background=not active_node)
-            elif selection == "run-fullscreen":
-                self._run_command_fullscreen(data)
-            elif selection == "restart":
-                self._stop_command(data.id)
-                self._run_command(data)
-            elif selection == "stop":
-                self._stop_command(data.id)
-            elif selection == "stop-clear":
-                self._stop_command(data.id)
-                self._clear_terminal(data.id)
-            elif selection == "clear":
-                self._clear_terminal(data.id)
+    async def _handle_context_menu(
+        self, node: TreeNode[LintTreeDataType], event: events.Click, active_node: bool = False
+    ):
+        if node.data is None:
+            return
 
-        if data.status == "running":
+        tree = self.lint_tree
+
+        def handle_selection(selection: str | None):
+            if node.data is None or selection is None:
+                return
+            cursor_id = getattr(tree.cursor_node, "id", None)
+
+            if selection == "run":
+                self._run_command(node.data, background=not active_node)
+            elif selection == "run-fullscreen":
+                self._run_command_fullscreen(node.data)
+            elif selection == "restart":
+                self._stop_command(node.data.id)
+                self._run_command(node.data)
+            elif selection == "stop":
+                self._stop_command(node.data.id)
+            elif selection == "stop-clear":
+                self._stop_command(node.data.id)
+                self._clear_terminal(node.data.id)
+            elif selection == "clear":
+                self._clear_terminal(node.data.id)
+            elif selection == "run-all":
+                for command in all_commands(node):
+                    if command.data is not None:
+                        self._run_command(command.data, background=cursor_id != command.id)
+            elif selection == "stop-all":
+                for command in all_commands(node):
+                    if command.data is not None:
+                        self._stop_command(command.data.id)
+            elif selection == "rerun-failures":
+                for command in all_commands(node):
+                    if command.data is not None and command.data.status == "failure":
+                        self._run_command(command.data, background=cursor_id != command.id)
+            elif selection == "select-all":
+                toggle_select_node(node, True)
+            elif selection == "deselect-all":
+                toggle_select_node(node, False)
+
+        if node.data.type == "group":
+            commands = {
+                "run-all": "Run all",
+            }
+
+            sums = sum_selected_commands(node)
+            if sums.running:
+                commands["stop-all"] = "Stop all"
+            if sums.total != sums.selected:
+                commands["select-all"] = "Select all"
+            if sums.selected:
+                commands["deselect-all"] = "Deselect all"
+            if sums.failure:
+                commands["rerun-failures"] = "Re-run failures"
+
+        elif node.data.status == "running":
             commands = {
                 "restart": "Restart",
                 "stop": "Stop",
                 "stop-clear": "Stop and clear",
             }
-        elif data.status in ("failure", "success"):
+        elif node.data.status in ("failure", "success"):
             commands = {
                 "run": "Re-run",
                 "run-fullscreen": "Re-run (fullscreen)",
@@ -205,16 +254,14 @@ class FnugApp(App[None]):
 
     @on(LintTree.OpenContextMenu, "#lint-tree")
     async def _linttree_open_context_menu(self, event: LintTree.OpenContextMenu):
-        if event.node.data is None:
-            return
-        await self._handle_context_menu(event.node.data, event.click_event, active_node=event.is_active_node)
+        await self._handle_context_menu(event.node, event.click_event, active_node=event.is_active_node)
 
     @on(Terminal.OpenContextMenu, "#terminal")
     async def _terminal_open_context_menu(self, event: Terminal.OpenContextMenu):
         node = self.lint_tree.cursor_node
-        if node is None or node.data is None:
+        if node is None or node.data is None or node.data.type == "group":
             return
-        await self._handle_context_menu(node.data, event.click_event, active_node=True)
+        await self._handle_context_menu(node, event.click_event, active_node=True)
 
     @on(ScrollDown)
     def _scroll_down(self, event: ScrollTo) -> None:

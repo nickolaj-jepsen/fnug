@@ -437,16 +437,17 @@ class LintTree(Tree[LintTreeDataType]):
         line = meta["line"]
         node = self._get_node(line)
 
+        if node is None or node.data is None:
+            return
+
         if event.button == 3:
             event.prevent_default()
             event.stop()
-
-        if node and node.data and node.data.type == "group":
-            return  # No need to handle double click on groups
-
-        if event.button == 3 and node:
             await self._right_click(event, node)
             return
+
+        if node.data.type == "group":
+            return  # No need to handle double click on groups
 
         last_click = self.last_click.get(line)
 
