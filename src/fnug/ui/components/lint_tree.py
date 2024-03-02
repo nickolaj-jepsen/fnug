@@ -232,6 +232,7 @@ class LintTree(Tree[LintTreeDataType]):
         Binding("g", "select_git", "Select git autorun commands", show=False),
         Binding("enter", "run_all", "Run selected commands"),
         Binding("c", "clear", "Clear terminal"),
+        Binding("q", "quit", "Quit", show=False),
     ]
 
     class RunCommand(Message):
