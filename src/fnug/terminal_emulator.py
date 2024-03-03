@@ -4,6 +4,7 @@ import math
 import os
 import struct
 import termios
+from collections.abc import AsyncIterable
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +12,8 @@ import pyte
 from rich.console import Console
 from rich.text import Text
 from textual.geometry import Size
+
+from fnug.pyte2rich import pyte2rich
 
 
 def start_message(commands: str) -> Text:
@@ -72,17 +75,17 @@ class FixedHistoryScreen(pyte.HistoryScreen):
 class TerminalEmulator:
     """A terminal emulator."""
 
-    def __init__(self, dimensions: Size, event: asyncio.Event, can_focus: bool = False):
+    def __init__(self, dimensions: Size, can_focus: bool = False):
         self.pty, self.tty = os.openpty()
         self.out = os.fdopen(self.pty, "r+b", 0)
         self.screen = FixedHistoryScreen(dimensions.width, dimensions.height, history=5000, ratio=0.25)
         self.stream = pyte.Stream(self.screen)
-        self.update_ready = event
+        self.update_ready = asyncio.Event()
         self.finished = asyncio.Event()
         self.dimensions = dimensions
         self.can_focus = can_focus
 
-    async def reader(self):
+    async def io_reader(self):
         """Read data from the pty and feed it to the terminal."""
         loop = asyncio.get_running_loop()
 
@@ -97,6 +100,13 @@ class TerminalEmulator:
             await self.finished.wait()
         finally:
             loop.remove_reader(self.out)
+
+    async def render(self) -> AsyncIterable[list[Text]]:
+        """Render the terminal screen."""
+        while True:
+            self.update_ready.clear()
+            yield pyte2rich(self.screen)
+            await self.update_ready.wait()
 
     def echo(self, text: str | Text | list[Text]):
         """Echo text to the terminal."""

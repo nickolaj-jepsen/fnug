@@ -1,4 +1,3 @@
-import asyncio
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -93,7 +92,6 @@ class FnugApp(App[None]):
     terminals: ClassVar[dict[str, TerminalInstance]] = {}
     active_terminal_id: str | None = None
     display_task: Worker[None] | None = None
-    update_ready = asyncio.Event()
 
     def __init__(self, config: Config, cwd: Path | None = None):
         super().__init__()
@@ -267,13 +265,11 @@ class FnugApp(App[None]):
     def _scroll_down(self, event: ScrollTo) -> None:
         if self._active_terminal_emulator is not None:
             self._active_terminal_emulator.emulator.scroll("down")
-            self.update_ready.set()
 
     @on(ScrollUp)
     def _scroll_up(self, event: ScrollTo) -> None:
         if self._active_terminal_emulator is not None:
             self._active_terminal_emulator.emulator.scroll("up")
-            self.update_ready.set()
 
     async def _display_terminal(self, command_id: str):
         scrollbar = self._scrollbar
@@ -284,7 +280,7 @@ class FnugApp(App[None]):
 
         ui = self._terminal
         self.active_terminal_id = command_id
-        task = ui.attach_emulator(terminal.emulator, self.update_ready, scrollbar)
+        task = ui.attach_emulator(terminal.emulator, scrollbar)
         ui.update_scrollbar(scrollbar)
         await task
 
@@ -313,7 +309,6 @@ class FnugApp(App[None]):
 
         te = TerminalEmulator(
             self._terminal_size(),
-            self.update_ready,
             can_focus=command.command.interactive if command.command else False,
         )
 
@@ -333,12 +328,11 @@ class FnugApp(App[None]):
 
         self.terminals[command.id] = TerminalInstance(
             emulator=te,
-            reader_task=self.run_worker(te.reader()),
+            reader_task=self.run_worker(te.io_reader()),
             run_task=self.run_worker(run_shell()),
         )
         if not background:
             self.display_terminal(command.id)
-        self.update_ready.set()
 
     def _run_command_fullscreen(self, command: LintTreeDataType):
         # stop existing command, if it's running
@@ -375,7 +369,6 @@ class FnugApp(App[None]):
             self.terminals[command_id].emulator.echo(stopped_message())
             self.terminals[command_id].run_task.cancel()
             self.terminals[command_id].reader_task.cancel()
-            self.update_ready.set()
             tree.update_status(command_id, "failure")
 
     def _clear_terminal(self, command_id: str):
@@ -387,7 +380,6 @@ class FnugApp(App[None]):
 
         if command_id in self.terminals:
             self.terminals[command_id].emulator.clear()
-            self.update_ready.set()
             tree.update_status(command_id, "pending")
 
     def _terminal_size(self) -> Size:
