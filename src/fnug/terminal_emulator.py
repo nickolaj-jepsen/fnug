@@ -85,22 +85,6 @@ class TerminalEmulator:
         self.dimensions = dimensions
         self.can_focus = can_focus
 
-    async def io_reader(self):
-        """Read data from the pty and feed it to the terminal."""
-        loop = asyncio.get_running_loop()
-
-        def on_output():
-            self.stream.feed(self.out.read(65536).decode())
-            self.screen.dirty.clear()
-            self.update_ready.set()
-
-        loop.add_reader(self.out, on_output)
-
-        try:
-            await self.finished.wait()
-        finally:
-            loop.remove_reader(self.out)
-
     async def render(self) -> AsyncIterable[list[Text]]:
         """Render the terminal screen."""
         while True:
@@ -131,6 +115,15 @@ class TerminalEmulator:
         # Echo command to tty
         self.echo(start_message(command))
 
+        loop = asyncio.get_running_loop()
+
+        def on_output():
+            self.stream.feed(self.out.read(65536).decode())
+            self.screen.dirty.clear()
+            self.update_ready.set()
+
+        loop.add_reader(self.out, on_output)
+
         process = await asyncio.subprocess.create_subprocess_shell(
             command,
             cwd=cwd,
@@ -146,6 +139,8 @@ class TerminalEmulator:
             process.terminate()
             await process.wait()
             raise
+        finally:
+            loop.remove_reader(self.out)
 
         if code == 0:
             self.echo(success_message())

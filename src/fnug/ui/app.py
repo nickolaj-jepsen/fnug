@@ -75,7 +75,6 @@ class TerminalInstance:
     """A collection of tasks and emulator for a terminal."""
 
     emulator: TerminalEmulator
-    reader_task: Worker[None]
     run_task: Worker[None]
 
 
@@ -102,13 +101,6 @@ class FnugApp(App[None]):
             yield LintTree(self.config, cwd=self.cwd, id="lint-tree", classes="custom-scrollbar")
             yield Terminal(id="terminal", classes="custom-scrollbar")
         yield Footer()
-
-    @property
-    def _active_terminal_emulator(self) -> TerminalInstance | None:
-        if self.active_terminal_id is None:
-            return None
-
-        return self.terminals[self.active_terminal_id]
 
     @property
     def lint_tree(self) -> LintTree:
@@ -292,11 +284,9 @@ class FnugApp(App[None]):
 
         if command.id in self.terminals:
             self.terminals[command.id].run_task.cancel()
-            self.terminals[command.id].reader_task.cancel()
 
         self.terminals[command.id] = TerminalInstance(
             emulator=te,
-            reader_task=self.run_worker(te.io_reader()),
             run_task=self.run_worker(run_shell()),
         )
         if not background:
@@ -336,7 +326,6 @@ class FnugApp(App[None]):
             self.terminals[command_id].emulator.echo("")  # makes sure the cursor position is reset
             self.terminals[command_id].emulator.echo(stopped_message())
             self.terminals[command_id].run_task.cancel()
-            self.terminals[command_id].reader_task.cancel()
             tree.update_status(command_id, "failure")
 
     def _clear_terminal(self, command_id: str):
