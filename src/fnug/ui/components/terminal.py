@@ -74,6 +74,7 @@ class Terminal(Widget, can_focus=False):
     DEFAULT_CSS = """
     ScrollBar {
       dock: right;
+      display: none;
       width: 1;
     }
     """
@@ -125,6 +126,7 @@ class Terminal(Widget, can_focus=False):
             scrollbar.position = 0
             scrollbar.window_virtual_size = 0
             scrollbar.refresh()
+            scrollbar.styles.display = "none"
             return
 
         scrollbar.position = len(self.emulator.screen.history.top)
@@ -133,6 +135,8 @@ class Terminal(Widget, can_focus=False):
             + self.emulator.screen.lines
             + len(self.emulator.screen.history.bottom)
         )
+        if scrollbar.window_virtual_size > scrollbar.window_size:
+            scrollbar.styles.display = "block"
         scrollbar.refresh()
 
     async def attach_emulator(self, emulator: TerminalEmulator | None):
