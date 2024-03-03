@@ -27,25 +27,7 @@ class ContextMenuItem(Label):
 class ContextMenu(ModalScreen[str | None]):
     """A context menu."""
 
-    DEFAULT_CSS = """
-    ContextMenu {
-      background: rgba(0,0,0,0.35);
-    }
-
-    #container {
-        background: $background;
-    }
-
-    .options {
-      width: 100%;
-      padding: 0 1;
-    }
-
-    .options:hover {
-      background: $boost;
-      text-style: underline;
-    }
-    """
+    CSS_PATH = "context_menu.tcss"
 
     def __init__(self, options: dict[str, str], click_event: events.Click) -> None:
         self.options = options
