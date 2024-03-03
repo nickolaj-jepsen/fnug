@@ -146,7 +146,7 @@ class FnugApp(App[None]):
         self._run_command_fullscreen(event.node.data)
 
     @on(LintTree.StopCommand, "#lint-tree")
-    def _action_stop_command(self, event: LintTree.RunCommand):
+    def _action_stop_command(self, event: LintTree.StopCommand):
         if event.node.data:
             self._stop_command(event.node.data.id)
 
