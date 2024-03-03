@@ -88,22 +88,22 @@ def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[L
         yield from all_commands(child)
 
 
-def select_git_autorun(cwd: Path, node: TreeNode[LintTreeDataType]):
-    """Select nodes if it has git autorun enabled and there are changes in the repos."""
+def select_git_auto(cwd: Path, node: TreeNode[LintTreeDataType]):
+    """Select nodes if it has git auto enabled and there are changes in the repos."""
     if not node.data or not node.data.command:
         return
 
     clear_git_cache()
 
-    autorun = node.data.command.autorun
+    auto = node.data.command.auto
     node.data.selected = False
 
-    if autorun.always is True:
+    if auto.always is True:
         node.data.selected = True
 
-    if autorun.git and autorun.path:
-        for path in autorun.path:
-            if detect_repo_changes(cwd / path, autorun.regex):
+    if auto.git and auto.path:
+        for path in auto.path:
+            if detect_repo_changes(cwd / path, auto.regex):
                 node.data.selected = True
                 continue
 
@@ -174,15 +174,15 @@ def attach_command(
     return command_leafs
 
 
-async def watch_autorun_task(command_nodes: Iterator[TreeNode[LintTreeDataType]], cwd: Path):
-    """Create a task that watches for changes in the filesystem and selects autorun commands."""
+async def watch_auto_task(command_nodes: Iterator[TreeNode[LintTreeDataType]], cwd: Path):
+    """Create a task that watches for changes in the filesystem and selects auto commands."""
     paths: defaultdict[Path, list[TreeNode[LintTreeDataType]]] = defaultdict(list)
 
     for node in command_nodes:
-        if not node.data or not node.data.command or not node.data.command.autorun.path:
+        if not node.data or not node.data.command or not node.data.command.auto.path:
             continue
 
-        for path in node.data.command.autorun.path:
+        for path in node.data.command.auto.path:
             paths[cwd / path].append(node)
 
     async for change_set in awatch(*paths.keys(), step=500, debounce=5000):
@@ -196,8 +196,8 @@ async def watch_autorun_task(command_nodes: Iterator[TreeNode[LintTreeDataType]]
                 if not node.data or not node.data.command:
                     continue
 
-                if node.data.command.autorun.regex:
-                    if any(re.search(r, change_str) for r in node.data.command.autorun.regex):
+                if node.data.command.auto.regex:
+                    if any(re.search(r, change_str) for r in node.data.command.auto.regex):
                         select_node(node)
                 else:
                     select_node(node)
@@ -229,7 +229,7 @@ class LintTree(Tree[LintTreeDataType]):
         Binding("ctrl+r", "exclusive_run", "Run fullscreen", show=False),
         Binding("s", "stop", "Stop", show=False),
         Binding("space", "toggle_select", "Select"),
-        Binding("g", "select_git", "Select git autorun commands", show=False),
+        Binding("g", "select_git", "Select based on git changes", show=False),
         Binding("enter", "run_all", "Run selected commands"),
         Binding("c", "clear", "Clear terminal", show=False),
         Binding("q", "quit", "Quit", show=False),
@@ -405,9 +405,9 @@ class LintTree(Tree[LintTreeDataType]):
         toggle_select_node(self.cursor_node)
 
     def action_select_git(self):
-        """Select all git autorun commands."""
+        """Select all git auto commands."""
         for command in all_commands(self.root):
-            select_git_autorun(self.cwd, command)
+            select_git_auto(self.cwd, command)
 
     def action_toggle_select_click(self, line: int, node: TreeNode[LintTreeDataType] | None = None):
         """Toggle a node on click."""
@@ -538,7 +538,7 @@ class LintTree(Tree[LintTreeDataType]):
     def _setup(self):
         self.command_leafs = attach_command(self.root, self.config, self.cwd, root=True)
         self.action_select_git()
-        self.watch_task = self.run_worker(watch_autorun_task(all_commands(self.root), self.cwd))
+        self.watch_task = self.run_worker(watch_auto_task(all_commands(self.root), self.cwd))
 
     def _on_mount(self, event: events.Mount):
         self.call_after_refresh(self._setup)

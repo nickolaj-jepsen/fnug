@@ -5,7 +5,7 @@
 [![image](https://img.shields.io/pypi/pyversions/fnug.svg)](https://pypi.python.org/pypi/fnug)
 [![Actions status](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
 
-Fnug /_fnuk_/ is a command runner, well actually it's a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but with a focus on running all your lint and test commands, at once, and displaying the result of those command. Confused? Watch the [demo](#demo)
+Fnug is a command runner, well actually it's a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but with a focus on running all your lint and test commands, at once, and displaying the result of those command. Confused? Watch the [demo](#demo)
 
 ![screenshot](https://github.com/nickolaj-jepsen/fnug/assets/1039554/3fd812fc-e1dc-4dd2-86eb-de91dc8e027f)
 
@@ -41,7 +41,7 @@ Fnug is controlled by a `.fnug.yaml` configuration file (or `.fnug.json` if that
 
 #### Minimal example:
 
-Runs a single commands (without autorun)
+Runs a single commands
 
 ```yaml
 fnug_version: 0.1.0
@@ -51,9 +51,9 @@ commands:
     cmd: echo world
 ```
 
-#### Git autorun example:
+#### Git selection example:
 
-Uses git autorun to select commands (reselect by pressing "g")
+Uses git auto to select commands based on what files have uncommitted changes (reselect by pressing "g")
 
 ```yaml
 fnug_version: 0.1.0
@@ -61,7 +61,7 @@ name: fnug
 commands:
   - name: hello
     cmd: echo world
-    autorun:
+    auto:
       git: true
       path:
         - "./"
@@ -69,9 +69,9 @@ commands:
         - "\\.fnug\\.yaml$"
 ```
 
-#### Watch autorun example:
+#### File watching example:
 
-Uses file autorun to monitor the file system for changes, and select commands accordingly, can be combined with git autorun
+Uses file watching to monitor the file system for changes, and select commands accordingly, can be combined with git auto
 
 ```yaml
 fnug_version: 0.1.0
@@ -79,7 +79,7 @@ name: fnug
 commands:
   - name: hello
     cmd: echo world
-    autorun:
+    auto:
       watch: true
       path:
         - "./"

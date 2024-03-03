@@ -2,7 +2,7 @@ fnug_version: 0.1.0
 name: fnug
 children:
   - name: fnug
-    autorun:
+    auto:
       watch: true
       git: true
       path:
@@ -32,18 +32,18 @@ children:
           cat src/fnug/terminal_emulator.py
           cat src/fnug/terminal_emulator.py
     children:
-      - name: nested-autorun
-        autorun:
+      - name: nested-auto
+        auto:
           always: true
         commands:
-          - name: test-autorun
+          - name: test-auto
             cmd: cat src/fnug/terminal_emulator.py
-          - name: test-not-autorun
-            autorun:
+          - name: test-not-auto
+            auto:
               always: false
             cmd: cat src/fnug/terminal_emulator.py
       - name: not-expanded
-        autorun:
+        auto:
           always: false
         commands:
           - name: test-not-expanded
