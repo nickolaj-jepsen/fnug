@@ -28,11 +28,10 @@ jobs:
           python-version: 3.12
       - name: Setup Rye
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
-        uses: eifinger/setup-rye@v1
+        uses: eifinger/setup-rye@v2
         with:
           enable-cache: true
           cache-prefix: 3.12
-          version: '0.27.0'
       - name: Install dependencies
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
         run: |
