@@ -275,16 +275,6 @@ class LintTree(Tree[LintTreeDataType]):
             """The tree that sent the message."""
             return self.nodes[0].tree
 
-    class Resize(Message):
-        def __init__(self, tree: Tree[LintTreeDataType]) -> None:
-            self.tree: Tree[LintTreeDataType] = tree
-            super().__init__()
-
-        @property
-        def control(self) -> Tree[LintTreeDataType]:
-            """The tree that sent the message."""
-            return self.tree
-
     class ClearTerminal(Message):
         def __init__(self, node: TreeNode[LintTreeDataType]) -> None:
             self.node: TreeNode[LintTreeDataType] = node
@@ -562,7 +552,6 @@ class LintTree(Tree[LintTreeDataType]):
         if self.grabbed:
             self.styles.border_right = ("solid", "#a64c38")
             self.styles.width = event.screen_x + 1
-            self.post_message(self.Resize(self))
         elif event.screen_x == self.size.width:  # Hover highlight
             self.styles.border_right = ("solid", "#a64c38")
         else:

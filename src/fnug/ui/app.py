@@ -12,8 +12,6 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal
-from textual.geometry import Size
-from textual.scrollbar import ScrollBar, ScrollDown, ScrollTo, ScrollUp
 from textual.widgets import Footer
 from textual.widgets._tree import TreeNode
 from textual.worker import Worker
@@ -101,9 +99,8 @@ class FnugApp(App[None]):
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         with Horizontal(id="main"):
-            yield LintTree(self.config, cwd=self.cwd, id="lint-tree")
-            yield Terminal(id="terminal")
-            yield ScrollBar()
+            yield LintTree(self.config, cwd=self.cwd, id="lint-tree", classes="custom-scrollbar")
+            yield Terminal(id="terminal", classes="custom-scrollbar")
         yield Footer()
 
     @property
@@ -121,10 +118,6 @@ class FnugApp(App[None]):
     @property
     def _terminal(self) -> Terminal:
         return self.query_one("#terminal", Terminal)
-
-    @property
-    def _scrollbar(self) -> ScrollBar:
-        return self.query_one("ScrollBar", ScrollBar)
 
     @on(LintTree.NodeHighlighted, "#lint-tree")
     def _switch_terminal(self, event: LintTree.NodeHighlighted[LintTreeDataType]):
@@ -160,10 +153,6 @@ class FnugApp(App[None]):
         for node in event.nodes:
             if node.data is not None:
                 self._run_command(node.data, background=cursor_id != node.id)
-
-    @on(LintTree.Resize, "#lint-tree")
-    async def _tree_resize(self, event: LintTree.Resize):
-        await self._on_resize()
 
     async def _handle_context_menu(
         self, node: TreeNode[LintTreeDataType], event: events.Click, active_node: bool = False
@@ -261,34 +250,10 @@ class FnugApp(App[None]):
             return
         await self._handle_context_menu(node, event.click_event, active_node=True)
 
-    @on(ScrollDown)
-    def _scroll_down(self, event: ScrollTo) -> None:
-        if self._active_terminal_emulator is not None:
-            self._active_terminal_emulator.emulator.scroll("down")
-
-    @on(ScrollUp)
-    def _scroll_up(self, event: ScrollTo) -> None:
-        if self._active_terminal_emulator is not None:
-            self._active_terminal_emulator.emulator.scroll("up")
-
-    async def _display_terminal(self, command_id: str):
-        scrollbar = self._scrollbar
-        terminal = self.terminals.get(command_id)
-        if terminal is None:
-            scrollbar.window_virtual_size = 0
-            return
-
-        ui = self._terminal
-        self.active_terminal_id = command_id
-        task = ui.attach_emulator(terminal.emulator, scrollbar)
-        ui.update_scrollbar(scrollbar)
-        await task
-
     def display_terminal(self, command_id: str):
         """Display the terminal for a command."""
         if self.display_task is not None:
             self.display_task.cancel()
-            self._terminal.clear()
 
         tree = self.lint_tree
 
@@ -298,7 +263,10 @@ class FnugApp(App[None]):
                 update_node(new_node)
                 self.lint_tree.select_node(new_node)
 
-        self.display_task = self.run_worker(self._display_terminal(command_id), name="display_task")
+        terminal = self.terminals.get(command_id)
+        self.display_task = self.run_worker(
+            self._terminal.attach_emulator(terminal.emulator if terminal else None), name="display_task"
+        )
 
     def _run_command(self, command: LintTreeDataType, background: bool = False):
         if command.type != "command":
@@ -308,7 +276,7 @@ class FnugApp(App[None]):
         tree.update_status(command.id, "running")
 
         te = TerminalEmulator(
-            self._terminal_size(),
+            self._terminal.size,
             can_focus=command.command.interactive if command.command else False,
         )
 
@@ -381,22 +349,3 @@ class FnugApp(App[None]):
         if command_id in self.terminals:
             self.terminals[command_id].emulator.clear()
             tree.update_status(command_id, "pending")
-
-    def _terminal_size(self) -> Size:
-        scrollbar_width = 1
-        return Size(
-            width=self.size.width - self.lint_tree.outer_size.width - scrollbar_width, height=self.size.height - 1
-        )
-
-    def _on_mount(self):
-        self.call_after_refresh(self._on_resize)
-
-    async def _on_resize(self, event: events.Resize | None = None) -> None:
-        size = self._terminal_size()
-        scrollbar = self._scrollbar
-        scrollbar.window_size = size.height
-        scrollbar.window_virtual_size = 0
-
-        for terminal in self.terminals.values():
-            self._scrollbar.window_size = size.height
-            terminal.emulator.dimensions = size
