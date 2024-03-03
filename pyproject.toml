@@ -99,6 +99,7 @@ ignore = [
     "D107",
     "D203",
     "D212",
+    "B010", # Makes it hard to attach additional attributes with pyright
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -18,7 +18,6 @@ children:
           - format
       - name: pyright
         cmd: rye run pyright src
-        id: fnug.pyright
       - name: test
         cmd: rye run test
         depends:

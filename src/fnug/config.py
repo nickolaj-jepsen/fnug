@@ -40,13 +40,6 @@ class Dependency(BaseModel):
 
     path: Path
     always: bool = False
-    once: bool = False
-
-
-class _InternalDependency(Dependency):
-    """Like dependency, but with the command object."""
-
-    command: "ConfigCommand"
 
 
 class ConfigCommand(BaseModel):
@@ -58,11 +51,9 @@ class ConfigCommand(BaseModel):
     cwd: Path | None = None
     interactive: bool = False
     auto: ConfigAuto = ConfigAuto()
-    raw_dependencies: list[Dependency] = Field(default_factory=list, alias="depends")
-    dependencies: list[_InternalDependency] = Field(default_factory=list, exclude=True, alias="__internal_dependencies")
-    path: Path = Field(default_factory=Path)
+    depends: list[Dependency] = Field(default_factory=list)
 
-    @field_validator("raw_dependencies", mode="before")
+    @field_validator("depends", mode="before")
     @classmethod
     def _parse_simple_dependencies(cls, v: Any) -> list[Dependency]:
         result: list[Dependency] = []
@@ -74,6 +65,10 @@ class ConfigCommand(BaseModel):
 
         return result
 
+    def __hash__(self):
+        """Hash function for caching."""
+        return hash(self.id)
+
 
 class ConfigCommandGroup(BaseModel):
     """A group of commands or subgroups."""
@@ -83,7 +78,6 @@ class ConfigCommandGroup(BaseModel):
     commands: list[ConfigCommand] = []
     children: list["ConfigCommandGroup"] = []
     auto: ConfigAuto = ConfigAuto()
-    path: Path = Field(default_factory=Path)
 
     def _propagate_auto(self):
         """Propagate auto settings to all children."""
@@ -101,27 +95,12 @@ class ConfigCommandGroup(BaseModel):
             commands.extend(group.all_commands())
         return commands
 
-    def _dependency_map(self, path: Path = Path()) -> dict[Path, ConfigCommand]:
-        """Get all commands."""
-        commands: dict[Path, ConfigCommand] = {}
-        for command in self.commands:
-            commands[path / command.name] = command
-        for group in self.children:
-            commands.update(group._dependency_map(path / group.name))
-
-        return commands
-
-    def _resolve_dependencies(self, commands: dict[Path, ConfigCommand] | None = None):
-        """Resolve dependencies."""
-        commands = commands or self._dependency_map()
-
-        for path, command in commands.items():
-            for dep in command.raw_dependencies:
-                dep_path = path.parent / dep.path
-                if dep_path not in commands:
-                    raise ValueError(f"Dependency {dep} not found for command {command.name}")
-
-                command.dependencies.append(_InternalDependency(**dep.model_dump(), command=commands[dep_path]))
+    def get_command(self, id_: str) -> ConfigCommand | None:
+        """Get a command by id."""
+        for command in self.all_commands():
+            if command.id == id_:
+                return command
+        return None
 
 
 class Config(ConfigCommandGroup):
@@ -131,7 +110,6 @@ class Config(ConfigCommandGroup):
 
     def model_post_init(self, __context: Any) -> None:
         """Post-init hook to propagate autorun settings."""
-        self._resolve_dependencies()
         self._propagate_auto()
 
 

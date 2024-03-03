@@ -2,9 +2,8 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from graphlib import TopologicalSorter
 from pathlib import Path
-from typing import ClassVar, Union
+from typing import ClassVar
 
 import click
 import rich
@@ -18,7 +17,7 @@ from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
 from fnug.config import Config
-from fnug.scheduler import get_active_commands, schedule_commands
+from fnug.scheduler import Scheduler
 from fnug.terminal_emulator import (
     TerminalEmulator,
     any_key_message,
@@ -31,11 +30,9 @@ from fnug.ui.components.context_menu import ContextMenu
 from fnug.ui.components.lint_tree import (
     LintTree,
     LintTreeDataType,
-    StatusType,
     all_commands,
     sum_selected_commands,
     toggle_select_node,
-    update_node,
 )
 from fnug.ui.components.terminal import Terminal
 
@@ -92,7 +89,8 @@ class FnugApp(App[None]):
     terminals: ClassVar[dict[str, TerminalInstance]] = {}
     active_terminal_id: str | None = None
     display_task: Worker[None] | None = None
-    schedule: Union["TopologicalSorter[str]", None] = None
+    run_task: Worker[None] | None = None
+    scheduler: Scheduler | None = None
 
     def __init__(self, config: Config, cwd: Path | None = None):
         super().__init__()
@@ -121,7 +119,7 @@ class FnugApp(App[None]):
             self.display_terminal(event.node.data.id)
 
     @on(LintTree.RunCommand, "#lint-tree")
-    def _action_run_command(self, event: LintTree.RunCommand):
+    async def _action_run_command(self, event: LintTree.RunCommand):
         if event.node.data is not None:
             self._run_command(event.node.data)
 
@@ -137,40 +135,22 @@ class FnugApp(App[None]):
         if event.node.data:
             self._stop_command(event.node.data.id)
 
-    @on(LintTree.ClearTerminal, "#lint-tree")
-    def _action_clear_terminal(self, event: LintTree.ClearTerminal):
-        if event.node.data:
-            self._clear_terminal(event.node.data.id)
+    def run_commands(self, commands: list[str]) -> None:
+        """Run a list of commands."""
+        if self.scheduler is None:
+            return
+
+        self.scheduler.schedule(commands)
+
+        if self.run_task and not self.run_task.is_finished:
+            return
+
+        self.run_task = self.run_worker(self.scheduler.run(), name="run_task")
 
     @on(LintTree.RunAllCommand, "#lint-tree")
     async def _run_all(self, event: LintTree.RunAllCommand):
-        cursor_id = getattr(self.lint_tree.cursor_node, "id", None)
-
         command_ids = [x.data.id for x in event.nodes if x.data]
-        active_commands = get_active_commands(command_ids, self.config.all_commands())
-
-        for command in active_commands:
-            self.lint_tree.update_status(command.id, "waiting")
-
-        self.schedule = schedule_commands(active_commands)
-        ready_commands = self.schedule.get_ready()
-
-        for command_id in ready_commands:
-            if command := self.lint_tree.command_leafs.get(command_id):
-                if not command.data:
-                    return
-                self._run_command(command.data, background=cursor_id != "TODO")
-
-    def _update_status(self, command_id: str, status: StatusType):
-        self.lint_tree.update_status(command_id, status)
-        if self.schedule:
-            if status == "success":
-                self.schedule.done(command_id)
-            for ready_command_id in self.schedule.get_ready():
-                if command := self.lint_tree.command_leafs.get(ready_command_id):
-                    if not command.data:
-                        return
-                    self._run_command(command.data, background=True)
+        self.run_commands(command_ids)
 
     async def _handle_context_menu(
         self, node: TreeNode[LintTreeDataType], event: events.Click, active_node: bool = False
@@ -273,47 +253,14 @@ class FnugApp(App[None]):
         if self.display_task is not None:
             self.display_task.cancel()
 
-        tree = self.lint_tree
-
-        if tree.cursor_node and tree.cursor_node.data and tree.cursor_node.data.id != command_id:
-            new_node = tree.command_leafs.get(command_id)
-            if new_node:
-                update_node(new_node)
-                self.lint_tree.select_node(new_node)
-
-        terminal = self.terminals.get(command_id)
-        self.display_task = self.run_worker(
-            self._terminal.attach_emulator(terminal.emulator if terminal else None), name="display_task"
-        )
-
-    def _run_command(self, command: LintTreeDataType, background: bool = False):
-        if command.type != "command":
+        if self.scheduler is None:
             return
 
-        self._update_status(command.id, "running")
+        terminal = self.scheduler.get_terminal_emulator(command_id)
+        self.display_task = self.run_worker(self._terminal.attach_emulator(terminal), name="display_task")
 
-        te = TerminalEmulator(
-            self._terminal.size,
-            can_focus=command.command.interactive if command.command else False,
-        )
-
-        async def run_shell():
-            cwd = self.cwd
-            if command.command and command.command.cwd:
-                cwd = cwd / command.command.cwd
-
-            if command.command and await te.run_shell(command.command.cmd, cwd):
-                self._update_status(command.id, "success")
-            else:
-                self._update_status(command.id, "failure")
-
-        if command.id in self.terminals:
-            self.terminals[command.id].run_task.cancel()
-
-        self.terminals[command.id] = TerminalInstance(
-            emulator=te,
-            run_task=self.run_worker(run_shell()),
-        )
+    def _run_command(self, command: LintTreeDataType, background: bool = False):
+        self.run_commands([command.id])
         if not background:
             self.display_terminal(command.id)
 
@@ -360,6 +307,14 @@ class FnugApp(App[None]):
         if command is None or command.status == "running":
             return
 
-        if command_id in self.terminals:
-            self.terminals[command_id].emulator.clear()
+        if self.scheduler and (emulator := self.scheduler.get_terminal_emulator(command_id)):
+            emulator.clear()
             tree.update_status(command_id, "pending")
+
+    def _setup(self):
+        self.scheduler = Scheduler(
+            self.config, update_fn=self.lint_tree.update_status, terminal_size=self._terminal.size, cwd=self.cwd
+        )
+
+    def _on_mount(self) -> None:
+        self.call_after_refresh(self._setup)
