@@ -61,10 +61,11 @@ class _CommandProvider(Provider):
 
             score = matcher.match(node_id)
             if score > 0:
+                callback: partial[Callable[[], None]] = partial(app.display_terminal, node_id)
                 yield Hit(
                     score,
-                    matcher.highlight(node.data.name),
-                    partial(app.display_terminal, node_id),
+                    match_display=matcher.highlight(node.data.name),
+                    command=callback,
                     text=node.data.name,
                     help=node_id,
                 )
