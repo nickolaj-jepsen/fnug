@@ -64,6 +64,13 @@ class ConfigCommandGroup(BaseModel):
             child.auto = child.auto.merge(self.auto)
             child._propagate_auto()
 
+    @model_validator(mode="after")
+    def _no_empty_groups(self):
+        """Ensure that groups are not empty."""
+        if not self.commands and not self.children:
+            raise ValueError("A group must have at least one command or subgroup.")
+        return self
+
 
 class Config(ConfigCommandGroup):
     """The root config object."""
