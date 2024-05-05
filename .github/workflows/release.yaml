@@ -21,11 +21,6 @@ jobs:
         id: versioncheck
         with:
           pyproject-path: "./pyproject.toml"
-      - name: Setup Python
-        if: steps.versioncheck.outputs.local_version_is_higher == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.12
       - name: Setup Rye
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
         uses: eifinger/setup-rye@v2
@@ -44,7 +39,7 @@ jobs:
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
         run: rye publish --token ${{ secrets.PYPI_API_TOKEN }} --yes
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
         with:
           files: |
