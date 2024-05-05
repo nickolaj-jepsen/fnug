@@ -8,6 +8,7 @@ $primary-darker: #8c3a2d;
   width: 30;
   background: $background;
   border-right: solid $primary;
+  margin-left: 1;
 }
 
 #terminal {
