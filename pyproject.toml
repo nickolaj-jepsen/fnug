@@ -13,6 +13,7 @@ dependencies = [
     "pyte>=0.8.2",
     "pyyaml>=6.0.1",
     "watchfiles>=0.21.0",
+    "pygit2>=1.14.1",
 ]
 readme = "README.md"
 requires-python = ">= 3.10"

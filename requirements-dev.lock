@@ -20,6 +20,8 @@ async-timeout==4.0.3
     # via aiohttp
 attrs==23.2.0
     # via aiohttp
+cffi==1.16.0
+    # via pygit2
 click==8.1.7
     # via fnug
     # via textual-dev
@@ -55,10 +57,14 @@ packaging==23.2
     # via pytest
 pluggy==1.5.0
     # via pytest
+pycparser==2.22
+    # via cffi
 pydantic==2.7.1
     # via fnug
 pydantic-core==2.18.2
     # via pydantic
+pygit2==1.14.1
+    # via fnug
 pygments==2.17.2
     # via rich
 pyright==1.1.361

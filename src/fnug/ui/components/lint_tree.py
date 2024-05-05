@@ -19,7 +19,7 @@ from textual.worker import Worker
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
 from fnug.config import Config, ConfigCommand, ConfigCommandGroup
-from fnug.git import clear_git_cache, detect_repo_changes
+from fnug.git import detect_repo_changes
 
 StatusType = Literal["success", "failure", "running", "pending"]
 
@@ -92,8 +92,6 @@ def select_git_auto(cwd: Path, node: TreeNode[LintTreeDataType]):
     """Select nodes if it has git auto enabled and there are changes in the repos."""
     if not node.data or not node.data.command:
         return
-
-    clear_git_cache()
 
     auto = node.data.command.auto
     node.data.selected = False
