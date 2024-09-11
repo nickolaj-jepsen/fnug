@@ -18,6 +18,22 @@ children:
         cmd: rye run ruff format .
       - name: test
         cmd: rye run test
+  - name: rust
+    cwd: ./rust
+    auto:
+      watch: true
+      git: true
+      path:
+        - "./rust"
+      regex:
+        - "\\.rs$"
+    commands:
+      - name: fmt
+        cmd: cargo fmt
+      - name: clippy
+        cmd: cargo clippy --fix --allow-dirty --allow-staged
+      - name: stub gen
+        cmd: cargo run --bin stub_gen
   - name: debug
     commands:
       - name: htop
