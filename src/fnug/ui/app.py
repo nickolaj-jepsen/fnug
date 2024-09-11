@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import click
 import rich
@@ -16,7 +16,6 @@ from textual.widgets import Footer
 from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
-from fnug.config import Config
 from fnug.terminal_emulator import (
     TerminalEmulator,
     any_key_message,
@@ -35,6 +34,11 @@ from fnug.ui.components.lint_tree import (
     update_node,
 )
 from fnug.ui.components.terminal import Terminal
+
+if TYPE_CHECKING:
+    from fnug.core import CommandGroup
+else:
+    CommandGroup = None
 
 
 class _CommandProvider(Provider):
@@ -91,7 +95,7 @@ class FnugApp(App[None]):
     active_terminal_id: str | None = None
     display_task: Worker[None] | None = None
 
-    def __init__(self, config: Config, cwd: Path | None = None):
+    def __init__(self, config: CommandGroup, cwd: Path | None = None):
         super().__init__()
         self.cwd = (cwd or Path.cwd()).resolve()
         self.config = config
