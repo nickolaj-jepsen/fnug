@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal, Optional
 
 from rich.style import Style
 from rich.text import Text
@@ -18,8 +18,10 @@ from textual.widgets._tree import TOGGLE_STYLE, TreeNode
 from textual.worker import Worker
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
-from fnug.config import Config, ConfigCommand, ConfigCommandGroup
 from fnug.git import detect_repo_changes
+
+if TYPE_CHECKING:
+    from fnug.core import Command, CommandGroup
 
 StatusType = Literal["success", "failure", "running", "pending"]
 
@@ -31,8 +33,8 @@ class LintTreeDataType:
     id: str
     name: str
     type: Literal["group", "command"]
-    command: ConfigCommand | None = None
-    group: ConfigCommandGroup | None = None
+    command: Optional["Command"] = None
+    group: Optional["CommandGroup"] = None
     status: StatusType | None = None
     selected: bool = False
 
@@ -146,7 +148,7 @@ def sum_selected_commands(source_node: TreeNode[LintTreeDataType]) -> CommandSum
 
 def attach_command(
     tree: TreeNode[LintTreeDataType],
-    command_group: ConfigCommandGroup,
+    command_group: "CommandGroup",
     cwd: Path,
     root: bool = False,
 ) -> dict[str, TreeNode[LintTreeDataType]]:
@@ -301,7 +303,7 @@ class LintTree(Tree[LintTreeDataType]):
 
     def __init__(
         self,
-        config: Config,
+        config: "CommandGroup",
         cwd: Path,
         *,
         name: str | None = None,

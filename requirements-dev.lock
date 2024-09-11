@@ -6,6 +6,8 @@
 #   features: []
 #   all-features: false
 #   with-sources: false
+#   generate-hashes: false
+#   universal: false
 
 -e file:.
 aiohttp==3.9.1
@@ -55,6 +57,7 @@ nodeenv==1.8.0
     # via pyright
 packaging==23.2
     # via pytest
+pip==24.2
 pluggy==1.5.0
     # via pytest
 pycparser==2.22
