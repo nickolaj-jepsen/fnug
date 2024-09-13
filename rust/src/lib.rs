@@ -1,5 +1,6 @@
-use crate::command_group::{build_command_group, CommandGroup};
+use crate::command_group::{build_command_group, Command, CommandGroup};
 use crate::config_file::ConfigError;
+use crate::git::{commands_with_changes, GitError};
 use config_file::Config;
 use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
@@ -9,13 +10,13 @@ use std::path::PathBuf;
 
 mod command_group;
 mod config_file;
+mod git;
 
 #[gen_stub_pyclass]
 #[pyclass]
 struct FnugCore {
     #[pyo3(get)]
     config: CommandGroup,
-    #[pyo3(get)]
     cwd: PathBuf,
 }
 
@@ -23,6 +24,7 @@ struct FnugCore {
 #[pymethods]
 impl FnugCore {
     #[new]
+    #[pyo3(signature = (config_file=None))]
     fn new(config_file: Option<&str>) -> PyResult<Self> {
         let config_path = match config_file {
             Some(file) => {
@@ -59,6 +61,34 @@ impl FnugCore {
             config: command_group,
             cwd,
         })
+    }
+
+    #[getter]
+    fn get_cwd(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let pathlib = py.import_bound("pathlib")?;
+        let path = pathlib.getattr("Path")?;
+        let obj = path.call1((self.cwd.to_string_lossy(),))?;
+        let resolved = obj.call_method0("resolve")?;
+        Ok(resolved.into())
+    }
+
+    fn all_commands(&self) -> Vec<Command> {
+        self.config.all_commands().into_iter().cloned().collect()
+    }
+
+    fn commands_with_git_changes(&self) -> PyResult<Vec<Command>> {
+        let commands = self.config.all_commands();
+        match commands_with_changes(commands) {
+            Ok(commands) => Ok(commands.into_iter().cloned().collect()),
+            Err(GitError::NoGitRepo(path)) => Err(PyValueError::new_err(format!(
+                "No git repository found for path: {:?}",
+                path
+            ))),
+            Err(GitError::Regex(err)) => Err(PyValueError::new_err(format!(
+                "Error parsing regex: {:?}",
+                err
+            ))),
+        }
     }
 }
 

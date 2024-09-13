@@ -1,32 +1,44 @@
 use crate::config_file::{ConfigAuto, ConfigCommand, ConfigCommandGroup};
-use pyo3::pyclass;
+use pyo3::{pyclass, pymethods};
 use pyo3_stub_gen::derive::gen_stub_pyclass;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 #[gen_stub_pyclass]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[pyclass]
 #[pyo3(get_all)]
 pub struct Auto {
-    watch: bool,
-    git: bool,
-    path: Vec<PathBuf>,
-    regex: Vec<String>,
-    always: bool,
+    pub watch: bool,
+    pub git: bool,
+    pub path: Vec<PathBuf>,
+    pub regex: Vec<String>,
+    pub always: bool,
+}
+
+impl Default for Auto {
+    fn default() -> Self {
+        Auto {
+            watch: false,
+            git: false,
+            path: vec![PathBuf::from(".")],
+            regex: Vec::new(),
+            always: false,
+        }
+    }
 }
 
 #[gen_stub_pyclass]
 #[derive(Debug, Clone)]
 #[pyclass]
 #[pyo3(get_all)]
-struct Command {
+pub struct Command {
     id: String,
     name: String,
     cmd: String,
     cwd: PathBuf,
     interactive: bool,
-    auto: Auto,
+    pub auto: Auto,
 }
 
 #[gen_stub_pyclass]
@@ -42,14 +54,39 @@ pub struct CommandGroup {
     children: Vec<CommandGroup>,
 }
 
-fn build_auto(config: Option<ConfigAuto>, parent_auto: &Auto) -> Auto {
+#[pymethods]
+impl Command {
+    fn __eq__(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl CommandGroup {
+    pub fn all_commands(&self) -> Vec<&Command> {
+        let mut commands = self.commands.iter().collect::<Vec<_>>();
+        for child in &self.children {
+            commands.extend(child.all_commands());
+        }
+        commands
+    }
+}
+
+fn build_auto(config: Option<ConfigAuto>, command_cwd: &Path, parent_auto: &Auto) -> Auto {
     if let Some(config) = config {
+        // Combine the paths with the command cwd
+        let path = config
+            .path
+            .unwrap_or_else(|| parent_auto.path.clone())
+            .into_iter()
+            .map(|path| command_cwd.join(path).canonicalize().unwrap())
+            .collect();
+
         Auto {
             watch: config.watch.unwrap_or(parent_auto.watch),
             git: config.git.unwrap_or(parent_auto.git),
-            path: config.path.unwrap_or_else(|| parent_auto.path.clone()),
             regex: config.regex.unwrap_or_else(|| parent_auto.regex.clone()),
             always: config.always.unwrap_or(parent_auto.always),
+            path,
         }
     } else {
         parent_auto.clone()
@@ -57,13 +94,14 @@ fn build_auto(config: Option<ConfigAuto>, parent_auto: &Auto) -> Auto {
 }
 
 fn build_command(config: ConfigCommand, parent_cwd: &Path, parent_auto: &Auto) -> Command {
-    let auto = build_auto(config.auto, parent_auto);
+    let cwd = config.cwd.unwrap_or_else(|| parent_cwd.to_path_buf());
+    let auto = build_auto(config.auto, &cwd, parent_auto);
     Command {
         id: config.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
         name: config.name,
-        cwd: config.cwd.unwrap_or_else(|| parent_cwd.to_path_buf()),
         cmd: config.cmd,
         interactive: config.interactive.unwrap_or(false),
+        cwd,
         auto,
     }
 }
@@ -74,7 +112,7 @@ pub fn build_command_group(
     parent_auto: Option<&Auto>,
 ) -> CommandGroup {
     let cwd = config.cwd.unwrap_or_else(|| parent_cwd.to_path_buf());
-    let auto = build_auto(config.auto, parent_auto.unwrap_or(&Auto::default()));
+    let auto = build_auto(config.auto, &cwd, parent_auto.unwrap_or(&Auto::default()));
     let children = config
         .children
         .unwrap_or_default()
