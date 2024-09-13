@@ -1,6 +1,6 @@
+use log::trace;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -59,8 +59,12 @@ impl Config {
     pub fn find_config() -> Result<PathBuf, ConfigError> {
         let mut path = std::env::current_dir().map_err(ConfigError::Io)?;
         loop {
+            trace!("{:?}", path);
             for filename in FILENAMES.iter() {
-                let file = path.join(filename);
+                let file = path
+                    .join(filename)
+                    .canonicalize()
+                    .map_err(ConfigError::Io)?;
                 if file.exists() {
                     return Ok(file);
                 }

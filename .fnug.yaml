@@ -24,7 +24,7 @@ children:
       watch: true
       git: true
       path:
-        - "./rust"
+        - "./src"
       regex:
         - "\\.rs$"
     commands:

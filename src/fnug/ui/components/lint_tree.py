@@ -21,7 +21,7 @@ from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 from fnug.git import detect_repo_changes
 
 if TYPE_CHECKING:
-    from fnug.core import Command, CommandGroup
+    from fnug.core import Command, CommandGroup, FnugCore
 
 StatusType = Literal["success", "failure", "running", "pending"]
 
@@ -88,6 +88,13 @@ def all_commands(source_node: TreeNode[LintTreeDataType]) -> Iterator[TreeNode[L
         if child.data and child.data.type == "command":
             yield child
         yield from all_commands(child)
+
+
+def toggle_all_commands(source_node: TreeNode[LintTreeDataType], commands: list["Command"]):
+    """Toggle all commands in a list."""
+    for node in all_commands(source_node):
+        if node.data and node.data.command in commands:
+            toggle_select_node(node)
 
 
 def select_git_auto(cwd: Path, node: TreeNode[LintTreeDataType]):
@@ -303,8 +310,7 @@ class LintTree(Tree[LintTreeDataType]):
 
     def __init__(
         self,
-        config: "CommandGroup",
-        cwd: Path,
+        core: "FnugCore",
         *,
         name: str | None = None,
         id: str | None = None,
@@ -312,8 +318,9 @@ class LintTree(Tree[LintTreeDataType]):
         disabled: bool = False,
     ):
         super().__init__("fnug", name=name, id=id, classes=classes, disabled=disabled)
-        self.config = config
-        self.cwd = cwd
+        self.core = core
+        self.config = core.config
+        self.cwd = core.cwd
 
     def _get_label_region(self, line: int) -> Region | None:
         """Like parent, but offset by 2 to account for the icon."""
@@ -396,8 +403,8 @@ class LintTree(Tree[LintTreeDataType]):
 
     def action_select_git(self):
         """Select all git auto commands."""
-        for command in all_commands(self.root):
-            select_git_auto(self.cwd, command)
+        changed_commands = self.core.commands_with_git_changes()
+        toggle_all_commands(self.root, changed_commands)
 
     def action_toggle_select_click(self, line: int, node: TreeNode[LintTreeDataType] | None = None):
         """Toggle a node on click."""
