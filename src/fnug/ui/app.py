@@ -2,7 +2,6 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import click
@@ -36,9 +35,7 @@ from fnug.ui.components.lint_tree import (
 from fnug.ui.components.terminal import Terminal
 
 if TYPE_CHECKING:
-    from fnug.core import CommandGroup
-else:
-    CommandGroup = None
+    from fnug.core import FnugCore
 
 
 class _CommandProvider(Provider):
@@ -95,15 +92,14 @@ class FnugApp(App[None]):
     active_terminal_id: str | None = None
     display_task: Worker[None] | None = None
 
-    def __init__(self, config: CommandGroup, cwd: Path | None = None):
+    def __init__(self, core: "FnugCore"):
         super().__init__()
-        self.cwd = (cwd or Path.cwd()).resolve()
-        self.config = config
+        self.core = core
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         with Horizontal(id="main"):
-            yield LintTree(self.config, cwd=self.cwd, id="lint-tree", classes="custom-scrollbar")
+            yield LintTree(self.core, id="lint-tree", classes="custom-scrollbar")
             yield Terminal(id="terminal", classes="custom-scrollbar")
         yield Footer(show_command_palette=False)
 
@@ -278,7 +274,7 @@ class FnugApp(App[None]):
         )
 
         async def run_shell():
-            cwd = self.cwd
+            cwd = self.core.cwd
             if command.command and command.command.cwd:
                 cwd = cwd / command.command.cwd
 

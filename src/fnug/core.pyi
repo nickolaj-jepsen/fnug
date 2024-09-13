@@ -28,6 +28,12 @@ class CommandGroup:
 
 class FnugCore:
     config: CommandGroup
-    cwd: str
-    def __new__(cls,config_file:typing.Optional[str]): ...
+    cwd: typing.Any
+    def __new__(cls,config_file = ...): ...
+    def all_commands(self) -> list[Command]:
+        ...
+
+    def commands_with_git_changes(self) -> list[Command]:
+        ...
+
 
