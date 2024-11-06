@@ -1,5 +1,5 @@
 $background: #1e1e1e;
-$panel: #2d2d2d;
+$panel-color: #2d2d2d;
 $primary: #cf6a4c;
 $primary-dark: #a64c38;
 $primary-darker: #8c3a2d;
@@ -34,9 +34,9 @@ Footer .footer--highlight-key {
 }
 
 .custom-scrollbar {
-  scrollbar-background: $panel;
-  scrollbar-background-active: $panel;
-  scrollbar-background-hover: $panel;
+  scrollbar-background: $panel-color;
+  scrollbar-background-active: $panel-color;
+  scrollbar-background-hover: $panel-color;
   scrollbar-color: $primary;
   scrollbar-color-active: $primary-dark;
   scrollbar-color-hover: $primary-dark;

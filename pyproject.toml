@@ -7,8 +7,8 @@ authors = [
 ]
 dependencies = [
     "click>=8.1.7",
-    "textual>=0.58.1",
-    "rich>=13.7.1",
+    "textual>=0.85.2",
+    "rich>=13.9.2",
     "pydantic>=2.7.1",
     "pyte>=0.8.2",
     "pyyaml>=6.0.1",
