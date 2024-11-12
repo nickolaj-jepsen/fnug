@@ -12,10 +12,11 @@ pub enum GitError {
     Regex(#[from] regex::Error),
 }
 
-fn find_git_repos(paths: &Vec<PathBuf>) -> Result<Vec<Repository>, GitError> {
+fn find_git_repos(paths: &Vec<PathBuf>, cwd: &PathBuf) -> Result<Vec<Repository>, GitError> {
     let mut git_repos: Vec<Repository> = Vec::new();
     for path in paths {
-        let repo = match Repository::discover(path) {
+        let repo_path = cwd.join(path);
+        let repo = match Repository::discover(repo_path) {
             Ok(repo) => repo,
             Err(_) => return Err(GitError::NoGitRepo(path.clone())),
         };
@@ -24,7 +25,10 @@ fn find_git_repos(paths: &Vec<PathBuf>) -> Result<Vec<Repository>, GitError> {
     Ok(git_repos)
 }
 
-pub fn commands_with_changes(commands: Vec<&Command>) -> Result<Vec<&Command>, GitError> {
+pub fn commands_with_changes<'a>(
+    commands: Vec<&'a Command>,
+    cwd: &'a PathBuf,
+) -> Result<Vec<&'a Command>, GitError> {
     let (always_commands, remaining_commands): (Vec<&Command>, Vec<&Command>) =
         commands.iter().partition(|command| command.auto.always);
     let auto_commands: Vec<&Command> = remaining_commands
@@ -44,7 +48,7 @@ pub fn commands_with_changes(commands: Vec<&Command>) -> Result<Vec<&Command>, G
     let mut changed_commands: Vec<&Command> = Vec::new();
     for (key, commands) in grouped_commands {
         let (paths, regexes) = key;
-        let git_repos = find_git_repos(paths)?;
+        let git_repos = find_git_repos(paths, cwd)?;
         for repo in git_repos {
             let statuses = repo.statuses(None).unwrap();
             for status in statuses.iter() {

@@ -103,7 +103,7 @@ class FnugApp(App[None]):
         :param group: A command group.
         :param cwd: The current working directory.
         """
-        return cls(FnugCore(group, cwd))
+        return cls(FnugCore.from_group(group, cwd))
 
     @classmethod
     def from_config_file(cls, config_file: Path | None = None) -> "FnugApp":
