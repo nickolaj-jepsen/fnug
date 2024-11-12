@@ -59,16 +59,14 @@ impl Config {
     pub fn find_config() -> Result<PathBuf, ConfigError> {
         let mut path = std::env::current_dir().map_err(ConfigError::Io)?;
         loop {
-            trace!("{:?}", path);
             for filename in FILENAMES.iter() {
-                let file = path
-                    .join(filename)
-                    .canonicalize()
-                    .map_err(ConfigError::Io)?;
+                let file = path.join(filename);
                 if file.exists() {
+                    trace!("Found config file: {:?}", file);
                     return Ok(file);
                 }
             }
+
             if !path.pop() {
                 break;
             }
