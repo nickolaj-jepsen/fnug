@@ -11,6 +11,7 @@ class Auto:
     path: list[str]
     regex: list[str]
     always: bool
+    def __new__(cls,watch = ...,git = ...,path = ...,regex = ...,always = ...): ...
 
 class Command:
     id: str
@@ -19,6 +20,10 @@ class Command:
     cwd: str
     interactive: bool
     auto: Auto
+    def __new__(cls,name,cmd,id = ...,cwd = ...,interactive = ...,auto = ...): ...
+    def __eq__(self, other:Command) -> bool:
+        ...
+
 
 class CommandGroup:
     id: str
@@ -27,6 +32,7 @@ class CommandGroup:
     cwd: str
     commands: list[Command]
     children: list[CommandGroup]
+    def __new__(cls,name,id = ...,auto = ...,cwd = ...,commands = ...,children = ...): ...
 
 class FnugCore:
     config: CommandGroup

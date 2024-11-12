@@ -1,4 +1,4 @@
-use crate::command_group::{build_command_group, Command, CommandGroup};
+use crate::command_group::{build_command_group, Auto, Command, CommandGroup};
 use crate::config_file::ConfigError;
 use crate::git::{commands_with_changes, GitError};
 use config_file::Config;
@@ -103,6 +103,10 @@ impl FnugCore {
 #[pyo3(name = "core")]
 fn main(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<FnugCore>()?;
+    m.add_class::<Auto>()?;
+    m.add_class::<Command>()?;
+    m.add_class::<CommandGroup>()?;
+
     Ok(())
 }
 

@@ -1,7 +1,8 @@
+from pathlib import Path
+
 import click
 
 from fnug import FnugApp
-from fnug.core import FnugCore
 
 DEFAULT_FILE_NAMES = [".fnug.json", ".fnug.yaml", ".fnug.yml"]
 
@@ -12,5 +13,5 @@ DEFAULT_FILE_NAMES = [".fnug.json", ".fnug.yaml", ".fnug.yml"]
 @click.version_option()
 def cli(config: str | None = None, verbose: bool = False) -> None:
     """Entrypoint for the fnug CLI."""
-    core = FnugCore.from_config_file(config)
-    FnugApp(core).run()
+    path = Path(config) if config else None
+    FnugApp.from_config_file(path).run()

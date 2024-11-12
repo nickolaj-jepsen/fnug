@@ -2,7 +2,8 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar
+from pathlib import Path
+from typing import ClassVar
 
 import click
 import rich
@@ -15,6 +16,7 @@ from textual.widgets import Footer
 from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
+from fnug.core import CommandGroup, FnugCore
 from fnug.terminal_emulator import (
     TerminalEmulator,
     any_key_message,
@@ -33,9 +35,6 @@ from fnug.ui.components.lint_tree import (
     update_node,
 )
 from fnug.ui.components.terminal import Terminal
-
-if TYPE_CHECKING:
-    from fnug.core import FnugCore
 
 
 class _CommandProvider(Provider):
@@ -92,9 +91,28 @@ class FnugApp(App[None]):
     active_terminal_id: str | None = None
     display_task: Worker[None] | None = None
 
-    def __init__(self, core: "FnugCore"):
+    def __init__(self, core: FnugCore):
         super().__init__()
         self.core = core
+
+    @classmethod
+    def from_group(cls, group: CommandGroup, cwd: Path) -> "FnugApp":
+        """
+        Create an app from a config object.
+
+        :param group: A command group.
+        :param cwd: The current working directory.
+        """
+        return cls(FnugCore(group, cwd))
+
+    @classmethod
+    def from_config_file(cls, config_file: Path | None = None) -> "FnugApp":
+        """
+        Create an app from a config file.
+
+        :param config_file: The path to the config file.
+        """
+        return cls(FnugCore.from_config_file(config_file))
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
