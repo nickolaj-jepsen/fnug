@@ -1,4 +1,4 @@
-use crate::command_group::{build_command_group, Auto, Command, CommandGroup};
+use crate::command_group::{build_command_group, fix_command_group, Auto, Command, CommandGroup};
 use crate::config_file::ConfigError;
 use crate::git::{commands_with_changes, GitError};
 use config_file::Config;
@@ -24,11 +24,11 @@ struct FnugCore {
 #[gen_stub_pymethods]
 #[pymethods]
 impl FnugCore {
-    #[new]
+    #[classmethod]
     #[pyo3(signature = (command_group, cwd))]
-    fn new(command_group: CommandGroup, cwd: PathBuf) -> Self {
+    fn from_group(_cls: &Bound<'_, PyType>, command_group: CommandGroup, cwd: PathBuf) -> Self {
         FnugCore {
-            config: command_group,
+            config: fix_command_group(command_group, &cwd, None),
             cwd,
         }
     }
@@ -67,7 +67,7 @@ impl FnugCore {
         let cwd = config_path.parent().unwrap().to_path_buf();
         let config = build_command_group(config.root, &cwd, None);
 
-        Ok(FnugCore::new(config, cwd))
+        Ok(FnugCore { config, cwd })
     }
 
     #[getter]
@@ -85,7 +85,7 @@ impl FnugCore {
 
     fn commands_with_git_changes(&self) -> PyResult<Vec<Command>> {
         let commands = self.config.all_commands();
-        match commands_with_changes(commands) {
+        match commands_with_changes(commands, &self.cwd) {
             Ok(commands) => Ok(commands.into_iter().cloned().collect()),
             Err(GitError::NoGitRepo(path)) => Err(PyValueError::new_err(format!(
                 "No git repository found for path: {:?}",

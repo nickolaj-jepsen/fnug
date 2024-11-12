@@ -37,7 +37,10 @@ class CommandGroup:
 class FnugCore:
     config: CommandGroup
     cwd: typing.Any
-    def __new__(cls,command_group,cwd): ...
+    @classmethod
+    def from_group(cls, command_group,cwd) -> FnugCore:
+        ...
+
     @classmethod
     def from_config_file(cls, config_file = ...) -> FnugCore:
         ...
