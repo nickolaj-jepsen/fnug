@@ -4,6 +4,7 @@ use crate::git::{commands_with_changes, GitError};
 use config_file::Config;
 use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use pyo3_stub_gen::StubInfo;
 use std::path::PathBuf;
@@ -24,8 +25,17 @@ struct FnugCore {
 #[pymethods]
 impl FnugCore {
     #[new]
+    #[pyo3(signature = (command_group, cwd))]
+    fn new(command_group: CommandGroup, cwd: PathBuf) -> Self {
+        FnugCore {
+            config: command_group,
+            cwd,
+        }
+    }
+
+    #[classmethod]
     #[pyo3(signature = (config_file=None))]
-    fn new(config_file: Option<&str>) -> PyResult<Self> {
+    fn from_config_file(_cls: &Bound<'_, PyType>, config_file: Option<&str>) -> PyResult<Self> {
         let config_path = match config_file {
             Some(file) => {
                 let config_path = PathBuf::from(file);
@@ -55,12 +65,9 @@ impl FnugCore {
         };
 
         let cwd = config_path.parent().unwrap().to_path_buf();
-        let command_group = build_command_group(config.root, &cwd, None);
+        let config = build_command_group(config.root, &cwd, None);
 
-        Ok(FnugCore {
-            config: command_group,
-            cwd,
-        })
+        Ok(FnugCore::new(config, cwd))
     }
 
     #[getter]
