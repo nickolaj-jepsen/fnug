@@ -1,6 +1,6 @@
 use crate::config_file::{ConfigAuto, ConfigCommand, ConfigCommandGroup};
 use pyo3::{pyclass, pymethods};
-use pyo3_stub_gen::derive::gen_stub_pyclass;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -54,10 +54,71 @@ pub struct CommandGroup {
     children: Vec<CommandGroup>,
 }
 
+#[gen_stub_pymethods]
+#[pymethods]
+impl Auto {
+    #[new]
+    #[pyo3(signature = (watch = false, git = false, path = vec![PathBuf::from(".")], regex = Vec::new(), always = false))]
+    fn new(watch: bool, git: bool, path: Vec<PathBuf>, regex: Vec<String>, always: bool) -> Self {
+        Auto {
+            watch,
+            git,
+            path,
+            regex,
+            always,
+        }
+    }
+}
+
+#[gen_stub_pymethods]
 #[pymethods]
 impl Command {
+    #[new]
+    #[pyo3(signature = (name, cmd, id = Uuid::new_v4().to_string(), cwd = PathBuf::from("."), interactive = false, auto = Auto::default()))]
+    fn new(
+        name: String,
+        cmd: String,
+        id: String,
+        cwd: PathBuf,
+        interactive: bool,
+        auto: Auto,
+    ) -> Self {
+        Command {
+            id,
+            name,
+            cmd,
+            cwd,
+            interactive,
+            auto,
+        }
+    }
     fn __eq__(&self, other: &Self) -> bool {
         self.id == other.id
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl CommandGroup {
+    #[new]
+    #[pyo3(signature = (name, id = Uuid::new_v4().to_string(), auto = Auto::default(), cwd = PathBuf::from("."), commands = Vec::new(), children = Vec::new())
+    )]
+    fn new(
+        name: String,
+        id: String,
+        auto: Auto,
+        cwd: PathBuf,
+        commands: Vec<Command>,
+        children: Vec<CommandGroup>,
+    ) -> Self {
+        CommandGroup {
+            id,
+            name,
+            auto,
+            cwd,
+            commands,
+            children,
+        }
     }
 }
 
