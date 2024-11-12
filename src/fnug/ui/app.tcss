@@ -17,20 +17,26 @@ $primary-darker: #8c3a2d;
   background: $background;
 }
 
-Footer {
+Footer, FooterKey {
   background: $primary;
+  color: #000000;
 }
 
-Footer .footer--key {
+FooterKey .footer-key--key {
+  background: $primary-dark;
+  color: #000000;
+}
+
+FooterKey:hover {
   background: $primary-dark;
 }
 
-Footer .footer--highlight {
-  background: $primary-dark;
-}
-
-Footer .footer--highlight-key {
+FooterKey:hover .footer--highlight-key {
   background: $primary-darker;
+}
+
+FooterKey .footer-key--description {
+  padding: 0 1;
 }
 
 .custom-scrollbar {

@@ -101,7 +101,7 @@ class FnugApp(App[None]):
         with Horizontal(id="main"):
             yield LintTree(self.config, cwd=self.cwd, id="lint-tree", classes="custom-scrollbar")
             yield Terminal(id="terminal", classes="custom-scrollbar")
-        yield Footer()
+        yield Footer(show_command_palette=False)
 
     @property
     def lint_tree(self) -> LintTree:
