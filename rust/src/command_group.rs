@@ -1,46 +1,75 @@
+//! Command execution framework with hierarchical organization
+//!
+//! This module implements a tree-based command organization system where commands can be grouped
+//! and nested. Each command or group can have automation rules that determine when they should
+//! be executed based on file system changes or git status.
+//!
+//! The inheritance system allows automation rules and working directories to flow down from
+//! parent groups to their children, while still allowing override at any level.
+
 use crate::config_file::{ConfigAuto, ConfigCommand, ConfigCommandGroup};
 use pyo3::{pyclass, pymethods};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Represents inheritable configuration settings for commands and groups
+struct InheritableSettings {
+    cwd: PathBuf,
+    auto: Auto,
+}
+
+impl InheritableSettings {
+    /// Merges the current settings with a parent configuration
+    fn merge_with_parent(&self, parent: &InheritableSettings) -> InheritableSettings {
+        InheritableSettings {
+            cwd: if self.cwd == PathBuf::from(".") {
+                parent.cwd.clone()
+            } else {
+                self.cwd.clone()
+            },
+            auto: Auto {
+                watch: self.auto.watch || parent.auto.watch,
+                git: self.auto.git || parent.auto.git,
+                regex: if self.auto.regex.is_empty() {
+                    parent.auto.regex.clone()
+                } else {
+                    self.auto.regex.clone()
+                },
+                always: self.auto.always || parent.auto.always,
+                path: if self.auto.path.is_empty() {
+                    parent.auto.path.clone()
+                } else {
+                    self.auto.path.clone()
+                },
+            },
+        }
+    }
+}
+
+/// Automation rules that determine when commands should execute
+///
+/// # Examples
+///
+/// ```python
+/// # Watch for git changes in specific paths matching regex patterns
+/// auto = Auto(
+///     watch=True,
+///     git=True,
+///     path=["src/", "tests/"],
+///     regex=[".*\\.rs$", ".*\\.toml$"]
+/// )
+/// ```
+#[derive(Default, Debug, Clone)]
 #[gen_stub_pyclass]
-#[derive(Debug, Clone)]
 #[pyclass]
 #[pyo3(get_all)]
-#[derive(Default)]
 pub struct Auto {
     pub watch: bool,
     pub git: bool,
     pub path: Vec<PathBuf>,
     pub regex: Vec<String>,
     pub always: bool,
-}
-
-#[gen_stub_pyclass]
-#[derive(Debug, Clone)]
-#[pyclass]
-#[pyo3(get_all)]
-pub struct Command {
-    id: String,
-    name: String,
-    cmd: String,
-    cwd: PathBuf,
-    interactive: bool,
-    pub auto: Auto,
-}
-
-#[gen_stub_pyclass]
-#[derive(Debug, Clone)]
-#[pyclass]
-#[pyo3(get_all)]
-pub struct CommandGroup {
-    id: String,
-    name: String,
-    auto: Auto,
-    cwd: PathBuf,
-    commands: Vec<Command>,
-    children: Vec<CommandGroup>,
 }
 
 #[gen_stub_pymethods]
@@ -57,6 +86,56 @@ impl Auto {
             always,
         }
     }
+}
+
+impl Auto {
+    // Create an Auto from a configuration
+    //
+    // path is resolved relative to the current working directory
+    fn from_config(config: &ConfigAuto, cwd: &Path) -> Self {
+        Auto {
+            watch: config.watch.unwrap_or(false),
+            git: config.git.unwrap_or(false),
+            path: config
+                .path
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| cwd.join(p).canonicalize().unwrap())
+                .collect(),
+            regex: config.regex.clone().unwrap_or_default(),
+            always: config.always.unwrap_or(false),
+        }
+    }
+}
+
+/// A single executable task with its configuration and automation rules
+///
+/// Commands are the leaf nodes in the command tree. Each command has:
+/// - A unique identifier
+/// - A working directory (inherited from parent group if not specified)
+/// - Automation rules (merged with parent group rules)
+/// - An executable shell command
+///
+/// # Examples
+///
+/// ```python
+/// cmd = Command(
+///     name="build",
+///     cmd="cargo build",
+/// )
+/// ```
+#[derive(Debug, Clone)]
+#[gen_stub_pyclass]
+#[pyclass]
+#[pyo3(get_all)]
+pub struct Command {
+    id: String,
+    name: String,
+    cmd: String,
+    cwd: PathBuf,
+    pub(crate) interactive: bool,
+    pub auto: Auto,
 }
 
 #[gen_stub_pymethods]
@@ -86,12 +165,60 @@ impl Command {
     }
 }
 
+impl Command {
+    fn from_config(config: ConfigCommand, parent_cwd: &Path) -> Self {
+        Command {
+            id: config.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            name: config.name,
+            cmd: config.cmd,
+            cwd: config.cwd.unwrap_or_else(|| parent_cwd.to_path_buf()),
+            interactive: config.interactive.unwrap_or(false),
+            auto: config
+                .auto
+                .map(|a| Auto::from_config(&a, parent_cwd))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Hierarchical grouping of related commands
+///
+/// CommandGroups form the nodes of a command tree, allowing logical organization
+/// of related commands. Groups can define common settings that are inherited by
+/// their children:
+///
+/// - Working directory - Children execute relative to parent's directory
+/// - Automation rules - Children inherit and can extend parent rules
+/// - File patterns - Children can add to parent's watch patterns
+///
+/// # Examples
+///
+/// ```python
+/// group = CommandGroup(
+///     name="backend",
+///     auto=Auto(git=True, path=["backend/"]),
+///     commands=[Command(name="test", cmd="cargo test")],
+///     children=[CommandGroup(name="api", ...)]
+/// )
+/// ```
+#[derive(Debug, Clone)]
+#[gen_stub_pyclass]
+#[pyclass]
+#[pyo3(get_all)]
+pub struct CommandGroup {
+    id: String,
+    name: String,
+    auto: Auto,
+    cwd: PathBuf,
+    commands: Vec<Command>,
+    children: Vec<CommandGroup>,
+}
+
 #[gen_stub_pymethods]
 #[pymethods]
 impl CommandGroup {
     #[new]
-    #[pyo3(signature = (name, id = Uuid::new_v4().to_string(), auto = Auto::default(), cwd = PathBuf::from("."), commands = Vec::new(), children = Vec::new())
-    )]
+    #[pyo3(signature = (name, id = Uuid::new_v4().to_string(), auto = Auto::default(), cwd = PathBuf::from("."), commands = Vec::new(), children = Vec::new()))]
     fn new(
         name: String,
         id: String,
@@ -112,146 +239,104 @@ impl CommandGroup {
 }
 
 impl CommandGroup {
+    /// Returns a flattened list of all commands in this group and its children
     pub fn all_commands(&self) -> Vec<&Command> {
-        let mut commands = self.commands.iter().collect::<Vec<_>>();
-        for child in &self.children {
-            commands.extend(child.all_commands());
-        }
-        commands
+        self.commands
+            .iter()
+            .chain(self.children.iter().flat_map(|child| child.all_commands()))
+            .collect()
     }
-}
 
-fn build_auto(config: Option<ConfigAuto>, command_cwd: &Path, parent_auto: &Auto) -> Auto {
-    if let Some(config) = config {
-        // Combine the paths with the command cwd
-        let path = config
-            .path
-            .unwrap_or_else(|| parent_auto.path.clone())
-            .into_iter()
-            .map(|path| command_cwd.join(path).canonicalize().unwrap())
+    // Create a CommandGroup from a configuration
+    pub fn from_config(config: ConfigCommandGroup, parent_cwd: &Path) -> Self {
+        let cwd = config.cwd.unwrap_or_else(|| parent_cwd.to_path_buf());
+
+        CommandGroup {
+            id: config.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            name: config.name,
+            auto: config
+                .auto
+                .map(|a| Auto::from_config(&a, &cwd))
+                .unwrap_or_default(),
+            cwd: cwd.clone(),
+            commands: config
+                .commands
+                .unwrap_or_default()
+                .into_iter()
+                .map(|cmd| Command::from_config(cmd, &cwd))
+                .collect(),
+            children: config
+                .children
+                .unwrap_or_default()
+                .into_iter()
+                .map(|child| CommandGroup::from_config(child, &cwd))
+                .collect(),
+        }
+    }
+
+    /// Propagate settings recursively to all children
+    fn propagate_settings_internal(&self, parent_settings: &InheritableSettings) -> Self {
+        // Create current level settings
+        let current_settings = InheritableSettings {
+            cwd: self.cwd.clone(),
+            auto: self.auto.clone(),
+        }
+        .merge_with_parent(parent_settings);
+
+        // Process children with the new settings
+        let children = self
+            .children
+            .iter()
+            .map(|child| child.propagate_settings_internal(&current_settings))
             .collect();
 
-        Auto {
-            watch: config.watch.unwrap_or(parent_auto.watch),
-            git: config.git.unwrap_or(parent_auto.git),
-            regex: config.regex.unwrap_or_else(|| parent_auto.regex.clone()),
-            always: config.always.unwrap_or(parent_auto.always),
-            path,
+        // Process commands
+        let commands = self
+            .commands
+            .iter()
+            .map(|command| {
+                let command_settings = InheritableSettings {
+                    cwd: command.cwd.clone(),
+                    auto: command.auto.clone(),
+                }
+                .merge_with_parent(&current_settings);
+
+                Command {
+                    id: command.id.clone(),
+                    name: command.name.clone(),
+                    cmd: command.cmd.clone(),
+                    cwd: command_settings.cwd,
+                    interactive: command.interactive,
+                    auto: command_settings.auto,
+                }
+            })
+            .collect();
+
+        CommandGroup {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            cwd: current_settings.cwd,
+            auto: current_settings.auto,
+            commands,
+            children,
         }
-    } else {
-        parent_auto.clone()
     }
-}
 
-fn merge_auto(auto: Option<Auto>, parent_auto: &Auto) -> Auto {
-    if let Some(auto) = auto {
-        let regex = if auto.regex.is_empty() {
-            parent_auto.regex.clone()
-        } else {
-            auto.regex
+    /// Propagates inherited settings from this group to all its children
+    ///
+    /// Recursively processes the command group hierarchy, ensuring that settings
+    /// like working directory and automation rules are properly inherited from
+    /// parent to child elements.
+    ///
+    /// # Returns
+    ///
+    /// A new CommandGroup with inherited settings applied
+    pub fn propagate_settings(&self) -> Self {
+        let settings = InheritableSettings {
+            cwd: self.cwd.clone(),
+            auto: self.auto.clone(),
         };
-        let path = if auto.path.is_empty() {
-            parent_auto.path.clone()
-        } else {
-            auto.path
-        };
-        Auto {
-            watch: auto.watch || parent_auto.watch,
-            git: auto.git || parent_auto.git,
-            regex,
-            always: auto.always || parent_auto.always,
-            path,
-        }
-    } else {
-        parent_auto.clone()
-    }
-}
 
-fn build_command(config: ConfigCommand, parent_cwd: &Path, parent_auto: &Auto) -> Command {
-    let cwd = config.cwd.unwrap_or_else(|| parent_cwd.to_path_buf());
-    let auto = build_auto(config.auto, &cwd, parent_auto);
-    Command {
-        id: config.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-        name: config.name,
-        cmd: config.cmd,
-        interactive: config.interactive.unwrap_or(false),
-        cwd,
-        auto,
-    }
-}
-
-pub fn build_command_group(
-    config: ConfigCommandGroup,
-    parent_cwd: &Path,
-    parent_auto: Option<&Auto>,
-) -> CommandGroup {
-    let cwd = config.cwd.unwrap_or_else(|| parent_cwd.to_path_buf());
-    let auto = build_auto(config.auto, &cwd, parent_auto.unwrap_or(&Auto::default()));
-    let children = config
-        .children
-        .unwrap_or_default()
-        .into_iter()
-        .map(|child| build_command_group(child, &cwd, Some(&auto)))
-        .collect();
-    let commands = config
-        .commands
-        .unwrap_or_default()
-        .into_iter()
-        .map(|command| build_command(command, &cwd, &auto))
-        .collect();
-
-    CommandGroup {
-        id: config.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-        name: config.name,
-        cwd,
-        auto,
-        commands,
-        children,
-    }
-}
-
-pub fn fix_command_group(
-    command_group: CommandGroup,
-    parent_cwd: &Path,
-    parent_auto: Option<&Auto>,
-) -> CommandGroup {
-    let cwd = if command_group.cwd == PathBuf::from(".") {
-        parent_cwd.to_path_buf()
-    } else {
-        command_group.cwd
-    };
-
-    let auto = merge_auto(
-        Some(command_group.auto.clone()),
-        parent_auto.unwrap_or(&Auto::default()),
-    );
-    let children = command_group
-        .children
-        .into_iter()
-        .map(|child| fix_command_group(child, &cwd, Some(&auto)))
-        .collect();
-    let commands = command_group
-        .commands
-        .into_iter()
-        .map(|command| {
-            let auto = merge_auto(Some(command.auto.clone()), &auto);
-            Command {
-                id: command.id,
-                name: command.name,
-                cmd: command.cmd,
-                cwd: command.cwd,
-                interactive: command.interactive,
-                auto,
-            }
-        })
-        .collect();
-
-    CommandGroup {
-        id: command_group.id,
-        name: command_group.name,
-        cwd,
-        auto,
-        commands,
-        children,
+        self.propagate_settings_internal(&settings)
     }
 }
