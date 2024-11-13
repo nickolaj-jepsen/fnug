@@ -59,6 +59,7 @@ dev-dependencies = [
     "textual-dev>=1.5.1",
     "pytest>=8.2.0",
     "pip>=24.2",
+    "maturin[patchelf]>=1.2",
 ]
 
 [tool.rye.scripts]

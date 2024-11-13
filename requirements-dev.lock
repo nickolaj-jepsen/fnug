@@ -44,6 +44,7 @@ markdown-it-py==3.0.0
     # via mdit-py-plugins
     # via rich
     # via textual
+maturin==1.7.4
 mdit-py-plugins==0.4.0
     # via markdown-it-py
 mdurl==0.1.2
@@ -57,6 +58,8 @@ nodeenv==1.8.0
     # via pyright
 packaging==23.2
     # via pytest
+patchelf==0.17.2.1
+    # via maturin
 pip==24.2
 platformdirs==4.3.6
     # via textual
@@ -91,6 +94,7 @@ textual==0.85.2
     # via textual-dev
 textual-dev==1.5.1
 tomli==2.0.1
+    # via maturin
     # via pytest
 typing-extensions==4.9.0
     # via anyio
