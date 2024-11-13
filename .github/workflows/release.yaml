@@ -21,6 +21,8 @@ jobs:
         id: versioncheck
         with:
           pyproject-path: "./pyproject.toml"
+      - name: Setup rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Setup Rye
         if: steps.versioncheck.outputs.local_version_is_higher == 'true'
         uses: eifinger/setup-rye@v2
