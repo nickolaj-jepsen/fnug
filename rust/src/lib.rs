@@ -9,15 +9,13 @@ use crate::git::{commands_with_changes, GitError};
 use config_file::Config;
 use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use pyo3_stub_gen::StubInfo;
 use std::path::PathBuf;
 
 mod command_group;
 mod config_file;
 mod git;
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pyclass)]
 #[pyclass]
 struct FnugCore {
     #[pyo3(get)]
@@ -39,7 +37,7 @@ struct FnugCore {
 /// # Get commands that have associated git changes
 /// changed_commands = core.commands_with_git_changes()
 /// ```
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl FnugCore {
     /// Creates a new FnugCore instance from an existing CommandGroup
@@ -164,9 +162,4 @@ fn core(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<CommandGroup>()?;
 
     Ok(())
-}
-
-pub fn stub_info() -> StubInfo {
-    let manifest_dir: &::std::path::Path = env!("CARGO_MANIFEST_DIR").as_ref();
-    StubInfo::from_pyproject_toml(manifest_dir.parent().unwrap().join("pyproject.toml")).unwrap()
 }

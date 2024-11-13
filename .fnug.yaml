@@ -33,7 +33,7 @@ children:
       - name: clippy
         cmd: cargo clippy --fix --allow-dirty --allow-staged
       - name: stub gen
-        cmd: cargo run --bin stub_gen
+        cmd: cargo run --bin stub_gen --features "stub_gen"
   - name: debug
     commands:
       - name: htop

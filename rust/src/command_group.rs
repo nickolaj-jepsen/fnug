@@ -9,7 +9,6 @@
 
 use crate::config_file::{ConfigAuto, ConfigCommand, ConfigCommandGroup};
 use pyo3::{pyclass, pymethods};
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -61,7 +60,7 @@ impl InheritableSettings {
 /// )
 /// ```
 #[derive(Default, Debug, Clone)]
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pyclass)]
 #[pyclass]
 #[pyo3(get_all)]
 pub struct Auto {
@@ -72,7 +71,7 @@ pub struct Auto {
     pub always: bool,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl Auto {
     #[new]
@@ -126,7 +125,7 @@ impl Auto {
 /// )
 /// ```
 #[derive(Debug, Clone)]
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pyclass)]
 #[pyclass]
 #[pyo3(get_all)]
 pub struct Command {
@@ -138,7 +137,7 @@ pub struct Command {
     pub auto: Auto,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl Command {
     #[new]
@@ -202,7 +201,7 @@ impl Command {
 /// )
 /// ```
 #[derive(Debug, Clone)]
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pyclass)]
 #[pyclass]
 #[pyo3(get_all)]
 pub struct CommandGroup {
@@ -214,7 +213,7 @@ pub struct CommandGroup {
     children: Vec<CommandGroup>,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl CommandGroup {
     #[new]

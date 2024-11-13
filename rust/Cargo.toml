@@ -12,7 +12,7 @@ env_logger = "0.11.5"
 git2 = { version = "0.19.0", default-features = false }
 log = "0.4.22"
 pyo3 = { version = "0.22.6", features = ["extension-module", "abi3-py310"] }
-pyo3-stub-gen = { version = "0.6.0", default-features = false }
+pyo3-stub-gen = { version = "0.6.0", default-features = false, optional = true }
 regex = "1.10.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9.34"
@@ -22,3 +22,7 @@ uuid = { version = "1.10.0", features = ["v4"] }
 [[bin]]
 name = "stub_gen"
 doc = false
+required-features = ["stub_gen"]
+
+[features]
+stub_gen = ["pyo3-stub-gen"]
