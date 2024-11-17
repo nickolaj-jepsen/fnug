@@ -22,8 +22,8 @@ jobs:
           rye sync --no-lock
       - name: Run lint
         run: |
-          rye run -- ruff check --output-format=github src/
-          rye run -- ruff format --check src/
+          rye run -- ruff check --output-format=github .
+          rye run -- ruff format --check .
           rye run -- pyright src
   test:
     runs-on: ubuntu-latest

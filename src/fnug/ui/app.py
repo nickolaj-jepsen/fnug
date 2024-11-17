@@ -61,7 +61,7 @@ class _CommandProvider(Provider):
 
             score = matcher.match(node_id)
             if score > 0:
-                callback: partial[Callable[[], None]] = partial(app.display_terminal, node_id)
+                callback = partial(app.display_terminal, node_id)
                 yield Hit(
                     score,
                     match_display=matcher.highlight(node.data.name),
@@ -106,7 +106,7 @@ class FnugApp(App[None]):
         return cls(FnugCore.from_group(group, cwd))  # pyright: ignore [reportUnknownMemberType]
 
     @classmethod
-    def from_config_file(cls, config_file: Path | None = None) -> "FnugApp":
+    def from_config_file(cls, config_file: Path | str | None = None) -> "FnugApp":
         """
         Create an app from a config file.
 

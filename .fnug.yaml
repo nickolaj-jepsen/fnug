@@ -11,15 +11,15 @@ children:
         - "\\.py$"
     commands:
       - name: pyright
-        cmd: rye run pyright src
+        cmd: uv run pyright src
       - name: lint
-        cmd: rye run ruff check --fix .
+        cmd: uv run ruff check --fix .
       - name: format
-        cmd: rye run ruff format .
+        cmd: uv run ruff format .
       - name: test
-        cmd: rye run test
+        cmd: uv run pytest tests
   - name: rust
-    cwd: ./rust
+    cwd: "./rust"
     auto:
       watch: true
       git: true
@@ -30,6 +30,8 @@ children:
     commands:
       - name: fmt
         cmd: cargo fmt
+      - name: test
+        cmd: cargo test --no-default-features
       - name: clippy
         cmd: cargo clippy --fix --allow-dirty --allow-staged
       - name: stub gen

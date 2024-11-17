@@ -1,22 +1,24 @@
 [package]
-name = "fnug"
-version = "0.1.0"
+name = "fnug_core"
+version = "0.0.25"
 edition = "2021"
 
 [lib]
-name = "fnug"
+name = "fnug_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 env_logger = "0.11.5"
 git2 = { version = "0.19.0", default-features = false }
 log = "0.4.22"
-pyo3 = { version = "0.22.6", features = ["extension-module", "abi3-py310"] }
+pyo3 = "0.22.6"
+pyo3-log = "0.11.0"
 pyo3-stub-gen = { version = "0.6.0", default-features = false, optional = true }
 regex = "1.10.6"
+regex-cache = "0.2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9.34"
-thiserror = "1.0.63"
+thiserror = "2.0.3"
 uuid = { version = "1.10.0", features = ["v4"] }
 
 [[bin]]
@@ -26,3 +28,9 @@ required-features = ["stub_gen"]
 
 [features]
 stub_gen = ["pyo3-stub-gen"]
+extension-module = ["pyo3/extension-module", "pyo3/abi3-py312"]
+default = ["extension-module"]
+
+[dev-dependencies]
+grcov = "0.8.20"
+tempfile = "3.14.0"

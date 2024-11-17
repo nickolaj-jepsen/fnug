@@ -18,8 +18,6 @@ from textual.widgets._tree import TOGGLE_STYLE, TreeNode
 from textual.worker import Worker
 from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
-from fnug.git import detect_repo_changes
-
 if TYPE_CHECKING:
     from fnug.core import Command, CommandGroup, FnugCore
 
@@ -95,27 +93,6 @@ def toggle_all_commands(source_node: TreeNode[LintTreeDataType], commands: list[
     for node in all_commands(source_node):
         if node.data and node.data.command in commands:
             toggle_select_node(node)
-
-
-def select_git_auto(cwd: Path, node: TreeNode[LintTreeDataType]):
-    """Select nodes if it has git auto enabled and there are changes in the repos."""
-    if not node.data or not node.data.command:
-        return
-
-    auto = node.data.command.auto
-    node.data.selected = False
-
-    if auto.always is True:
-        node.data.selected = True
-
-    if auto.git and auto.path:
-        for path in auto.path:
-            if detect_repo_changes(cwd / path, auto.regex):
-                node.data.selected = True
-                continue
-
-    if node.data.selected:
-        update_node(node)
 
 
 @dataclass
