@@ -1,7 +1,5 @@
-import re
 import time
-from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import AsyncIterable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, Optional
@@ -16,7 +14,6 @@ from textual.reactive import Reactive
 from textual.widgets import Tree
 from textual.widgets._tree import TOGGLE_STYLE, TreeNode
 from textual.worker import Worker
-from watchfiles import awatch  # pyright: ignore reportUnknownVariableType
 
 if TYPE_CHECKING:
     from fnug.core import Command, CommandGroup, FnugCore
@@ -95,6 +92,13 @@ def toggle_all_commands(source_node: TreeNode[LintTreeDataType], commands: list[
             toggle_select_node(node)
 
 
+def select_all_commands(source_node: TreeNode[LintTreeDataType], commands: list["Command"]):
+    """Select all commands (recursively)."""
+    for node in all_commands(source_node):
+        if node.data and node.data.command in commands:
+            select_node(node)
+
+
 @dataclass
 class CommandSum:
     """A summary of the status of all selected commands."""
@@ -158,33 +162,12 @@ def attach_command(
     return command_leafs
 
 
-async def watch_auto_task(command_nodes: Iterator[TreeNode[LintTreeDataType]], cwd: Path):
+async def watch_auto_task(
+    source_node: TreeNode[LintTreeDataType], watcher_task: Callable[[], AsyncIterable[list["Command"]]]
+):
     """Create a task that watches for changes in the filesystem and selects auto commands."""
-    paths: defaultdict[Path, list[TreeNode[LintTreeDataType]]] = defaultdict(list)
-
-    for node in command_nodes:
-        if not node.data or not node.data.command or not node.data.command.auto.path:
-            continue
-
-        for path in node.data.command.auto.path:
-            paths[cwd / path].append(node)
-
-    async for change_set in awatch(*paths.keys(), step=500, debounce=5000):
-        for _, change_str in change_set:
-            change = Path(change_str)
-            # Only trigger if the path is in the tree
-            nested_active_nodes = [nodes for path, nodes in paths.items() if path in change.parents]
-            active_nodes = [node for nodes in nested_active_nodes for node in nodes]  # Flatten
-
-            for node in active_nodes:
-                if not node.data or not node.data.command:
-                    continue
-
-                if node.data.command.auto.regex:
-                    if any(re.search(r, change_str) for r in node.data.command.auto.regex):
-                        select_node(node)
-                else:
-                    select_node(node)
+    async for changed_commands in watcher_task():
+        select_all_commands(source_node, changed_commands)
 
 
 class LintTree(Tree[LintTreeDataType]):
@@ -380,7 +363,7 @@ class LintTree(Tree[LintTreeDataType]):
 
     def action_select_git(self):
         """Select all git auto commands."""
-        changed_commands = self.core.commands_with_git_changes()
+        changed_commands = self.core.selected_commands()
         toggle_all_commands(self.root, changed_commands)
 
     def action_toggle_select_click(self, line: int, node: TreeNode[LintTreeDataType] | None = None):
@@ -512,7 +495,7 @@ class LintTree(Tree[LintTreeDataType]):
     def _setup(self):
         self.command_leafs = attach_command(self.root, self.config, self.cwd, root=True)
         self.action_select_git()
-        self.watch_task = self.run_worker(watch_auto_task(all_commands(self.root), self.cwd))
+        self.watch_task = self.run_worker(watch_auto_task(self.root, self.core.watch))
 
     def _on_mount(self, event: events.Mount):
         self.call_after_refresh(self._setup)

@@ -5,6 +5,7 @@
 //! file, with flexible automation rules for when commands should be executed.
 
 use crate::commands::inherit::Inheritance;
+use crate::selectors::watch::{watch, WatcherIterator};
 use commands::auto::Auto;
 use commands::command::Command;
 use commands::group::CommandGroup;
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 mod commands;
 mod config_file;
 mod selectors;
+mod ui;
 
 #[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pyclass)]
 #[pyclass]
@@ -28,19 +30,6 @@ struct FnugCore {
 }
 
 /// The main entry point for the Fnug command scheduler
-///
-/// FnugCore handles configuration loading and command execution detection. It can be
-/// initialized either from an existing command group or from a configuration file.
-///
-/// # Examples
-///
-/// ```python
-/// # Initialize from a config file
-/// core = FnugCore.from_config_file(".fnug.yaml")
-///
-/// # Get commands that have associated git changes
-/// changed_commands = core.commands_with_git_changes()
-/// ```
 #[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl FnugCore {
@@ -127,16 +116,13 @@ impl FnugCore {
         self.config.all_commands().into_iter().cloned().collect()
     }
 
-    /// Returns commands that have detected git changes in their watched paths
-    ///
-    /// Only returns commands that have git automation enabled and match their configured
-    /// path and regex patterns. Always includes commands with `always=True`.
-    ///
-    /// # Errors
-    ///
-    /// - Raises `PyValueError` if a git repository cannot be found for a watched path
-    /// - Raises `PyValueError` if a command contains an invalid regex pattern
-    fn commands_with_git_changes(&self) -> PyResult<Vec<Command>> {
+    /// Returns a async iterator that watches for file system changes, yielding commands to run
+    fn watch(&self, py: Python<'_>) -> PyResult<WatcherIterator> {
+        py.allow_threads(move || watch(self.config.clone()))
+    }
+
+    /// Returns commands that have detected git changes in their watched paths, or have `always=True`
+    fn selected_commands(&self) -> PyResult<Vec<Command>> {
         let commands = self.config.all_commands().into_iter().cloned().collect();
         Ok(get_selected_commands(commands)?)
     }
@@ -150,6 +136,7 @@ fn core(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<Auto>()?;
     m.add_class::<Command>()?;
     m.add_class::<CommandGroup>()?;
+    m.add_class::<WatcherIterator>()?;
 
     Ok(())
 }
@@ -164,7 +151,3 @@ pub mod stub_gen {
             .unwrap()
     }
 }
-// pub fn stub_info() -> StubInfo {
-//     let manifest_dir: &::std::path::Path = env!("CARGO_MANIFEST_DIR").as_ref();
-//     StubInfo::from_pyproject_toml(manifest_dir.parent().unwrap().join("pyproject.toml")).unwrap()
-// }

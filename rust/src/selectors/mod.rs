@@ -5,7 +5,7 @@ use thiserror::Error;
 
 mod always;
 mod git;
-mod watch;
+pub mod watch;
 
 /// Errors that can occur during selector operations
 #[derive(Error, Debug)]
