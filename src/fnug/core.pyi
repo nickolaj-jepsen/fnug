@@ -137,16 +137,18 @@ class FnugCore:
         """
         ...
 
-    def commands_with_git_changes(self) -> list[Command]:
+    def watch(self) -> WatcherIterator:
         r"""
-        Returns commands that have detected git changes in their watched paths
-
-        Only returns commands that have git automation enabled and match their configured
-        path and regex patterns. Always includes commands with `always=True`.
-
-        # Errors
-
-        - Raises `PyValueError` if a git repository cannot be found for a watched path
-        - Raises `PyValueError` if a command contains an invalid regex pattern
+        Returns a async iterator that watches for file system changes, yielding commands to run
         """
         ...
+
+    def selected_commands(self) -> list[Command]:
+        r"""
+        Returns commands that have detected git changes in their watched paths, or have `always=True`
+        """
+        ...
+
+class WatcherIterator:
+    def __aiter__(self) -> WatcherIterator: ...
+    def __anext__(self) -> typing.Any: ...

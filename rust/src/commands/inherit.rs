@@ -31,8 +31,8 @@ impl Inheritance {
             .auto
             .path
             .iter()
-            .map(|p| inherit_path(&self.cwd, p.clone()))
-            .collect();
+            .map(|p| inherit_path(&self.cwd, p.clone()).canonicalize())
+            .collect::<Result<Vec<PathBuf>, io::Error>>()?;
         Ok(())
     }
 

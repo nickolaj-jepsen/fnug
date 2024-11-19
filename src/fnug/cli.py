@@ -1,9 +1,9 @@
 import click
 from click_default_group import DefaultGroup
 
-from fnug import FnugApp
 from fnug.core import FnugCore
 from fnug.logging import LogLevel, get_logger, log_level_callback, setup_logging
+from fnug.ui.app import FnugApp
 
 DEFAULT_FILE_NAMES = [".fnug.json", ".fnug.yaml", ".fnug.yml"]
 
