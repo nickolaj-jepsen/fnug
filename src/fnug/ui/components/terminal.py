@@ -3,7 +3,7 @@ from typing import ClassVar
 
 from rich.console import Console, ConsoleOptions, ConsoleRenderable, RenderResult
 from rich.text import Text
-from textual import events, on
+from textual import events
 from textual.binding import Binding, BindingType
 from textual.events import Key
 from textual.geometry import Size
@@ -13,7 +13,7 @@ from textual.reactive import reactive
 from textual.scrollbar import ScrollBar, ScrollDown, ScrollTo, ScrollUp
 from textual.widget import Widget
 
-from fnug.terminal_emulator import TerminalEmulator
+from fnug.core import Process
 
 CTRL_KEYS: dict[str, str] = {
     Keys.Up: "\x1bOA",
@@ -53,8 +53,15 @@ CTRL_KEYS: dict[str, str] = {
 class TerminalDisplay(ConsoleRenderable):
     """Rich display for the terminal."""
 
-    def __init__(self, lines: list[Text]):
-        self.lines: list[Text] = lines
+    lines: list[Text]
+
+    def __init__(self, data: list[Text] | None = None):
+        self.lines = data or []
+
+    @classmethod
+    def from_ansi(cls, ansi: list[str]):
+        """Create a TerminalDisplay from an ANSI string."""
+        return cls([Text.from_ansi(line) for line in ansi])
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         """Render the terminal display."""
@@ -64,7 +71,7 @@ class TerminalDisplay(ConsoleRenderable):
 class Terminal(Widget, can_focus=False):
     """Terminal textual widget."""
 
-    emulator: TerminalEmulator | None = None
+    process: Process | None = None
     show_vertical_scrollbar = reactive(True)
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -96,7 +103,7 @@ class Terminal(Widget, can_focus=False):
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        self.terminal_display = TerminalDisplay([Text()])
+        self.terminal_display = TerminalDisplay()
 
         super().__init__(name=name, id=id, classes=classes)
 
@@ -115,78 +122,65 @@ class Terminal(Widget, can_focus=False):
 
     def clear(self):
         """Clear the terminal display."""
-        self.terminal_display = TerminalDisplay([Text()])
+        self.terminal_display = TerminalDisplay()
         self.refresh()
 
-    def update_scrollbar(self):
-        """Update the position of the scrollbar."""
+    def set_scrollbar(self, size: int, current: int):
+        """Set the scrollbar position."""
         scrollbar = self.query_one(ScrollBar)
-        scrollbar.window_size = self.size.height
-        if self.emulator is None:
-            scrollbar.position = 0
-            scrollbar.window_virtual_size = 0
-            scrollbar.refresh()
-            scrollbar.styles.display = "none"
-            return
 
-        scrollbar.position = len(self.emulator.screen.history.top)
-        scrollbar.window_virtual_size = (
-            len(self.emulator.screen.history.top)
-            + self.emulator.screen.lines
-            + len(self.emulator.screen.history.bottom)
-        )
-        if scrollbar.window_virtual_size > scrollbar.window_size:
-            scrollbar.styles.display = "block"
+        scrollbar.styles.display = "none" if size == 0 else "block"
+        scrollbar.window_size = self.size.height
+        scrollbar.position = size - current
+        scrollbar.window_virtual_size = size + self.size.height
         scrollbar.refresh()
 
-    async def attach_emulator(self, emulator: TerminalEmulator | None):
+    async def attach_emulator(self, process: Process | None):
         """Attach a terminal emulator to this widget."""
-        self.emulator = emulator
-        self.can_focus = emulator.can_focus if emulator else False
-
-        self.update_scrollbar()
+        self.process = process
+        self.can_focus = process.can_focus if process else False
         self.clear()
 
-        if not emulator:
+        if not process:
             return
 
         try:
-            async for screen in emulator.render():
-                self.terminal_display = TerminalDisplay(screen)
-                self.update_scrollbar()
+            async for output in process.output:
+                self.terminal_display = TerminalDisplay.from_ansi(output.screen)
+                self.set_scrollbar(output.scrollback_size, output.scrollback_position)
                 self.refresh()
         except asyncio.CancelledError:
             pass
 
     async def _on_key(self, event: Key) -> None:
-        if self.emulator is None:
-            return
-
         if event.key == "shift+tab":
             self.app.set_focus(None)
+            return
+
+        if self.process is None:
             return
 
         event.stop()
         char = CTRL_KEYS.get(event.key) or event.character
         if char:
-            self.emulator.write(char.encode())
+            self.process.write(char.encode())
 
     def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        if self.emulator:
-            self.emulator.scroll("down")
+        if self.process is not None:
+            self.process.scroll(1)
 
     def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        if self.emulator:
-            self.emulator.scroll("up")
+        if self.process is not None:
+            self.process.scroll(-1)
 
     async def _on_click(self, event: events.Click):
-        if self.emulator is None:
+        if self.process is None:
             return
 
         if event.button in [2, 3]:
             self.post_message(self.OpenContextMenu(self, event))
         else:
-            self.emulator.click(event.x + 1, event.y + 1)
+            self.process.click(event.x, event.y)
 
     @property
     def size(self) -> Size:
@@ -200,16 +194,26 @@ class Terminal(Widget, can_focus=False):
         self.call_after_refresh(self._on_resize)
 
     async def _on_resize(self, event: events.Resize | None = None):
-        if self.emulator:
-            self.emulator.dimensions = self.size
-        self.update_scrollbar()
+        if self.process:
+            self.process.resize(self.size.width, self.size.height)
 
-    @on(ScrollDown)
-    def _scroll_down(self, event: ScrollTo) -> None:
-        if self.emulator is not None:
-            self.emulator.scroll("down")
+    def _on_scroll_down(self, event: ScrollDown) -> None:
+        if self.process is not None:
+            self.process.scroll(50)
 
-    @on(ScrollUp)
-    def _scroll_up(self, event: ScrollTo) -> None:
-        if self.emulator is not None:
-            self.emulator.scroll("up")
+    def _on_scroll_up(self, event: ScrollUp) -> None:
+        if self.process is not None:
+            self.process.scroll(-50)
+
+    def _on_scroll_to(self, message: ScrollTo) -> None:
+        if self.process is not None and message.y is not None:
+            scrollbar = self.query_one(ScrollBar)
+            minimum = 0
+            maximum = scrollbar.window_virtual_size - self.size.height
+
+            new_pos = maximum - message.y
+            new_pos = max(minimum, new_pos)
+            new_pos = min(maximum, new_pos)
+            new_pos = int(new_pos)
+
+            self.process.set_scroll(new_pos)

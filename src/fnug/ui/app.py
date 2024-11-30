@@ -1,12 +1,9 @@
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
-import click
-import rich
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -16,15 +13,7 @@ from textual.widgets import Footer
 from textual.widgets._tree import TreeNode
 from textual.worker import Worker
 
-from fnug.core import CommandGroup, FnugCore
-from fnug.terminal_emulator import (
-    TerminalEmulator,
-    any_key_message,
-    failure_message,
-    start_message,
-    stopped_message,
-    success_message,
-)
+from fnug.core import CommandGroup, FnugCore, Process
 from fnug.ui.components.context_menu import ContextMenu
 from fnug.ui.components.lint_tree import (
     LintTree,
@@ -75,7 +64,7 @@ class _CommandProvider(Provider):
 class TerminalInstance:
     """A collection of tasks and emulator for a terminal."""
 
-    emulator: TerminalEmulator
+    emulator: Process
     run_task: Worker[None]
 
 
@@ -140,13 +129,6 @@ class FnugApp(App[None]):
         if event.node.data is not None:
             self._run_command(event.node.data)
 
-    @on(LintTree.RunExclusiveCommand, "#lint-tree")
-    def _action_run_exclusive_command(self, event: LintTree.RunExclusiveCommand):
-        if event.node.data is None or event.node.data.command is None:
-            return
-
-        self._run_command_fullscreen(event.node.data)
-
     @on(LintTree.StopCommand, "#lint-tree")
     def _action_stop_command(self, event: LintTree.StopCommand):
         if event.node.data:
@@ -180,8 +162,6 @@ class FnugApp(App[None]):
 
             if selection == "run":
                 self._run_command(node.data, background=not active_node)
-            elif selection == "run-fullscreen":
-                self._run_command_fullscreen(node.data)
             elif selection == "restart":
                 self._stop_command(node.data.id)
                 self._run_command(node.data)
@@ -233,13 +213,11 @@ class FnugApp(App[None]):
         elif node.data.status in ("failure", "success"):
             commands = {
                 "run": "Re-run",
-                "run-fullscreen": "Re-run (fullscreen)",
                 "clear": "Clear",
             }
         else:
             commands = {
                 "run": "Run",
-                "run-fullscreen": "Run (fullscreen)",
             }
 
         await self.push_screen(
@@ -274,65 +252,37 @@ class FnugApp(App[None]):
                 update_node(new_node)
                 self.lint_tree.select_node(new_node)
 
-        terminal = self.terminals.get(command_id)
+        terminal_instance = self.terminals.get(command_id)
         self.display_task = self.run_worker(
-            self._terminal.attach_emulator(terminal.emulator if terminal else None), name="display_task"
+            self._terminal.attach_emulator(terminal_instance.emulator if terminal_instance else None),
+            name="display_task",
         )
 
     def _run_command(self, command: LintTreeDataType, background: bool = False):
-        if command.type != "command":
+        if command.type != "command" or command.command is None:
             return
 
         tree = self.lint_tree
         tree.update_status(command.id, "running")
-
-        te = TerminalEmulator(
-            self._terminal.size,
-            can_focus=command.command.interactive if command.command else False,
-        )
+        size = self._terminal.size
+        process = Process(command.command, width=size.width, height=size.height)
 
         async def run_shell():
-            cwd = self.core.cwd
-            if command.command and command.command.cwd:
-                cwd = cwd / command.command.cwd
-
-            if command.command and await te.run_shell(command.command.cmd, cwd):
-                tree.update_status(command.id, "success")
-            else:
+            if await process.status() > 0:
                 tree.update_status(command.id, "failure")
+            else:
+                tree.update_status(command.id, "success")
 
         if command.id in self.terminals:
             self.terminals[command.id].run_task.cancel()
 
         self.terminals[command.id] = TerminalInstance(
-            emulator=te,
+            emulator=process,
             run_task=self.run_worker(run_shell()),
         )
+
         if not background:
             self.display_terminal(command.id)
-
-    def _run_command_fullscreen(self, command: LintTreeDataType):
-        # stop existing command, if it's running
-        self._stop_command(command.id)
-
-        if not command.command:
-            return
-
-        with self.suspend():
-            click.clear()
-            rich.print(start_message(command.command.cmd), end="")
-            process = subprocess.run(command.command.cmd, shell=True)  # noqa: S602
-            exit_code = process.returncode
-            if exit_code == 0:
-                rich.print(success_message())
-                status = "success"
-            else:
-                rich.print(failure_message(exit_code))
-                status = "failure"
-
-            rich.print(any_key_message())
-            click.pause("")
-        self.lint_tree.update_status(command.id, status)
 
     def _stop_command(self, command_id: str):
         tree = self.lint_tree
@@ -342,8 +292,7 @@ class FnugApp(App[None]):
             return
 
         if command_id in self.terminals:
-            self.terminals[command_id].emulator.echo("")  # makes sure the cursor position is reset
-            self.terminals[command_id].emulator.echo(stopped_message())
+            self.terminals[command_id].emulator.kill()
             self.terminals[command_id].run_task.cancel()
             tree.update_status(command_id, "failure")
 

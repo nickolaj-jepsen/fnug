@@ -10,7 +10,6 @@ dependencies = [
     "textual>=0.85.2",
     "rich>=13.9.2",
     "pydantic>=2.7.1",
-    "pyte>=0.8.2",
     "click-default-group>=1.2.4",
 ]
 readme = "README.md"
@@ -61,6 +60,8 @@ dev = [
     "maturin[patchelf]>=1.2",
     "types-click-default-group>=1.2.0.0",
     "maturin-import-hook>=0.1.0",
+    "pytest-benchmark>=5.1.0",
+    "pytest-asyncio>=0.24.0",
 ]
 
 [tool.ruff]

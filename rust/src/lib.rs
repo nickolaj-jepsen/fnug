@@ -5,19 +5,22 @@
 //! file, with flexible automation rules for when commands should be executed.
 
 use crate::commands::inherit::Inheritance;
+use crate::pty::python::{Output, OutputIterator, Process};
 use crate::selectors::watch::{watch, WatcherIterator};
 use commands::auto::Auto;
 use commands::command::Command;
 use commands::group::CommandGroup;
 use commands::inherit::Inheritable;
 use config_file::Config;
-use log::debug;
+use log::{debug, LevelFilter};
 use pyo3::{exceptions::PyFileNotFoundError, prelude::*};
+use pyo3_log::{Caching, Logger};
 use selectors::get_selected_commands;
 use std::path::PathBuf;
 
-mod commands;
+pub mod commands;
 mod config_file;
+pub mod pty;
 mod selectors;
 mod ui;
 
@@ -118,7 +121,7 @@ impl FnugCore {
 
     /// Returns a async iterator that watches for file system changes, yielding commands to run
     fn watch(&self, py: Python<'_>) -> PyResult<WatcherIterator> {
-        py.allow_threads(move || watch(self.config.clone()))
+        py.allow_threads(move || watch(self.all_commands()))
     }
 
     /// Returns commands that have detected git changes in their watched paths, or have `always=True`
@@ -129,14 +132,20 @@ impl FnugCore {
 }
 
 #[pymodule]
-fn core(m: &Bound<PyModule>) -> PyResult<()> {
-    pyo3_log::init();
+fn core<'py>(py: Python<'py>, m: Bound<'py, PyModule>) -> PyResult<()> {
+    Logger::new(py, Caching::LoggersAndLevels)?
+        .filter_target("vt100".to_owned(), LevelFilter::Warn)
+        .install()
+        .unwrap();
 
     m.add_class::<FnugCore>()?;
     m.add_class::<Auto>()?;
     m.add_class::<Command>()?;
     m.add_class::<CommandGroup>()?;
     m.add_class::<WatcherIterator>()?;
+    m.add_class::<Process>()?;
+    m.add_class::<OutputIterator>()?;
+    m.add_class::<Output>()?;
 
     Ok(())
 }
