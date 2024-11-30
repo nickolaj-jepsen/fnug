@@ -528,3 +528,7 @@ class LintTree(Tree[LintTreeDataType]):
     def _on_leave(self, _: events.Leave) -> None:
         """Clear any highlight when the mouse leaves the widget."""
         self.styles.border_right = ("solid", "#cf6a4c")
+
+    def action_quit(self):
+        """Quit the application."""
+        self.app.exit()

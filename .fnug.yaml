@@ -35,7 +35,9 @@ children:
       - name: clippy
         cmd: cargo clippy --fix --allow-dirty --allow-staged
       - name: stub gen
-        cmd: cargo run --bin stub_gen --features "stub_gen"
+        cmd: cargo run --bin stub_gen --features stub_gen
+      - name: cwd
+        cmd: pwd
   - name: debug
     commands:
       - name: htop
@@ -44,25 +46,22 @@ children:
       - name: recursive?!
         cmd: fnug
         interactive: true
-      - name: A very very very long file
-        cmd: |
-          cat src/fnug/terminal_emulator.py
-          cat src/fnug/terminal_emulator.py
-          cat src/fnug/terminal_emulator.py
+      - name: A very very very long name
+        cmd: cat rust/src/pty/terminal.rs
     children:
       - name: nested-auto
         auto:
           always: true
         commands:
           - name: test-auto
-            cmd: cat src/fnug/terminal_emulator.py
+            cmd: cat rust/src/pty/terminal.rs
           - name: test-not-auto
             auto:
               always: false
-            cmd: cat src/fnug/terminal_emulator.py
+            cmd: cat rust/src/pty/terminal.rs
       - name: not-expanded
         auto:
           always: false
         commands:
           - name: test-not-expanded
-            cmd: cat src/fnug/terminal_emulator.py
+            cmd: cat rust/src/pty/terminal.rs
