@@ -4,31 +4,67 @@
 //! It supports a hierarchical configuration structure that defines commands, groups,
 //! and their automation rules.
 
-use log::trace;
+use crate::commands::auto::Auto;
+use crate::commands::command::Command;
+use crate::commands::group::CommandGroup;
+use log::{debug, info};
+use pyo3::PyErr;
+use regex_cache::LazyRegex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Errors that can occur while loading configuration
 #[derive(Error, Debug)]
 pub enum ConfigError {
-    /// File system errors when reading config files
-    #[error("Unable to read config file")]
-    Io(#[from] std::io::Error),
-    /// Parse errors in YAML/JSON content
+    #[error("No config file found in current directory or its parents: {0}")]
+    ConfigNotFound(PathBuf),
+    #[error("Unable to find directory: {path:?} (entry: {entry:?})")]
+    DirectoryNotFound { entry: String, path: PathBuf },
+    #[error("Unknown working directory: {0}")]
+    UnknownWorkingDirectory(String),
     #[error("Unable to parse config file")]
     Serde(#[from] serde_yaml::Error),
+    #[error("Invalid regex pattern: {0}")]
+    Regex(#[from] regex::Error),
 }
 
-/// Configuration for a group of commands
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ConfigCommandGroup {
-    pub id: Option<String>,
-    pub name: String,
-    pub auto: Option<ConfigAuto>,
-    pub cwd: Option<PathBuf>,
-    pub commands: Option<Vec<ConfigCommand>>,
-    pub children: Option<Vec<ConfigCommandGroup>>,
+impl From<ConfigError> for PyErr {
+    fn from(error: ConfigError) -> Self {
+        match error {
+            ConfigError::Serde(err) => pyo3::exceptions::PyValueError::new_err(format!(
+                "Error parsing config file: {:?}",
+                err
+            )),
+            ConfigError::UnknownWorkingDirectory(path) => pyo3::exceptions::PyValueError::new_err(
+                format!("Unknown working directory: {:?}", path),
+            ),
+            ConfigError::Regex(err) => pyo3::exceptions::PyValueError::new_err(format!(
+                "Error parsing regex in config file: {:?}",
+                err
+            )),
+            ConfigError::ConfigNotFound(path) => {
+                pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                    "No config file found in current directory or its parents: {:?}",
+                    path
+                ))
+            }
+            ConfigError::DirectoryNotFound { path, entry } => {
+                pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                    "Unable to find directory: {:?} (entry: {:?})",
+                    path, entry
+                ))
+            }
+        }
+    }
+}
+
+pub fn parse_regexes(regex: Vec<String>) -> Result<Vec<LazyRegex>, ConfigError> {
+    regex
+        .into_iter()
+        .map(|r| LazyRegex::new(&r).map_err(ConfigError::Regex))
+        .collect()
 }
 
 /// Configuration for automatic command execution
@@ -51,13 +87,40 @@ pub struct ConfigCommandGroup {
 ///      - '.*\\.toml$'
 /// ```
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ConfigAuto {
     pub watch: Option<bool>,
     pub git: Option<bool>,
     pub path: Option<Vec<PathBuf>>,
     pub regex: Option<Vec<String>>,
     pub always: Option<bool>,
+}
+
+impl From<Auto> for ConfigAuto {
+    fn from(auto: Auto) -> Self {
+        ConfigAuto {
+            watch: auto.watch,
+            git: auto.git,
+            path: Some(auto.path),
+            regex: Some(auto.regex.iter().map(|r| r.to_string()).collect()),
+            always: auto.always,
+        }
+    }
+}
+
+impl TryInto<Auto> for ConfigAuto {
+    type Error = ConfigError;
+
+    fn try_into(self) -> Result<Auto, Self::Error> {
+        let regex = self.regex.map(parse_regexes).unwrap_or(Ok(Vec::new()))?;
+        Ok(Auto {
+            regex,
+            watch: self.watch,
+            git: self.git,
+            path: self.path.unwrap_or_default(),
+            always: self.always,
+        })
+    }
 }
 
 /// Configuration for a single command
@@ -78,6 +141,91 @@ pub struct ConfigCommand {
     pub cmd: String,
     pub interactive: Option<bool>,
     pub auto: Option<ConfigAuto>,
+}
+
+impl From<Command> for ConfigCommand {
+    fn from(command: Command) -> Self {
+        ConfigCommand {
+            id: Some(command.id),
+            name: command.name,
+            cwd: Some(command.cwd),
+            cmd: command.cmd,
+            interactive: Some(command.interactive),
+            auto: Some(command.auto.into()),
+        }
+    }
+}
+
+impl TryInto<Command> for ConfigCommand {
+    type Error = ConfigError;
+
+    fn try_into(self) -> Result<Command, Self::Error> {
+        Ok(Command {
+            cwd: self.cwd.unwrap_or_default(),
+            auto: self.auto.unwrap_or_default().try_into()?,
+            cmd: self.cmd,
+            id: self.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            name: self.name,
+            interactive: self.interactive.unwrap_or(false),
+        })
+    }
+}
+
+/// Configuration for a group of commands
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ConfigCommandGroup {
+    pub id: Option<String>,
+    pub name: String,
+    pub auto: Option<ConfigAuto>,
+    pub cwd: Option<PathBuf>,
+    pub commands: Option<Vec<ConfigCommand>>,
+    pub children: Option<Vec<ConfigCommandGroup>>,
+}
+
+impl From<CommandGroup> for ConfigCommandGroup {
+    fn from(group: CommandGroup) -> Self {
+        ConfigCommandGroup {
+            id: Some(group.id),
+            name: group.name,
+            auto: Some(group.auto.into()),
+            cwd: Some(group.cwd),
+            commands: Some(group.commands.into_iter().map(Into::into).collect()),
+            children: Some(group.children.into_iter().map(Into::into).collect()),
+        }
+    }
+}
+
+impl TryInto<CommandGroup> for ConfigCommandGroup {
+    type Error = ConfigError;
+
+    fn try_into(self) -> Result<CommandGroup, Self::Error> {
+        let children = self
+            .children
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.try_into())
+            .collect::<Result<Vec<CommandGroup>, ConfigError>>()?;
+        let commands = self
+            .commands
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.try_into())
+            .collect::<Result<Vec<Command>, ConfigError>>()?;
+        Ok(CommandGroup {
+            id: self.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            name: self.name,
+            auto: self.auto.unwrap_or_default().try_into()?,
+            cwd: self.cwd.unwrap_or_default(),
+            commands,
+            children,
+        })
+    }
+}
+
+impl ConfigCommandGroup {
+    pub fn as_yaml(&self) -> Result<String, ConfigError> {
+        serde_yaml::to_string(self).map_err(ConfigError::Serde)
+    }
 }
 
 /// Root configuration structure for Fnug
@@ -122,15 +270,11 @@ impl Config {
     /// * `ConfigError::Io` if the file cannot be read
     /// * `ConfigError::Serde` if the file contains invalid YAML/JSON
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use std::path::PathBuf;
-    /// let config = Config::from_file(&PathBuf::from(".fnug.yaml"))?;
     /// ```
     pub fn from_file(file: &PathBuf) -> Result<Config, ConfigError> {
-        let file = std::fs::read_to_string(file).map_err(ConfigError::Io)?;
-        let config: Config = serde_yaml::from_str(&file).map_err(ConfigError::Serde)?;
+        let file =
+            std::fs::read_to_string(file).map_err(|_| ConfigError::ConfigNotFound(file.clone()))?;
+        let config: Config = serde_yaml::from_str(&file)?;
         Ok(config)
     }
 
@@ -144,30 +288,23 @@ impl Config {
     ///
     /// * `ConfigError::Io` if no configuration file is found
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let config_path = Config::find_config()?;
-    /// let config = Config::from_file(&config_path)?;
     /// ```
     pub fn find_config() -> Result<PathBuf, ConfigError> {
-        let mut path = std::env::current_dir().map_err(ConfigError::Io)?;
+        let config_path = std::env::current_dir()
+            .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
+        let mut path = config_path.clone();
+        debug!("Searching for config file in {:?}", config_path);
         loop {
-            for filename in FILENAMES.iter() {
-                let file = path.join(filename);
-                if file.exists() {
-                    trace!("Found config file: {:?}", file);
-                    return Ok(file);
+            for file in &FILENAMES {
+                let config_path = path.join(file);
+                if config_path.exists() {
+                    info!("Found config file: {:?}", config_path);
+                    return Ok(config_path);
                 }
             }
-
             if !path.pop() {
-                break;
+                return Err(ConfigError::ConfigNotFound(config_path));
             }
         }
-        Err(ConfigError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "fnug.yaml",
-        )))
     }
 }

@@ -81,7 +81,7 @@ class Terminal(Widget, can_focus=False):
 
     class OpenContextMenu(Message):
         def __init__(self, this: "Terminal", event: events.Click) -> None:
-            self.this: "Terminal" = this
+            self.this: Terminal = this
             self.click_event: events.Click = event
             super().__init__()
 
