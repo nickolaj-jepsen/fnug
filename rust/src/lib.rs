@@ -105,7 +105,7 @@ impl FnugCore {
     /// Returns the working directory as a Python pathlib.Path object
     #[getter]
     fn get_cwd(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let pathlib = py.import_bound("pathlib")?;
+        let pathlib = py.import("pathlib")?;
         let path = pathlib.getattr("Path")?;
         let obj = path.call1((self.cwd.to_string_lossy(),))?;
         let resolved = obj.call_method0("resolve")?;

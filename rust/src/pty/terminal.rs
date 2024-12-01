@@ -161,7 +161,7 @@ fn spawn_pty_reader(
                     debug!("PTY reader EOF");
                     break;
                 }
-                Ok(n) => {
+                Ok(_) => {
                     terminal_tx.send(TerminalUpdate::Process(buf)).unwrap();
                 }
                 Err(e) => {
