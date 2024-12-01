@@ -92,14 +92,21 @@ impl Auto {
 
 impl Inheritable for Auto {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        let mut auto = self.merge(&inheritance.auto);
-        auto.path = auto
-            .path
-            .iter()
-            .map(|p| inherit_path(&inheritance.cwd, p.clone()))
-            .collect();
+        // Only inherit auto settings if the parent has either watch or git enabled
+        let mut auto =
+            if inheritance.auto.watch.unwrap_or(false) || inheritance.auto.git.unwrap_or(false) {
+                self.merge(&inheritance.auto)
+            } else {
+                self.clone()
+            };
+
+        // If the path is empty, inherit the cwd from the parent
+        if auto.path.is_empty() {
+            auto.path.push(inheritance.cwd.clone());
+        }
+
         Ok(Inheritance {
-            cwd: PathBuf::new(),
+            cwd: inheritance.cwd.clone(),
             auto,
             entry_path: inheritance.merge_entry_path("auto"),
         })
@@ -420,5 +427,102 @@ mod tests {
             .inherit(&Inheritance::from(PathBuf::from("/root")))
             .unwrap();
         assert_eq!(parent_group.cwd, PathBuf::from("/root"));
+    }
+
+    #[test]
+    fn test_empty_auto_path_should_inherit_parent_command_path() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        let subdir = root.join("subdir");
+        create_dir_all(&subdir);
+
+        let mut command = Command {
+            id: "2".to_string(),
+            name: "child".to_string(),
+            cmd: "echo test".to_string(),
+            interactive: false,
+            cwd: PathBuf::from("subdir"),
+            auto: Auto {
+                watch: Some(true),
+                git: Some(true),
+                path: vec![],
+                regex: vec![],
+                always: Some(false),
+            },
+        };
+
+        command.inherit(&Inheritance::from(root.clone())).unwrap();
+
+        assert_eq!(command.auto.path, vec![root.join("subdir")]);
+    }
+
+    #[test]
+    fn test_empty_auto_path_should_inherit_parent_command_path_unless_parent_auto_has_path() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        let subdir = root.join("subdir");
+        create_dir_all(&subdir);
+
+        let mut group = CommandGroup {
+            id: "1".to_string(),
+            name: "parent".to_string(),
+            auto: Auto {
+                watch: Some(true),
+                git: Some(true),
+                path: vec![],
+                regex: vec![],
+                always: Some(false),
+            },
+            cwd: root.clone(),
+            commands: vec![Command {
+                id: "2".to_string(),
+                name: "child".to_string(),
+                cmd: "echo test".to_string(),
+                interactive: false,
+                cwd: PathBuf::from("subdir"),
+                auto: Auto {
+                    watch: Some(true),
+                    git: Some(true),
+                    path: vec![],
+                    regex: vec![],
+                    always: Some(false),
+                },
+            }],
+            children: vec![],
+        };
+
+        group.inherit(&Inheritance::from(root.clone())).unwrap();
+        assert_eq!(group.commands[0].auto.path, vec![root.join("subdir")]);
+
+        let mut group = CommandGroup {
+            id: "1".to_string(),
+            name: "parent".to_string(),
+            auto: Auto {
+                watch: Some(true),
+                git: Some(true),
+                path: vec![root.clone()],
+                regex: vec![],
+                always: Some(false),
+            },
+            cwd: root.clone(),
+            commands: vec![Command {
+                id: "2".to_string(),
+                name: "child".to_string(),
+                cmd: "echo test".to_string(),
+                interactive: false,
+                cwd: PathBuf::from("subdir"),
+                auto: Auto {
+                    watch: Some(true),
+                    git: Some(true),
+                    path: vec![],
+                    regex: vec![],
+                    always: Some(false),
+                },
+            }],
+            children: vec![],
+        };
+
+        group.inherit(&Inheritance::from(root.clone())).unwrap();
+        assert_eq!(group.commands[0].auto.path, vec![root]);
     }
 }
