@@ -11,38 +11,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rye
-        uses: eifinger/setup-rye@v2
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-          cache-prefix: 3.12
-      - name: Install dependencies
-        run: |
-          rye pin 3.12
-          rye sync --no-lock
+          cache-suffix: 3.12
+          python-version: 3.12
       - name: Run lint
         run: |
-          rye run -- ruff check --output-format=github .
-          rye run -- ruff format --check .
-          rye run -- pyright src
+          uv run --frozen ruff check --output-format=github .
+          uv run --frozen ruff format --check .
+          uv run --frozen pyright src
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.10', '3.11', '3.12']
+        python-version: [ '3.10', '3.11', '3.12' ]
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rye
-        uses: eifinger/setup-rye@v2
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-          cache-prefix: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: |
-          rye pin ${{ matrix.python-version }}
-          rye sync --no-lock
+          cache-suffix: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version }}
       - name: Run tests
-        run: rye run test
+        run: uv run --frozen pytest
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
