@@ -24,14 +24,11 @@ pyo3-async-runtimes = { version = "0.23.0", features = ["tokio-runtime"] }
 notify = "7.0.0"
 notify-debouncer-full = "0.4.0"
 portable-pty = "0.8.1"
-vt100 = "0.15.2"
+vt100 = { path = "./vendor/vt100" }
 tokio = { version = "1.41.1", features = ["full", "sync"] }
 anstyle = "1.0.10"
 parking_lot = "0.12.3"
 crossbeam-channel = "0.5.13"
-
-[patch.crates-io]
-vt100 = { path = "vendor/vt100" }
 
 [[bin]]
 name = "stub_gen"
@@ -43,7 +40,7 @@ debug = true
 
 [features]
 stub_gen = ["pyo3-stub-gen"]
-extension-module = ["pyo3/extension-module", "pyo3/abi3-py312"]
+extension-module = ["pyo3/extension-module", "pyo3/abi3-py310"]
 default = ["extension-module"]
 
 [dev-dependencies]

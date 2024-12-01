@@ -4,7 +4,6 @@ const PRIMARY_COLOR: Style =
     Style::new().fg_color(Some(anstyle::Color::Rgb(RgbColor(207, 106, 76))));
 const SUCCESS_COLOR: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
 const ERROR_COLOR: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)));
-const CRLF: &str = "\r\n";
 
 fn render_arrow() -> String {
     format!("{}❱{}", PRIMARY_COLOR, Reset)

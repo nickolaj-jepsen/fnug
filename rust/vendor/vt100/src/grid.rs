@@ -1,5 +1,4 @@
 use crate::term::BufWrite as _;
-use log::debug;
 
 #[derive(Clone, Debug)]
 pub struct Grid {
