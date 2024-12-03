@@ -8,7 +8,18 @@ $primary-darker: #8c3a2d;
   width: 30;
   background: $background;
   border-right: solid $primary;
-  margin-left: 1;
+  padding-left: 1;
+  background-tint: transparent;
+
+  & > .tree--guides-selected {
+      color: $primary;
+  }
+
+  & > .tree--cursor {
+      background: $background;
+      color: $primary;
+      text-style: underline;
+  }
 }
 
 #terminal {
@@ -27,12 +38,17 @@ FooterKey .footer-key--key {
   color: #000000;
 }
 
+FooterKey .footer-key--description {
+  color: #000000;
+}
+
 FooterKey:hover {
   background: $primary-dark;
 }
 
 FooterKey:hover .footer--highlight-key {
   background: $primary-darker;
+  color: #000000;
 }
 
 FooterKey .footer-key--description {
