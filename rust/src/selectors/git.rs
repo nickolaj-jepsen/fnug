@@ -17,6 +17,8 @@ impl GitScanner {
             Ok(cached_path)
         } else {
             let repo_path = Repository::discover_path(path, &[] as &[&Path])?;
+            // This is the .git directory, we want the parent directory
+            let repo_path = repo_path.parent().unwrap().to_path_buf();
             self.repository_cache
                 .insert(path.clone(), repo_path.clone());
             Ok(repo_path)
@@ -27,9 +29,10 @@ impl GitScanner {
         if let Some(cached_changes) = self.repo_changes_cache.get(repo).cloned() {
             Ok(cached_changes)
         } else {
-            let changes = Repository::discover(repo)?
+            let changes = Repository::open(repo)?
                 .statuses(None)?
                 .iter()
+                .filter(|entry| !entry.status().is_ignored())
                 .map(|status| {
                     let path = status.path().unwrap();
                     Ok(PathBuf::from(path))
@@ -48,16 +51,20 @@ impl GitScanner {
     ) -> Result<bool, git2::Error> {
         let repo = self.get_repo(path)?;
         let changes = self.get_changes(&repo)?;
+
         let changes = changes
             .iter()
-            .map(|path| path.to_string_lossy().to_string())
+            // Get the absolute path of the change
+            .map(|change| repo.join(change))
+            // Remove any changes that are not in the watched path
+            .filter(|change| change.starts_with(path))
+            // Convert to string
+            .map(|change| change.to_string_lossy().to_string())
+            // Remove any changes that do not match the regex
+            .filter(|change| patterns.iter().any(|pattern| pattern.is_match(change)))
             .collect::<Vec<String>>();
-        for pattern in patterns {
-            if changes.iter().any(|change| pattern.is_match(change)) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+
+        Ok(!changes.is_empty())
     }
 }
 
