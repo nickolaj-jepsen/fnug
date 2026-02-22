@@ -33,6 +33,16 @@ cargo install fnug
 
 Download a prebuilt binary from [GitHub Releases](https://github.com/nickolaj-jepsen/fnug/releases).
 
+### With Nix
+
+```bash
+# Run directly
+nix run github:nickolaj-jepsen/fnug
+
+# Or install to profile
+nix profile install github:nickolaj-jepsen/fnug
+```
+
 ### From source
 
 ```bash
