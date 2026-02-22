@@ -11,11 +11,19 @@ children:
         - "\\.rs$"
     commands:
       - name: fmt
+        id: rust-fmt
         cmd: cargo fmt
       - name: test
         cmd: cargo test
-      - name: clippy
+      - name: clippy fix
+        id: rust-clippy-fix
         cmd: cargo clippy --fix --allow-dirty --allow-staged
+        depends_on:
+          - rust-fmt
+      - name: clippy check
+        cmd: cargo clippy -- -D warnings
+        depends_on:
+          - rust-clippy-fix
       - name: cwd
         cmd: pwd
   - name: nix
