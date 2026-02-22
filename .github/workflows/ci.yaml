@@ -1,4 +1,4 @@
-name: 'CI'
+name: CI
 
 on:
   pull_request:
@@ -7,38 +7,32 @@ on:
       - main
 
 jobs:
-  lint:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          enable-cache: true
-          cache-suffix: 3.12
-          python-version: 3.12
-      - name: Run lint
-        run: |
-          uv run --frozen ruff check --output-format=github .
-          uv run --frozen ruff format --check .
-          uv run --frozen pyright src
-  test:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -- -D warnings
+
+  test:
     strategy:
       matrix:
-        python-version: [ '3.10', '3.11', '3.12' ]
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-          cache-suffix: ${{ matrix.python-version }}
-          python-version: ${{ matrix.python-version }}
-      - name: Run tests
-        run: uv run --frozen pytest
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage
-          path: .coverage
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
