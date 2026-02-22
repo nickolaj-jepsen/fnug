@@ -7,6 +7,33 @@ on:
       - main
 
 jobs:
+  alejandra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix run nixpkgs#alejandra -- --check .
+
+  statix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix run nixpkgs#statix -- check .
+
+  deadnix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix run nixpkgs#deadnix -- --fail .
+
   build:
     strategy:
       matrix:
