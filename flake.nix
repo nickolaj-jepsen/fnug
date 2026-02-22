@@ -1,6 +1,11 @@
 {
   description = "Fnug - A nice lint runner";
 
+  nixConfig = {
+    extra-substituters = ["https://fnug.cachix.org"];
+    extra-trusted-public-keys = ["fnug.cachix.org-1:SDUeF2nZSbSPOAMNJdYZdoVB+tHdB8UHHcqhEmizeNk="];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
@@ -76,6 +81,7 @@
 
           packages = [
             self'.packages.default
+            pkgs.cachix
           ];
 
           nativeBuildInputs = with pkgs; [
