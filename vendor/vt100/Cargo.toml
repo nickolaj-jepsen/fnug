@@ -1,0 +1,35 @@
+[package]
+edition = "2021"
+name = "fnug-vt100"
+version = "0.15.2"
+include = [
+    "src/**/*",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+]
+description = "Fork of vt100 with scrollback support — library for parsing terminal data"
+homepage = "https://github.com/nickolaj-jepsen/fnug"
+readme = "README.md"
+keywords = [
+    "terminal",
+    "vt100",
+]
+categories = [
+    "command-line-interface",
+    "encoding",
+]
+license = "MIT"
+repository = "https://github.com/nickolaj-jepsen/fnug"
+
+[dependencies.itoa]
+version = "1.0.5"
+
+[dependencies.log]
+version = "0.4.17"
+
+[dependencies.unicode-width]
+version = "0.1.10"
+
+[dependencies.vte]
+version = "0.11.0"
