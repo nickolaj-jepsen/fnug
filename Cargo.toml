@@ -1,0 +1,46 @@
+[package]
+name = "fnug"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "A TUI command runner based on git changes"
+license = "GPL-3.0-only"
+repository = "https://github.com/nickolaj-jepsen/fnug"
+homepage = "https://github.com/nickolaj-jepsen/fnug"
+readme = "README.md"
+keywords = ["tui", "terminal", "git", "lint", "test-runner"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["vendor/", ".agents/", ".claude/", ".envrc", ".fnug.yaml", "flake.*", "skills-lock.json"]
+
+[dependencies]
+git2 = { version = "0.20.4", default-features = false }
+log = { version = "0.4.29", features = ["std"] }
+regex = "1.12.3"
+regex-cache = "0.2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9.34"
+thiserror = "2.0.18"
+uuid = { version = "1.21.0", features = ["v4"] }
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+portable-pty = "0.9.0"
+vt100 = { version = "0.15.2", package = "fnug-vt100", path = "./vendor/vt100" }
+tokio = { version = "1.49.0", features = ["macros", "sync", "rt-multi-thread", "signal", "time"] }
+anstyle = "1.0.13"
+parking_lot = "0.12.3"
+crossbeam-channel = "0.5.15"
+ratatui = { version = "0.30.0", features = ["crossterm"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+
+[profile.release]
+debug = "line-tables-only"
+strip = "symbols"
+
+[dev-dependencies]
+tempfile = "3.25.0"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

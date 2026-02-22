@@ -1,16 +1,13 @@
 use crate::commands::command::Command;
-use log::{error, info};
+use log::{debug, error, info};
 use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
-use pyo3::exceptions::PyStopAsyncIteration;
-use pyo3::prelude::*;
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 #[derive(Error, Debug)]
 pub enum WatchError {
@@ -18,6 +15,8 @@ pub enum WatchError {
     Watch(#[from] notify::Error),
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
+    #[error("No watchable commands found")]
+    NoWatchableCommands,
 }
 
 fn commands_for_paths<'a>(
@@ -33,7 +32,7 @@ fn commands_for_paths<'a>(
                         .auto
                         .regex
                         .iter()
-                        .any(|re| re.is_match(path.to_str().unwrap()))
+                        .any(|re| re.is_match(&path.to_string_lossy()))
                     {
                         commands.push(cmd);
                     }
@@ -61,48 +60,8 @@ fn path_lookup_table(commands: Vec<Command>) -> HashMap<PathBuf, Vec<Command>> {
         })
 }
 
-#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pyclass)]
-#[pyclass(frozen)]
-pub struct WatcherIterator {
-    receiver: Arc<Mutex<mpsc::Receiver<Vec<PathBuf>>>>,
-    #[allow(dead_code)]
-    watcher: Debouncer<RecommendedWatcher, RecommendedCache>,
-    commands: HashMap<PathBuf, Vec<Command>>,
-}
-
-#[cfg_attr(feature = "stub_gen", pyo3_stub_gen::derive::gen_stub_pymethods)]
-#[pymethods]
-impl WatcherIterator {
-    fn __aiter__(slf: PyRef<Self>) -> PyRef<Self> {
-        slf
-    }
-
-    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let receiver = self.receiver.clone();
-        let commands = self.commands.clone();
-
-        let promise = async move {
-            loop {
-                let changed_files = receiver
-                    .lock()
-                    .await
-                    .recv()
-                    .await
-                    .ok_or_else(|| PyStopAsyncIteration::new_err("No more file changes"))?;
-
-                let commands = commands_for_paths(&changed_files, &commands);
-                if !commands.is_empty() {
-                    return Ok(commands.into_iter().cloned().collect::<Vec<_>>());
-                }
-            }
-        };
-
-        pyo3_async_runtimes::tokio::future_into_py(py, promise)
-    }
-}
-
 fn run_notify_watcher(
-    paths: Vec<&PathBuf>,
+    paths: Vec<&Path>,
     sender: mpsc::Sender<Vec<PathBuf>>,
 ) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, WatchError> {
     info!("Starting file watcher");
@@ -121,21 +80,23 @@ fn run_notify_watcher(
                     .flat_map(|event| event.paths.clone())
                     .collect();
 
-                if !files.is_empty() {
-                    sender.blocking_send(files).unwrap();
+                if !files.is_empty()
+                    && let Err(e) = sender.blocking_send(files)
+                {
+                    error!("Failed to send watch event: {e}");
                 }
             }
-            Err(e) => error!("Watch error: {:?}", e),
+            Err(e) => error!("Watch error: {e:?}"),
         },
     )
     .map_err(WatchError::Watch)?;
 
     for path in paths {
-        info!("Watching path: {:?}", path);
+        info!("Watching path: {}", path.display());
         notify_watcher
             .watch(path, RecursiveMode::Recursive)
             .map_err(|e| {
-                error!("Failed to watch path {:?}: {}", path, e);
+                error!("Failed to watch path {}: {e}", path.display());
                 WatchError::Watch(e)
             })?;
     }
@@ -143,26 +104,49 @@ fn run_notify_watcher(
     Ok(notify_watcher)
 }
 
-pub fn watch(commands: Vec<Command>) -> PyResult<WatcherIterator> {
-    let (tx, rx) = mpsc::channel(100);
+type WatchHandle = (
+    mpsc::Receiver<Vec<Command>>,
+    Debouncer<RecommendedWatcher, RecommendedCache>,
+);
+
+/// Start watching for file changes, returning a receiver of matched commands and the debouncer (must be kept alive).
+///
+/// # Errors
+///
+/// Returns `WatchError::NoWatchableCommands` if no commands have watch enabled,
+/// or `WatchError::Watch` if the file watcher fails to start.
+pub fn watch_commands(commands: Vec<Command>) -> Result<WatchHandle, WatchError> {
+    let (path_tx, mut path_rx) = mpsc::channel(100);
     let lookup_table = path_lookup_table(commands);
 
     if lookup_table.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "No watchable commands found",
-        ));
+        return Err(WatchError::NoWatchableCommands);
     }
 
-    let paths = lookup_table.keys().collect::<Vec<&PathBuf>>();
-    let watcher = run_notify_watcher(paths, tx).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to start watcher: {}", e))
-    })?;
+    let paths = lookup_table
+        .keys()
+        .map(PathBuf::as_path)
+        .collect::<Vec<&Path>>();
+    let watcher = run_notify_watcher(paths, path_tx)?;
 
-    Ok(WatcherIterator {
-        watcher,
-        receiver: Arc::new(Mutex::new(rx)),
-        commands: lookup_table,
-    })
+    let (cmd_tx, cmd_rx) = mpsc::channel(100);
+    let lookup = lookup_table;
+
+    tokio::spawn(async move {
+        while let Some(changed_files) = path_rx.recv().await {
+            let matched = commands_for_paths(&changed_files, &lookup);
+            if !matched.is_empty() {
+                let names: Vec<&str> = matched.iter().map(|c| c.name.as_str()).collect();
+                debug!("Watcher matched commands: {}", names.join(", "));
+                let cmds: Vec<Command> = matched.into_iter().cloned().collect();
+                if cmd_tx.send(cmds).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok((cmd_rx, watcher))
 }
 
 #[cfg(test)]
@@ -177,7 +161,7 @@ mod tests {
             name: name.to_string(),
             cmd: "test".to_string(),
             cwd: PathBuf::new(),
-            interactive: false,
+
             auto: Auto {
                 watch: Some(true),
                 path: paths.into_iter().map(PathBuf::from).collect(),
@@ -188,6 +172,7 @@ mod tests {
                 git: None,
                 always: None,
             },
+            ..Default::default()
         }
     }
 

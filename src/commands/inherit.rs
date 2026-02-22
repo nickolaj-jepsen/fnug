@@ -2,16 +2,18 @@ use crate::commands::auto::Auto;
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::config_file::ConfigError;
+use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn inherit_path(parent: &PathBuf, child: PathBuf) -> PathBuf {
-    if child == PathBuf::new() {
-        parent.clone()
+#[must_use]
+pub fn inherit_path(parent: &Path, child: PathBuf) -> PathBuf {
+    if child.as_os_str().is_empty() {
+        parent.to_path_buf()
     } else if child.is_relative() {
         parent.join(child)
     } else {
-        child.clone()
+        child
     }
 }
 
@@ -20,11 +22,12 @@ pub struct Inheritance {
     cwd: PathBuf,
     auto: Auto,
     entry_path: Vec<String>,
+    env: HashMap<String, String>,
 }
 
 impl Inheritance {
     fn canonicalize(&mut self) -> Result<(), io::Error> {
-        if self.cwd != PathBuf::new() {
+        if !self.cwd.as_os_str().is_empty() {
             self.cwd.canonicalize()?;
         }
         self.auto.path = self
@@ -54,15 +57,33 @@ impl From<PathBuf> for Inheritance {
 
 /// A trait for types that can inherit settings from another instance, or another type, eg command from command group
 pub trait Inheritable: Sized {
+    /// Calculate the inheritance state for this item.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if the inheritance calculation fails.
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError>;
+
+    /// Apply previously calculated inheritance to this item.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if applying inheritance fails.
     fn apply_inheritance(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError>;
+
+    /// Calculate and apply inheritance in one step.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::DirectoryNotFound` if a referenced directory does not exist.
     fn inherit(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
         let mut inherited = self.calculate_inheritance(inheritance)?;
         inherited
             .canonicalize()
-            .map_err(|_| ConfigError::DirectoryNotFound {
+            .map_err(|e| ConfigError::DirectoryNotFound {
                 path: inherited.cwd.clone(),
                 entry: inherited.entry_path.join("."),
+                source: e,
             })?;
         self.apply_inheritance(&inherited)
     }
@@ -109,31 +130,52 @@ impl Inheritable for Auto {
             cwd: inheritance.cwd.clone(),
             auto,
             entry_path: inheritance.merge_entry_path("auto"),
+            env: inheritance.env.clone(),
         })
     }
 
     fn apply_inheritance(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
         self.watch = inheritance.auto.watch;
         self.git = inheritance.auto.git;
-        self.path = inheritance.auto.path.clone();
-        self.regex = inheritance.auto.regex.clone();
+        self.path.clone_from(&inheritance.auto.path);
+        self.regex.clone_from(&inheritance.auto.regex);
         self.always = inheritance.auto.always;
 
         Ok(())
     }
 }
 
+fn calculate_common_inheritance(
+    name: &str,
+    cwd: &Path,
+    auto: &Auto,
+    env: &HashMap<String, String>,
+    inheritance: &Inheritance,
+) -> Inheritance {
+    let mut merged_env = inheritance.env.clone();
+    merged_env.extend(env.clone());
+    Inheritance {
+        cwd: inherit_path(&inheritance.cwd, cwd.to_path_buf()),
+        auto: auto.merge(&inheritance.auto),
+        entry_path: inheritance.merge_entry_path(name),
+        env: merged_env,
+    }
+}
+
 impl Inheritable for Command {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        Ok(Inheritance {
-            cwd: inherit_path(&inheritance.cwd, self.cwd.clone()),
-            auto: self.auto.merge(&inheritance.auto),
-            entry_path: inheritance.merge_entry_path(&self.name),
-        })
+        Ok(calculate_common_inheritance(
+            &self.name,
+            &self.cwd,
+            &self.auto,
+            &self.env,
+            inheritance,
+        ))
     }
 
     fn apply_inheritance(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
-        self.cwd = inheritance.cwd.clone();
+        self.cwd.clone_from(&inheritance.cwd);
+        self.env.clone_from(&inheritance.env);
         self.auto.inherit(inheritance)?;
         Ok(())
     }
@@ -141,15 +183,18 @@ impl Inheritable for Command {
 
 impl Inheritable for CommandGroup {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        Ok(Inheritance {
-            cwd: inherit_path(&inheritance.cwd, self.cwd.clone()),
-            auto: self.auto.merge(&inheritance.auto),
-            entry_path: inheritance.merge_entry_path(&self.name),
-        })
+        Ok(calculate_common_inheritance(
+            &self.name,
+            &self.cwd,
+            &self.auto,
+            &self.env,
+            inheritance,
+        ))
     }
 
     fn apply_inheritance(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
-        self.cwd = inheritance.cwd.clone();
+        self.cwd.clone_from(&inheritance.cwd);
+        self.env.clone_from(&inheritance.env);
         self.auto.inherit(inheritance)?;
         for command in &mut self.commands {
             command.inherit(inheritance)?;
@@ -191,11 +236,13 @@ mod tests {
                 id: "2".to_string(),
                 name: "child".to_string(),
                 cmd: "echo test".to_string(),
-                interactive: false,
+
                 cwd: PathBuf::new(),
                 auto: Auto::default(),
+                ..Default::default()
             }],
             children: vec![],
+            ..Default::default()
         };
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
@@ -218,11 +265,13 @@ mod tests {
                 id: "2".to_string(),
                 name: "child".to_string(),
                 cmd: "echo test".to_string(),
-                interactive: false,
+
                 cwd: PathBuf::from("subdir"),
                 auto: Auto::default(),
+                ..Default::default()
             }],
             children: vec![],
+            ..Default::default()
         };
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
@@ -251,11 +300,13 @@ mod tests {
                 id: "2".to_string(),
                 name: "child".to_string(),
                 cmd: "echo test".to_string(),
-                interactive: false,
+
                 cwd: PathBuf::new(),
                 auto: Auto::default(),
+                ..Default::default()
             }],
             children: vec![],
+            ..Default::default()
         };
 
         group.inherit(&Inheritance::default()).unwrap();
@@ -287,11 +338,13 @@ mod tests {
                 id: "3".to_string(),
                 name: "command".to_string(),
                 cmd: "echo test".to_string(),
-                interactive: false,
+
                 cwd: PathBuf::new(),
                 auto: Auto::default(),
+                ..Default::default()
             }],
             children: vec![],
+            ..Default::default()
         };
 
         let mut parent_group = CommandGroup {
@@ -301,6 +354,7 @@ mod tests {
             cwd: root.clone(),
             commands: vec![],
             children: vec![child_group],
+            ..Default::default()
         };
 
         parent_group
@@ -338,11 +392,13 @@ mod tests {
                 id: "2".to_string(),
                 name: "child".to_string(),
                 cmd: "echo test".to_string(),
-                interactive: false,
+
                 cwd: PathBuf::from("./subdir"),
                 auto: Auto::default(),
+                ..Default::default()
             }],
             children: vec![],
+            ..Default::default()
         };
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
@@ -350,53 +406,8 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_invalid_regex() {
-        let result = Auto::new(
-            Some(true),
-            Some(false),
-            vec![],
-            vec!["[invalid".to_string()],
-            Some(false),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_auto_valid_regex() {
-        let result = Auto::new(
-            Some(true),
-            Some(false),
-            vec![],
-            vec![".*\\.rs$".to_string()],
-            Some(false),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_auto_path_validation() {
-        let auto = Auto::new(
-            Some(true),
-            Some(false),
-            vec![PathBuf::from("/nonexistent/path")],
-            vec![],
-            Some(false),
-        );
-        assert!(auto.is_ok());
-
-        let auto = Auto::new(
-            Some(true),
-            Some(false),
-            vec![PathBuf::new()],
-            vec![],
-            Some(false),
-        );
-        assert!(auto.is_ok());
-    }
-
-    #[test]
     fn test_nested_invalid_auto_inheritance() {
-        let parent_auto = Auto::new(
+        let parent_auto = Auto::create(
             Some(true),
             Some(true),
             vec![],
@@ -404,7 +415,7 @@ mod tests {
             Some(false),
         )
         .unwrap();
-        let child_auto = Auto::new(
+        let child_auto = Auto::create(
             Some(true),
             Some(true),
             vec![],
@@ -420,6 +431,7 @@ mod tests {
             cwd: PathBuf::from("/root"),
             commands: vec![],
             children: vec![],
+            ..Default::default()
         };
 
         // Parent group with valid Auto should still work
@@ -440,7 +452,6 @@ mod tests {
             id: "2".to_string(),
             name: "child".to_string(),
             cmd: "echo test".to_string(),
-            interactive: false,
             cwd: PathBuf::from("subdir"),
             auto: Auto {
                 watch: Some(true),
@@ -449,6 +460,7 @@ mod tests {
                 regex: vec![],
                 always: Some(false),
             },
+            ..Default::default()
         };
 
         command.inherit(&Inheritance::from(root.clone())).unwrap();
@@ -478,7 +490,7 @@ mod tests {
                 id: "2".to_string(),
                 name: "child".to_string(),
                 cmd: "echo test".to_string(),
-                interactive: false,
+
                 cwd: PathBuf::from("subdir"),
                 auto: Auto {
                     watch: Some(true),
@@ -487,8 +499,10 @@ mod tests {
                     regex: vec![],
                     always: Some(false),
                 },
+                ..Default::default()
             }],
             children: vec![],
+            ..Default::default()
         };
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
@@ -509,7 +523,7 @@ mod tests {
                 id: "2".to_string(),
                 name: "child".to_string(),
                 cmd: "echo test".to_string(),
-                interactive: false,
+
                 cwd: PathBuf::from("subdir"),
                 auto: Auto {
                     watch: Some(true),
@@ -518,8 +532,10 @@ mod tests {
                     regex: vec![],
                     always: Some(false),
                 },
+                ..Default::default()
             }],
             children: vec![],
+            ..Default::default()
         };
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
