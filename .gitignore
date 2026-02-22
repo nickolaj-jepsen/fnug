@@ -3,3 +3,4 @@
 result
 .idea/
 .env
+vendor/vt100/target/
