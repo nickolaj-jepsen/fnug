@@ -1,100 +1,169 @@
 # Fnug
 
-[![image](https://img.shields.io/pypi/v/fnug.svg)](https://pypi.python.org/pypi/fnug)
-[![image](https://img.shields.io/pypi/l/fnug.svg)](https://pypi.python.org/pypi/fnug)
-[![image](https://img.shields.io/pypi/pyversions/fnug.svg)](https://pypi.python.org/pypi/fnug)
-[![Actions status](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
+[![CI](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
+[![Crates.io](https://img.shields.io/crates/v/fnug)](https://crates.io/crates/fnug)
 
-Fnug is a command runner, well actually it's a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)),
-but with a focus on running all your lint and test commands, at once, and displaying the result of those command.
-Confused? Watch the [demo](#demo)
+Fnug is a TUI command runner that automatically selects and executes lint and test commands based on git changes or file watching. Think of it as a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but purpose-built for running your dev commands side by side.
 
 ![screenshot](https://github.com/nickolaj-jepsen/fnug/assets/1039554/3fd812fc-e1dc-4dd2-86eb-de91dc8e027f)
 
 ## Features
 
-- User-friendly terminal interface, with 100% support for both keyboard and mouse navigation
-- Git integration, automatically select lints and tests that's should be run, based on what files have uncommitted
-  changes
-- Track file changes, and selects commands based on the changed files
-- Terminal emulation with scroll back, for those really long error messages
+- **TUI with full keyboard and mouse support** — navigate, select, and run commands from a terminal UI
+- **Git integration** — automatically select commands based on uncommitted file changes
+- **File watching** — monitor the file system and re-select commands when files change
+- **Terminal emulation with scrollback** — full PTY support for interactive commands and long output
+- **Headless mode** (`fnug check`) — run selected commands without the TUI, useful for CI and pre-commit hooks
+- **Git hook integration** (`fnug init-hooks`) — install a pre-commit hook that runs `fnug check`
+- **Search/filter** — press `/` to filter the command tree
+- **Command dependencies** — define `depends_on` to control execution order
+- **Environment variables** — set per-command or per-group env vars
+- **Configurable scrollback** — set scrollback buffer size per command
+- **Nested command groups** — organize commands into a hierarchical tree with inherited settings
 
 ## Installation
 
-Python 3.10 or later is required.
-
-[pipx](https://github.com/pypa/pipx) or [rye tool](https://rye-up.com/guide/tools/) are highly recommended:
+### From crates.io
 
 ```bash
-# Recommended
-pipx install fnug
-# (or with rye tool)
-rye install fnug
-# Via pip (NOT RECOMMENDED)
-pip install fnug
+cargo install fnug
+```
+
+### From GitHub Releases
+
+Download a prebuilt binary from [GitHub Releases](https://github.com/nickolaj-jepsen/fnug/releases).
+
+### From source
+
+```bash
+git clone https://github.com/nickolaj-jepsen/fnug.git
+cd fnug
+cargo install --path .
 ```
 
 ## Usage
 
-To start `fnug` you only need to run it in a directory with a `.fnug.yaml` configuration file (or with the argument
-`-c path/to/config.yaml`)
+Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c path/to/config.yaml`).
 
-### Config
+### Subcommands
 
-Fnug is controlled by a `.fnug.yaml` configuration file (or `.fnug.json` if thats more your speed).
+| Command | Description |
+|---------|-------------|
+| `fnug` | Launch the TUI |
+| `fnug check` | Run selected commands headlessly (exit code reflects pass/fail) |
+| `fnug check --fail-fast` | Stop on first failure |
+| `fnug init-hooks` | Install a git pre-commit hook that runs `fnug check` |
+| `fnug init-hooks --force` | Overwrite an existing pre-commit hook |
 
-#### Minimal example:
+## Configuration
 
-Runs a single commands
+Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from the current directory upward.
+
+### Minimal example
 
 ```yaml
 fnug_version: 0.1.0
-name: fnug
+name: my-project
 commands:
   - name: hello
     cmd: echo world
 ```
 
-#### Git selection example:
+### Git auto-selection
 
-Uses git auto to select commands based on what files have uncommitted changes (reselect by pressing "g")
+Select commands based on uncommitted changes. Re-trigger with `g` in the TUI.
 
 ```yaml
 fnug_version: 0.1.0
-name: fnug
+name: my-project
 commands:
-  - name: hello
-    cmd: echo world
+  - name: lint
+    cmd: cargo clippy
     auto:
       git: true
       path:
-        - "./"
+        - "./src"
       regex:
-        - "\\.fnug\\.yaml$"
+        - "\\.rs$"
 ```
 
-#### File watching example:
+### File watching
 
-Uses file watching to monitor the file system for changes, and select commands accordingly, can be combined with git
-auto
+Monitor the file system and select commands when matching files change. Can be combined with git auto.
 
 ```yaml
 fnug_version: 0.1.0
-name: fnug
+name: my-project
 commands:
-  - name: hello
-    cmd: echo world
+  - name: test
+    cmd: cargo test
     auto:
       watch: true
       path:
-        - "./"
+        - "./src"
       regex:
-        - "\\.fnug\\.yaml$"
+        - "\\.rs$"
 ```
 
-#### Advanced example:
+### Nested groups with inheritance
 
-View this projects [`.fnug.yaml`](.fnug.yaml) file for an advanced example
+Groups inherit `cwd`, `auto`, and `env` settings from their parent.
+
+```yaml
+fnug_version: 0.1.0
+name: my-project
+children:
+  - name: backend
+    auto:
+      git: true
+      watch: true
+      path:
+        - "./src"
+      regex:
+        - "\\.rs$"
+    commands:
+      - name: fmt
+        cmd: cargo fmt
+      - name: test
+        cmd: cargo test
+      - name: clippy
+        cmd: cargo clippy
+```
+
+### Advanced example
+
+See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
+
+## Keyboard Shortcuts
+
+| Key | Context | Action |
+|-----|---------|--------|
+| `j` / `↓` | Tree | Move down |
+| `k` / `↑` | Tree | Move up |
+| `h` / `←` | Tree | Collapse group / Deselect command |
+| `l` / `→` | Tree | Expand group / Select command |
+| `Space` | Tree | Toggle expand/select |
+| `Enter` | Tree | Run all selected commands |
+| `r` | Tree | Run current command |
+| `s` | Tree | Stop current command |
+| `c` | Tree | Clear current command |
+| `g` | Tree | Git auto-select |
+| `/` | Tree | Search/filter commands |
+| `Esc` | Search | Clear search |
+| `L` | Tree | Toggle log panel |
+| `Tab` | Tree | Focus terminal |
+| `Esc` | Terminal | Back to tree |
+| `Ctrl+R` | Global | Toggle fullscreen |
+| `Ctrl+C` | Global | Quit |
+| `q` | Tree | Quit |
+
+### Mouse
+
+- **Click** a tree item to select it
+- **Double-click** a command to run it, or a group to expand/collapse
+- **Click** the selection orb (●/○) or arrow (▼/▶) to toggle
+- **Drag** the separator between tree and terminal to resize
+- **Scroll wheel** in the terminal panel to scroll output
 
 ## Demo
 
