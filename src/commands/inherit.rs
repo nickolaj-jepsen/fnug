@@ -407,6 +407,9 @@ mod tests {
 
     #[test]
     fn test_nested_invalid_auto_inheritance() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+
         let parent_auto = Auto::create(
             Some(true),
             Some(true),
@@ -428,7 +431,7 @@ mod tests {
             id: "1".to_string(),
             name: "parent".to_string(),
             auto: parent_auto,
-            cwd: PathBuf::from("/root"),
+            cwd: root.clone(),
             commands: vec![],
             children: vec![],
             ..Default::default()
@@ -436,15 +439,15 @@ mod tests {
 
         // Parent group with valid Auto should still work
         parent_group
-            .inherit(&Inheritance::from(PathBuf::from("/root")))
+            .inherit(&Inheritance::from(root.clone()))
             .unwrap();
-        assert_eq!(parent_group.cwd, PathBuf::from("/root"));
+        assert_eq!(parent_group.cwd, root);
     }
 
     #[test]
     fn test_empty_auto_path_should_inherit_parent_command_path() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 
@@ -471,7 +474,7 @@ mod tests {
     #[test]
     fn test_empty_auto_path_should_inherit_parent_command_path_unless_parent_auto_has_path() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 

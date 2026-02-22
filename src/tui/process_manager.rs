@@ -9,6 +9,36 @@ use crate::pty::{format_failure_message, format_start_message, format_success_me
 use super::app::{App, AppEvent, CommandStatus, ProcessInstance};
 
 impl App {
+    fn spawn_exit_watcher(
+        term: &Arc<Terminal>,
+        cmd_id: &str,
+        event_tx: &tokio::sync::mpsc::Sender<AppEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        let term = Arc::clone(term);
+        let tx = event_tx.clone();
+        let id = cmd_id.to_string();
+        tokio::spawn(async move {
+            match term.wait().await {
+                Ok(code) => {
+                    if code == 0 {
+                        if let Err(e) = term.echo(format_success_message()) {
+                            debug!("Failed to echo success message: {e}");
+                        }
+                    } else if let Err(e) = term.echo(format_failure_message(code)) {
+                        debug!("Failed to echo failure message: {e}");
+                    }
+                    if let Err(e) = tx.send(AppEvent::ProcessExited(id, code)).await {
+                        debug!("Failed to send process exit event: {e}");
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Process wait error: {e}");
+                    let _ = tx.send(AppEvent::ProcessError(id, msg)).await;
+                }
+            }
+        })
+    }
+
     /// Start a command process (checks dependencies first).
     ///
     /// When `set_active` is true the terminal pane switches to this command.
@@ -73,36 +103,8 @@ impl App {
                     warn!("Failed to echo start message: {e}");
                 }
 
-                // Spawn exit watcher
-                let event_tx = self.event_tx.clone();
-                let cmd_id_clone = cmd_id.to_string();
                 let term_ref = Arc::new(terminal);
-
-                let exit_handle = {
-                    let term = Arc::clone(&term_ref);
-                    let tx = event_tx;
-                    let id = cmd_id_clone;
-                    tokio::spawn(async move {
-                        match term.wait().await {
-                            Ok(code) => {
-                                if code == 0 {
-                                    if let Err(e) = term.echo(format_success_message()) {
-                                        debug!("Failed to echo success message: {e}");
-                                    }
-                                } else if let Err(e) = term.echo(format_failure_message(code)) {
-                                    debug!("Failed to echo failure message: {e}");
-                                }
-                                if let Err(e) = tx.send(AppEvent::ProcessExited(id, code)).await {
-                                    debug!("Failed to send process exit event: {e}");
-                                }
-                            }
-                            Err(e) => {
-                                let msg = format!("Process wait error: {e}");
-                                let _ = tx.send(AppEvent::ProcessError(id, msg)).await;
-                            }
-                        }
-                    })
-                };
+                let exit_handle = Self::spawn_exit_watcher(&term_ref, cmd_id, &self.event_tx);
 
                 self.processes.insert(
                     cmd_id.to_string(),
