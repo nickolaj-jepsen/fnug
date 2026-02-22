@@ -1,25 +1,7 @@
 fnug_version: 0.1.0
 name: fnug
 children:
-  - name: fnug
-    auto:
-      watch: true
-      git: true
-      path:
-        - "./src/fnug"
-      regex:
-        - "\\.py$"
-    commands:
-      - name: pyright
-        cmd: uv run pyright src
-      - name: lint
-        cmd: uv run ruff check --fix .
-      - name: format
-        cmd: uv run ruff format .
-      - name: test
-        cmd: uv run pytest tests
   - name: rust
-    cwd: "./rust"
     auto:
       watch: true
       git: true
@@ -31,37 +13,35 @@ children:
       - name: fmt
         cmd: cargo fmt
       - name: test
-        cmd: cargo test --no-default-features
+        cmd: cargo test
       - name: clippy
         cmd: cargo clippy --fix --allow-dirty --allow-staged
-      - name: stub gen
-        cmd: cargo run --bin stub_gen --features stub_gen
       - name: cwd
         cmd: pwd
   - name: debug
     commands:
       - name: htop
         cmd: htop
-        interactive: true
       - name: recursive?!
-        cmd: fnug
-        interactive: true
+        cmd: cargo run --bin fnug
       - name: A very very very long name
-        cmd: cat rust/src/pty/terminal.rs
+        cmd: cat src/pty/terminal.rs
+      - name: always-fails
+        cmd: exit 1
     children:
       - name: nested-auto
         auto:
           always: true
         commands:
           - name: test-auto
-            cmd: cat rust/src/pty/terminal.rs
+            cmd: cat src/pty/terminal.rs
           - name: test-not-auto
             auto:
               always: false
-            cmd: cat rust/src/pty/terminal.rs
+            cmd: cat src/pty/terminal.rs
       - name: not-expanded
         auto:
           always: false
         commands:
           - name: test-not-expanded
-            cmd: cat rust/src/pty/terminal.rs
+            cmd: cat src/pty/terminal.rs
