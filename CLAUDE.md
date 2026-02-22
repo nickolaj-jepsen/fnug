@@ -62,6 +62,15 @@ Fnug is a standalone Rust binary (Rust 1.93, edition 2024) with a ratatui-based 
 
 Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from cwd upward. Config defines a tree of `CommandGroup`s containing `Command`s with optional `auto` rules (git, watch, always). Commands support `depends_on` for ordering, `env` for environment variables, and `scrollback` for PTY buffer size.
 
+## Releasing
+
+Releases are automated via GitHub Actions (`.github/workflows/release.yaml`), triggered by pushing a `v*` tag.
+
+1. Update the version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if the vendored crate changed)
+2. Commit: `git commit -m "chore: bump version to X.Y.Z"`
+3. Tag: `git tag vX.Y.Z`
+4. Push: `git push && git push --tags`
+
 ## Code Style
 
 - Rust: rustfmt + clippy (pedantic), edition 2024
