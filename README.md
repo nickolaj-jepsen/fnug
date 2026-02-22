@@ -1,5 +1,8 @@
 # Fnug
 
+> [!WARNING]
+> The main branch is currently undergoing a refactor to Rust. If you're looking for the latest Python version, see the [`python`](https://github.com/nickolaj-jepsen/fnug/tree/python) branch.
+
 [![CI](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
 [![Crates.io](https://img.shields.io/crates/v/fnug)](https://crates.io/crates/fnug)
 
