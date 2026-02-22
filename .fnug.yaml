@@ -18,6 +18,21 @@ children:
         cmd: cargo clippy --fix --allow-dirty --allow-staged
       - name: cwd
         cmd: pwd
+  - name: nix
+    auto:
+      watch: true
+      git: true
+      path:
+        - "."
+      regex:
+        - "\\.nix$"
+    commands:
+      - name: fmt
+        cmd: alejandra --check .
+      - name: statix
+        cmd: statix check .
+      - name: deadnix
+        cmd: deadnix .
   - name: debug
     commands:
       - name: htop

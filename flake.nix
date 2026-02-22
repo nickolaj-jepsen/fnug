@@ -17,49 +17,58 @@
 
   outputs = inputs:
     inputs.flake-parts.lib.mkFlake {inherit inputs;} {
-      systems = ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
 
-      flake.overlays.default = final: prev: {
-        fnug = final.callPackage ({
-          lib,
-          rustPlatform,
-          pkg-config,
-          cmake,
-          openssl,
-        }: let
-          cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-        in
-          rustPlatform.buildRustPackage {
-            pname = "fnug";
-            inherit (cargoToml.package) version;
-            src = ./.;
+      flake.overlays.default = final: _prev: {
+        fnug = final.callPackage (
+          {
+            lib,
+            rustPlatform,
+            pkg-config,
+            cmake,
+            openssl,
+          }: let
+            cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+          in
+            rustPlatform.buildRustPackage {
+              pname = "fnug";
+              inherit (cargoToml.package) version;
+              src = ./.;
 
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              outputHashes = {};
-            };
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+                outputHashes = {};
+              };
 
-            doCheck = false;
+              doCheck = false;
 
-            postPatch = ''
-              cp -r vendor/vt100 $cargoDepsCopy/fnug-vt100-0.15.2
-            '';
+              postPatch = ''
+                cp -r vendor/vt100 $cargoDepsCopy/fnug-vt100-0.15.2
+              '';
 
-            nativeBuildInputs = [pkg-config cmake];
-            buildInputs = [openssl];
+              nativeBuildInputs = [
+                pkg-config
+                cmake
+              ];
+              buildInputs = [openssl];
 
-            meta = {
-              description = "A nice lint runner";
-              inherit (cargoToml.package) homepage;
-              license = lib.licenses.mit;
-              mainProgram = "fnug";
-            };
-          }) {};
+              meta = {
+                description = "A nice lint runner";
+                inherit (cargoToml.package) homepage;
+                license = lib.licenses.mit;
+                mainProgram = "fnug";
+              };
+            }
+        ) {};
       };
 
       perSystem = {
         self',
-        config,
         pkgs,
         system,
         ...
@@ -82,6 +91,9 @@
           packages = [
             self'.packages.default
             pkgs.cachix
+            pkgs.alejandra
+            pkgs.statix
+            pkgs.deadnix
           ];
 
           nativeBuildInputs = with pkgs; [
