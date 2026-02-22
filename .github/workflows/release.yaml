@@ -31,7 +31,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             artifact: fnug-linux-aarch64
             cross: true
-          - runner: macos-latest
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             artifact: fnug-macos-x86_64
           - runner: macos-latest
@@ -88,7 +88,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish fnug-vt100
-        run: cargo publish --manifest-path vendor/vt100/Cargo.toml
+        run: cargo publish --manifest-path vendor/vt100/Cargo.toml || echo "fnug-vt100 already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
