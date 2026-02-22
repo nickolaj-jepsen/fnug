@@ -8,7 +8,7 @@
 
 Fnug is a TUI command runner that automatically selects and executes lint and test commands based on git changes or file watching. Think of it as a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but purpose-built for running your dev commands side by side.
 
-![screenshot](https://github.com/nickolaj-jepsen/fnug/assets/1039554/3fd812fc-e1dc-4dd2-86eb-de91dc8e027f)
+<img width="1182" height="749" alt="image" src="https://github.com/user-attachments/assets/45e19cee-ab77-44a6-ac26-382c8adb76cf" />
 
 ## Features
 
@@ -179,5 +179,7 @@ See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
 - **Scroll wheel** in the terminal panel to scroll output
 
 ## Demo
+
+Old version (pre 0.1.0)
 
 https://github.com/nickolaj-jepsen/fnug/assets/1039554/8f8a4d34-8beb-4fb4-9bbc-6fd0a4a384be
