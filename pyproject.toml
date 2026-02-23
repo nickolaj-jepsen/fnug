@@ -1,0 +1,46 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fnug"
+description = "A TUI command runner based on git changes"
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.10"
+keywords = ["tui", "terminal", "git", "lint", "test-runner"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+dependencies = ["pyyaml>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/nickolaj-jepsen/fnug"
+Repository = "https://github.com/nickolaj-jepsen/fnug"
+
+[tool.maturin]
+bindings = "bin"
+python-source = "python"
+strip = true
+
+[tool.ruff]
+target-version = "py310"
+src = ["python"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # pydocstyle — docstring style enforcement
+    "COM812",  # trailing comma (conflicts with formatter)
+    "ISC001",  # single-line string concat (conflicts with formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"python/fnug/__init__.py" = ["F401"]  # re-exports

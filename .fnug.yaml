@@ -26,6 +26,20 @@ children:
           - rust-clippy-fix
       - name: cwd
         cmd: pwd
+  - name: python
+    auto:
+      watch: true
+      git: true
+      path:
+        - "./python"
+      regex:
+        - "\\.py$"
+    commands:
+      - name: ruff check
+        id: python-ruff-check
+        cmd: ruff check python/
+      - name: ruff format
+        cmd: ruff format --check python/
   - name: nix
     auto:
       watch: true

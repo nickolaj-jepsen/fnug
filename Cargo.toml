@@ -1,6 +1,6 @@
 [package]
 name = "fnug"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 description = "A TUI command runner based on git changes"
 license = "GPL-3.0-only"
@@ -9,7 +9,7 @@ homepage = "https://github.com/nickolaj-jepsen/fnug"
 readme = "README.md"
 keywords = ["tui", "terminal", "git", "lint", "test-runner"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["vendor/", ".agents/", ".claude/", ".envrc", ".fnug.yaml", "flake.*", "skills-lock.json"]
+exclude = ["vendor/", ".agents/", ".claude/", ".envrc", ".fnug.yaml", "flake.*", "skills-lock.json", "python/", "pyproject.toml"]
 
 [dependencies]
 git2 = { version = "0.20.4", default-features = false }

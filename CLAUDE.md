@@ -71,8 +71,21 @@ Releases are automated via GitHub Actions (`.github/workflows/release.yaml`), tr
 3. Tag: `git tag vX.Y.Z`
 4. Push: `git push && git push --tags`
 
+## Python Package
+
+Fnug is also published to PyPI via maturin (`bindings = "bin"`). The Python wrapper lives in `python/fnug/`.
+
+```bash
+uv venv && source .venv/bin/activate.fish
+uv pip install maturin pyyaml
+maturin develop --release                              # Build & install locally
+python -c "import fnug; fnug.run('--help')"            # Verify wrapper
+python -c "from fnug.config import Config, Command; print(Config(name='test', commands=[Command(name='t', cmd='echo hi')]).to_yaml())"
+```
+
 ## Code Style
 
 - Rust: rustfmt + clippy (pedantic), edition 2024
+- Python: ruff (select = ALL, see pyproject.toml for ignores)
 - Vendored dependency: `vendor/vt100` (modified vt100 crate, published as `fnug-vt100`)
 - Key crates: ratatui, crossterm, tokio, clap, git2, portable-pty, notify, log, parking_lot

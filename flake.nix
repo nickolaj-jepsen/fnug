@@ -94,6 +94,10 @@
             pkgs.alejandra
             pkgs.statix
             pkgs.deadnix
+            pkgs.uv
+            pkgs.maturin
+            pkgs.ruff
+            (pkgs.python3.withPackages (ps: [ps.pyyaml]))
           ];
 
           nativeBuildInputs = with pkgs; [

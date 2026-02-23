@@ -4,3 +4,11 @@ result
 .idea/
 .env
 vendor/vt100/target/
+
+# Python
+__pycache__/
+*.egg-info/
+dist/
+.venv/
+*.whl
+uv.lock
