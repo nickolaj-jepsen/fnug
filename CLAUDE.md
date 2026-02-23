@@ -82,6 +82,15 @@ python -c "import fnug; fnug.run('--help')"            # Verify wrapper
 python -c "from fnug.config import Config, Command; print(Config(name='test', commands=[Command(name='t', cmd='echo hi')]).to_yaml())"
 ```
 
+## Commit Messages
+
+- Use conventional commits (e.g. `feat:`, `fix:`, `chore:`)
+- Be as concise as possible
+- Max line width of 72 characters
+- Avoid writing a body unless necessary
+- For breaking changes, include `BREAKING CHANGE:` in the body with a description
+- Split up large changes into multiple commits if possible (e.g. separate refactors from feature additions)
+
 ## Code Style
 
 - Rust: rustfmt + clippy (pedantic), edition 2024
