@@ -10,6 +10,9 @@ children:
       regex:
         - "\\.rs$"
     commands:
+      - name: lockfile
+        id: rust-lockfile
+        cmd: cargo check --locked
       - name: fmt
         id: rust-fmt
         cmd: cargo fmt

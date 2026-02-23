@@ -1,6 +1,6 @@
 [package]
 name = "fnug"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2024"
 description = "A TUI command runner based on git changes"
 license = "GPL-3.0-only"
