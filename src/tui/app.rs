@@ -213,6 +213,25 @@ pub struct App {
     pub(super) pending_deps: HashMap<String, Vec<String>>,
 }
 
+/// Recursively collect IDs of groups that contain no selected commands.
+/// Skips the root group (called on children directly).
+fn collect_inactive_groups(
+    group: &CommandGroup,
+    selected: &HashMap<String, bool>,
+    out: &mut Vec<String>,
+) {
+    for child in &group.children {
+        let has_selected = child
+            .all_commands()
+            .iter()
+            .any(|cmd| *selected.get(&cmd.id).unwrap_or(&false));
+        if !has_selected {
+            out.push(child.id.clone());
+        }
+        collect_inactive_groups(child, selected, out);
+    }
+}
+
 impl App {
     #[must_use]
     pub fn new(
@@ -265,6 +284,7 @@ impl App {
             let is_failed = result.failed_ids.contains(id);
             self.selected.insert(id.clone(), is_failed);
         }
+        self.collapse_inactive_groups();
         self.rebuild_visible_nodes();
 
         // Move cursor to the first failed command in the visible tree
@@ -296,7 +316,17 @@ impl App {
                 error!("Git selection failed: {e}");
             }
         }
+        self.collapse_inactive_groups();
         self.rebuild_visible_nodes();
+    }
+
+    /// Collapse groups that contain no selected commands, skipping the root.
+    fn collapse_inactive_groups(&mut self) {
+        let mut to_collapse = Vec::new();
+        collect_inactive_groups(&self.config, &self.selected, &mut to_collapse);
+        for id in to_collapse {
+            self.expanded.insert(id, false);
+        }
     }
 
     /// Mark the tree as needing a rebuild (lazy, happens at next render)
