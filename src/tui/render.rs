@@ -65,25 +65,21 @@ impl App {
         let separator_area = chunks[1];
         let terminal_area = chunks[2];
 
-        // Split tree area: [search_bar?, tree_widget, status_bar]
+        // Split tree area: [search_bar?, tree_widget]
         let has_search = self.search.has_query();
         let tree_sub = Layout::default()
             .direction(Direction::Vertical)
             .constraints(if has_search {
-                vec![
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                ]
+                vec![Constraint::Length(1), Constraint::Min(1)]
             } else {
-                vec![Constraint::Min(1), Constraint::Length(1)]
+                vec![Constraint::Min(1)]
             })
             .split(tree_area);
 
-        let (search_area, actual_tree_area, status_area) = if has_search {
-            (Some(tree_sub[0]), tree_sub[1], tree_sub[2])
+        let (search_area, actual_tree_area) = if has_search {
+            (Some(tree_sub[0]), tree_sub[1])
         } else {
-            (None, tree_sub[0], tree_sub[1])
+            (None, tree_sub[0])
         };
 
         // Render search bar
@@ -103,9 +99,6 @@ impl App {
             };
             frame.render_widget(Paragraph::new(search_line), search_area);
         }
-
-        // Render status bar below tree
-        self.render_status_summary(frame, status_area);
 
         // Render tree (ensure cursor is visible within the panel height)
         self.ensure_cursor_visible(actual_tree_area.height as usize);
@@ -132,51 +125,6 @@ impl App {
         }
 
         (tree_area, terminal_area)
-    }
-
-    fn render_status_summary(&self, frame: &mut Frame, area: Rect) {
-        let mut success = 0u16;
-        let mut running = 0u16;
-        let mut failure = 0u16;
-        for proc in self.processes.values() {
-            match &proc.status {
-                CommandStatus::Success => success += 1,
-                CommandStatus::Running | CommandStatus::WaitingForDeps => running += 1,
-                CommandStatus::Failure(_) | CommandStatus::Error(_) => failure += 1,
-                CommandStatus::Pending => {}
-            }
-        }
-        let selected: usize = self.selected.values().filter(|&&v| v).count();
-
-        let bg = Style::default().bg(theme::STATUS_BAR_BG);
-        let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", bg)];
-
-        if success > 0 {
-            spans.push(Span::styled(format!("✔ {success}"), bg.fg(theme::SUCCESS)));
-            spans.push(Span::styled("  ", bg));
-        }
-        if running > 0 {
-            spans.push(Span::styled(format!("⧗ {running}"), bg.fg(theme::RUNNING)));
-            spans.push(Span::styled("  ", bg));
-        }
-        if failure > 0 {
-            spans.push(Span::styled(format!("✘ {failure}"), bg.fg(theme::FAILURE)));
-            spans.push(Span::styled("  ", bg));
-        }
-        if selected > 0 {
-            spans.push(Span::styled(
-                format!("● {selected} selected"),
-                bg.fg(theme::ACCENT),
-            ));
-        }
-
-        // Fill remaining width
-        let used: usize = spans.iter().map(|s| s.content.len()).sum();
-        if used < area.width as usize {
-            spans.push(Span::styled(" ".repeat(area.width as usize - used), bg));
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_terminal(&self, frame: &mut Frame, area: Rect) {

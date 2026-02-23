@@ -7,8 +7,6 @@ pub const FAILURE: Color = Color::Red;
 pub const DIM: Color = Color::DarkGray;
 pub const TREE: Color = Color::Gray;
 
-pub const STATUS_BAR_BG: Color = Color::Rgb(30, 30, 30);
-
 pub const TOOLBAR_BG: Color = Color::Rgb(207, 106, 76);
 pub const TOOLBAR_KEY_BG: Color = Color::Rgb(40, 40, 40);
 pub const TOOLBAR_KEY_FG: Color = Color::Rgb(207, 106, 76);
