@@ -113,13 +113,15 @@ impl Auto {
 
 impl Inheritable for Auto {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        // Only inherit auto settings if the parent has either watch or git enabled
-        let mut auto =
-            if inheritance.auto.watch.unwrap_or(false) || inheritance.auto.git.unwrap_or(false) {
-                self.merge(&inheritance.auto)
-            } else {
-                self.clone()
-            };
+        // Only inherit auto settings if the parent has watch, git, or always enabled
+        let mut auto = if inheritance.auto.watch.unwrap_or(false)
+            || inheritance.auto.git.unwrap_or(false)
+            || inheritance.auto.always.unwrap_or(false)
+        {
+            self.merge(&inheritance.auto)
+        } else {
+            self.clone()
+        };
 
         // If the path is empty, inherit the cwd from the parent
         if auto.path.is_empty() {
@@ -543,5 +545,38 @@ mod tests {
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
         assert_eq!(group.commands[0].auto.path, vec![root]);
+    }
+
+    #[test]
+    fn test_always_inherits_without_watch_or_git() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+
+        let mut group = CommandGroup {
+            id: "1".to_string(),
+            name: "parent".to_string(),
+            auto: Auto {
+                always: Some(true),
+                ..Default::default()
+            },
+            cwd: root.clone(),
+            commands: vec![Command {
+                id: "2".to_string(),
+                name: "child".to_string(),
+                cmd: "echo test".to_string(),
+                cwd: PathBuf::new(),
+                auto: Auto::default(),
+                ..Default::default()
+            }],
+            children: vec![],
+            ..Default::default()
+        };
+
+        group.inherit(&Inheritance::from(root)).unwrap();
+        assert_eq!(
+            group.commands[0].auto.always,
+            Some(true),
+            "always: true should be inherited from parent group even without watch/git"
+        );
     }
 }
