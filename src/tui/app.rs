@@ -15,7 +15,7 @@ use crate::selectors::get_selected_commands;
 
 use super::log_state::LogBuffer;
 use super::toolbar;
-use super::tree_state::{TreeContext, find_command_in_group, flatten_group};
+use super::tree_state::{TreeContext, find_command_in_group, find_group_in_group, flatten_group};
 use super::tree_widget::{NodeKind, VisibleNode};
 
 /// Execution status of a command
@@ -524,9 +524,21 @@ impl App {
     pub(super) fn toggle_current_node(&mut self) {
         if let Some(node) = self.visible_nodes.get(self.cursor) {
             match &node.kind {
-                NodeKind::Group { expanded, .. } => {
-                    self.expanded.insert(node.id.clone(), !expanded);
-                    self.mark_tree_dirty();
+                NodeKind::Group { .. } => {
+                    if let Some(group) = find_group_in_group(&self.config, &node.id) {
+                        let cmd_ids: Vec<String> =
+                            group.all_commands().iter().map(|c| c.id.clone()).collect();
+                        let all_selected = cmd_ids
+                            .iter()
+                            .all(|id| *self.selected.get(id).unwrap_or(&false));
+                        let new_state = !all_selected;
+                        for id in cmd_ids {
+                            self.selected.insert(id, new_state);
+                        }
+                        // Keep expand/collapse in sync: expand when selecting, collapse when deselecting
+                        self.expanded.insert(node.id.clone(), new_state);
+                        self.mark_tree_dirty();
+                    }
                 }
                 NodeKind::Command { selected, .. } => {
                     self.selected.insert(node.id.clone(), !selected);
@@ -541,6 +553,13 @@ impl App {
         self.visible_nodes
             .get(self.cursor)
             .and_then(|node| matches!(node.kind, NodeKind::Command { .. }).then(|| node.id.clone()))
+    }
+
+    /// Return the group id at the current cursor position, if it's a group node.
+    pub(super) fn current_group_id(&self) -> Option<String> {
+        self.visible_nodes
+            .get(self.cursor)
+            .and_then(|node| matches!(node.kind, NodeKind::Group { .. }).then(|| node.id.clone()))
     }
 
     pub(super) fn update_active_terminal(&mut self) {
@@ -565,6 +584,8 @@ impl App {
             ToolbarAction::Run => {
                 if let Some(id) = self.current_command_id() {
                     self.start_command(&id, terminal_area, true);
+                } else if let Some(id) = self.current_group_id() {
+                    self.run_group(&id, terminal_area);
                 }
             }
             ToolbarAction::Stop => {

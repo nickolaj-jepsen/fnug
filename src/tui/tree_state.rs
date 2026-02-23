@@ -206,6 +206,19 @@ pub(super) fn count_commands(group: &CommandGroup) -> u16 {
     own + children
 }
 
+pub(super) fn find_group_in_group<'a>(
+    group: &'a CommandGroup,
+    id: &str,
+) -> Option<&'a CommandGroup> {
+    if group.id == id {
+        return Some(group);
+    }
+    group
+        .children
+        .iter()
+        .find_map(|c| find_group_in_group(c, id))
+}
+
 pub(super) fn find_command_in_group(group: &CommandGroup, id: &str) -> Option<Command> {
     group
         .commands

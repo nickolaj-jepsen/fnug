@@ -7,6 +7,7 @@ use crate::pty::terminal::{Terminal, TerminalSize};
 use crate::pty::{format_failure_message, format_start_message, format_success_message};
 
 use super::app::{App, AppEvent, CommandStatus, ProcessInstance};
+use super::tree_state::find_group_in_group;
 
 impl App {
     fn spawn_exit_watcher(
@@ -178,6 +179,20 @@ impl App {
             self.update_active_terminal();
         } else if let Some(first) = selected_ids.first() {
             self.active_terminal_id = Some(first.clone());
+        }
+    }
+
+    /// Start all commands in a group (and nested subgroups).
+    pub fn run_group(&mut self, group_id: &str, terminal_area: Rect) {
+        let Some(group) = find_group_in_group(&self.config, group_id) else {
+            return;
+        };
+        let cmd_ids: Vec<String> = group.all_commands().iter().map(|c| c.id.clone()).collect();
+        info!("Running {} commands in group '{group_id}'", cmd_ids.len());
+        let mut first = true;
+        for id in &cmd_ids {
+            self.start_command(id, terminal_area, first);
+            first = false;
         }
     }
 

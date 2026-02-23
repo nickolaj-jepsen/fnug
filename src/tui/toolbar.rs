@@ -118,13 +118,20 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
                     }
                     shortcuts.push(Shortcut::new("C", "Clear", ToolbarAction::Clear));
                 }
-                Some(NodeKind::Group { expanded, .. }) => {
-                    let toggle_label = if *expanded { "Collapse" } else { "Expand" };
+                Some(NodeKind::Group {
+                    selected, total, ..
+                }) => {
+                    let toggle_label = if *selected == *total {
+                        "Deselect all"
+                    } else {
+                        "Select all"
+                    };
                     shortcuts.push(Shortcut::new(
                         "SPACE",
                         toggle_label,
                         ToolbarAction::ToggleSpace,
                     ));
+                    shortcuts.push(Shortcut::new("R", "Run all", ToolbarAction::Run));
                 }
                 None => {}
             }
