@@ -1,7 +1,6 @@
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use std::collections::HashMap;
-use std::time::Instant;
 
 use super::app::{CommandStatus, ProcessInstance};
 use super::tree_widget::{NodeKind, VisibleNode};
@@ -123,11 +122,9 @@ pub(super) fn flatten_group(
             let (status, duration) = if let Some(msg) = ctx.error_messages.get(&cmd.id) {
                 (CommandStatus::Error(msg.clone()), None)
             } else if let Some(proc) = ctx.processes.get(&cmd.id) {
-                let dur = Some(
-                    proc.finished_at
-                        .unwrap_or_else(Instant::now)
-                        .duration_since(proc.started_at),
-                );
+                let dur = proc
+                    .finished_at
+                    .map(|end| end.duration_since(proc.started_at));
                 (proc.status.clone(), dur)
             } else {
                 (CommandStatus::Pending, None)
