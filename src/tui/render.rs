@@ -47,6 +47,9 @@ impl App {
             // Fullscreen terminal mode
             let terminal_area = main_area;
             self.render_terminal(frame, terminal_area);
+            if let Some(ref menu) = self.context_menu {
+                frame.render_widget(menu, frame.area());
+            }
             return (Rect::default(), terminal_area);
         }
 
@@ -122,6 +125,11 @@ impl App {
             self.render_log_panel(frame, terminal_area);
         } else {
             self.render_terminal(frame, terminal_area);
+        }
+
+        // Render context menu overlay last (on top of everything)
+        if let Some(ref menu) = self.context_menu {
+            frame.render_widget(menu, frame.area());
         }
 
         (tree_area, terminal_area)

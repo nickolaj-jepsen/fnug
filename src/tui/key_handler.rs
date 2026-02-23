@@ -24,6 +24,25 @@ impl App {
             return;
         }
 
+        // Context menu navigation
+        if self.context_menu.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(ref mut menu) = self.context_menu {
+                        menu.cursor_up();
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(ref mut menu) = self.context_menu {
+                        menu.cursor_down();
+                    }
+                }
+                KeyCode::Enter => self.execute_context_menu_action(terminal_area),
+                _ => self.close_context_menu(),
+            }
+            return;
+        }
+
         // If terminal is focused and the active process is interactive, forward to PTY
         if matches!(self.focus, Focus::Terminal) {
             if key.code == KeyCode::Esc {

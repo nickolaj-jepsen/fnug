@@ -13,6 +13,7 @@ use crate::commands::group::CommandGroup;
 use crate::pty::terminal::Terminal;
 use crate::selectors::get_selected_commands;
 
+use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
 use super::toolbar;
 use super::tree_state::{TreeContext, find_command_in_group, find_group_in_group, flatten_group};
@@ -211,6 +212,8 @@ pub struct App {
     pub search: SearchState,
     /// Commands waiting for dependencies: `cmd_id` -> remaining dep IDs
     pub(super) pending_deps: HashMap<String, Vec<String>>,
+    /// Active context menu (right-click)
+    pub context_menu: Option<ContextMenu>,
 }
 
 /// Recursively collect IDs of groups that contain no selected commands.
@@ -270,6 +273,7 @@ impl App {
             log_scroll: 0,
             search: SearchState::Inactive,
             pending_deps: HashMap::new(),
+            context_menu: None,
         };
         app.rebuild_visible_nodes();
         app
@@ -578,6 +582,130 @@ impl App {
     pub(super) fn update_active_terminal(&mut self) {
         if let Some(id) = self.current_command_id() {
             self.active_terminal_id = Some(id);
+        }
+    }
+
+    /// Close the context menu
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
+    /// Execute the currently selected context menu action
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dispatches all context menu action/target combinations"
+    )]
+    pub fn execute_context_menu_action(&mut self, terminal_area: Rect) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        let Some(action) = menu
+            .items
+            .get(menu.cursor)
+            .filter(|i| i.enabled)
+            .map(|i| i.action)
+        else {
+            return;
+        };
+
+        match (&menu.target, action) {
+            (ContextMenuTarget::Group { id, .. }, ContextMenuAction::Expand) => {
+                self.expanded.insert(id.clone(), true);
+                self.mark_tree_dirty();
+            }
+            (ContextMenuTarget::Group { id, .. }, ContextMenuAction::Collapse) => {
+                self.expanded.insert(id.clone(), false);
+                self.mark_tree_dirty();
+            }
+            (ContextMenuTarget::Group { id, .. }, ContextMenuAction::SelectAll) => {
+                if let Some(group) = find_group_in_group(&self.config, id) {
+                    for cmd in group.all_commands() {
+                        self.selected.insert(cmd.id.clone(), true);
+                    }
+                    self.mark_tree_dirty();
+                }
+            }
+            (ContextMenuTarget::Group { id, .. }, ContextMenuAction::DeselectAll) => {
+                if let Some(group) = find_group_in_group(&self.config, id) {
+                    for cmd in group.all_commands() {
+                        self.selected.insert(cmd.id.clone(), false);
+                    }
+                    self.mark_tree_dirty();
+                }
+            }
+            (ContextMenuTarget::Group { id, .. }, ContextMenuAction::Run) => {
+                self.run_group(id, terminal_area);
+            }
+            (ContextMenuTarget::Group { id, .. }, ContextMenuAction::RunSelected) => {
+                if let Some(group) = find_group_in_group(&self.config, id) {
+                    let selected_ids: Vec<String> = group
+                        .all_commands()
+                        .iter()
+                        .filter(|c| *self.selected.get(&c.id).unwrap_or(&false))
+                        .map(|c| c.id.clone())
+                        .collect();
+                    for cmd_id in &selected_ids {
+                        self.start_command(cmd_id, terminal_area, false);
+                    }
+                    if let Some(first) = selected_ids.first() {
+                        self.active_terminal_id = Some(first.clone());
+                    }
+                }
+            }
+            (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Select) => {
+                self.selected.insert(id.clone(), true);
+                self.mark_tree_dirty();
+            }
+            (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Deselect) => {
+                self.selected.insert(id.clone(), false);
+                self.mark_tree_dirty();
+            }
+            (
+                ContextMenuTarget::Command { id, .. },
+                ContextMenuAction::Run | ContextMenuAction::Restart,
+            ) => {
+                self.start_command(id, terminal_area, true);
+            }
+            (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Stop) => {
+                self.stop_command(id);
+            }
+            (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Clear) => {
+                self.clear_command(id);
+            }
+            (ContextMenuTarget::Terminal, ContextMenuAction::ScrollToTop) => {
+                if let Some(ref active_id) = self.active_terminal_id
+                    && let Some(proc) = self.processes.get(active_id)
+                {
+                    let scrollback_len = proc.terminal.parser().lock().screen().scrollback_len();
+                    if let Err(e) = proc.terminal.set_scroll(scrollback_len) {
+                        debug!("Failed to scroll to top: {e}");
+                    }
+                }
+            }
+            (ContextMenuTarget::Terminal, ContextMenuAction::ScrollToBottom) => {
+                if let Some(ref active_id) = self.active_terminal_id
+                    && let Some(proc) = self.processes.get(active_id)
+                    && let Err(e) = proc.terminal.set_scroll(0)
+                {
+                    debug!("Failed to scroll to bottom: {e}");
+                }
+            }
+            (ContextMenuTarget::Terminal, ContextMenuAction::Run | ContextMenuAction::Restart) => {
+                if let Some(id) = self.active_terminal_id.clone() {
+                    self.start_command(&id, terminal_area, true);
+                }
+            }
+            (ContextMenuTarget::Terminal, ContextMenuAction::Stop) => {
+                if let Some(id) = self.active_terminal_id.clone() {
+                    self.stop_command(&id);
+                }
+            }
+            (ContextMenuTarget::Terminal, ContextMenuAction::Clear) => {
+                if let Some(id) = self.active_terminal_id.clone() {
+                    self.clear_command(&id);
+                }
+            }
+            _ => {}
         }
     }
 

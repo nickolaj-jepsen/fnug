@@ -4,6 +4,10 @@ use ratatui::layout::Rect;
 use std::time::Instant;
 
 use super::app::{App, Focus, ProcessInstance};
+use super::context_menu::{
+    ContextMenu, ContextMenuTarget, build_command_menu, build_group_menu, build_terminal_menu,
+    compute_area,
+};
 use super::tree_widget::{NodeKind, VisibleNode};
 
 impl App {
@@ -46,6 +50,51 @@ impl App {
         reason = "mouse handler covers all mouse interactions in one function"
     )]
     pub fn handle_mouse(&mut self, mouse: MouseEvent, tree_area: Rect, terminal_area: Rect) {
+        // Handle context menu interactions when open
+        if let Some(ref menu) = self.context_menu {
+            let menu_area = menu.area;
+            let inside = mouse.column >= menu_area.x
+                && mouse.column < menu_area.right()
+                && mouse.row >= menu_area.y
+                && mouse.row < menu_area.bottom();
+
+            match mouse.kind {
+                MouseEventKind::Down(event::MouseButton::Left) => {
+                    if inside {
+                        let row = (mouse.row - menu_area.y).saturating_sub(1) as usize; // -1 for border
+                        if let Some(menu) = self.context_menu.as_mut()
+                            && row < menu.items.len()
+                        {
+                            menu.cursor = row;
+                        }
+                        self.execute_context_menu_action(terminal_area);
+                    } else {
+                        self.close_context_menu();
+                    }
+                    return;
+                }
+                MouseEventKind::Moved => {
+                    if inside {
+                        let row = (mouse.row - menu_area.y).saturating_sub(1) as usize;
+                        if let Some(menu) = self.context_menu.as_mut()
+                            && row < menu.items.len()
+                            && menu.items[row].enabled
+                        {
+                            menu.cursor = row;
+                        }
+                    }
+                    return;
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    self.close_context_menu();
+                    return;
+                }
+                _ => {
+                    return;
+                }
+            }
+        }
+
         // Handle toolbar interactions
         if mouse.row >= self.toolbar.y {
             match mouse.kind {
@@ -228,6 +277,84 @@ impl App {
                         }
                         Err(e) => debug!("Failed to send scroll to terminal: {e}"),
                     }
+                }
+            }
+            MouseEventKind::Down(event::MouseButton::Right) => {
+                self.close_context_menu();
+
+                if mouse.column < tree_area.width {
+                    // Right-click in tree area
+                    let row = mouse.row.saturating_sub(tree_area.y) as usize + self.tree_scroll;
+                    if row < self.visible_nodes.len() {
+                        self.cursor = row;
+                        self.update_active_terminal();
+                        let node = self.visible_nodes[row].clone();
+                        let (items, target) = match &node.kind {
+                            NodeKind::Group {
+                                expanded,
+                                selected,
+                                total,
+                                ..
+                            } => (
+                                build_group_menu(*expanded, *selected, *total),
+                                ContextMenuTarget::Group {
+                                    id: node.id.clone(),
+                                    expanded: *expanded,
+                                    selected: *selected,
+                                    total: *total,
+                                },
+                            ),
+                            NodeKind::Command {
+                                selected, status, ..
+                            } => (
+                                build_command_menu(*selected, status),
+                                ContextMenuTarget::Command {
+                                    id: node.id.clone(),
+                                    selected: *selected,
+                                    status: status.clone(),
+                                },
+                            ),
+                        };
+                        let screen = Rect::new(
+                            0,
+                            0,
+                            tree_area.right() + terminal_area.width + 1,
+                            tree_area.height + 1,
+                        );
+                        let area = compute_area(&items, mouse.column, mouse.row, screen);
+                        self.context_menu = Some(ContextMenu {
+                            target,
+                            items,
+                            cursor: 0,
+                            area,
+                        });
+                    }
+                } else if mouse.column > tree_area.width && self.active_terminal_id.is_some() {
+                    // Right-click in terminal area
+                    let proc_ref = self
+                        .active_terminal_id
+                        .as_ref()
+                        .and_then(|id| self.processes.get(id));
+                    let (has_scrollback, is_scrolled) = proc_ref.map_or((false, false), |proc| {
+                        let parser = proc.terminal.parser().lock();
+                        let screen = parser.screen();
+                        (screen.scrollback_len() > 0, screen.scrollback() > 0)
+                    });
+                    let status = proc_ref.map(|p| &p.status);
+                    let items = build_terminal_menu(has_scrollback, is_scrolled, status);
+                    let screen = Rect::new(
+                        0,
+                        0,
+                        tree_area.right() + terminal_area.width + 1,
+                        tree_area.height + 1,
+                    );
+                    let area = compute_area(&items, mouse.column, mouse.row, screen);
+                    self.context_menu = Some(ContextMenu {
+                        target: ContextMenuTarget::Terminal,
+                        items,
+                        cursor: 0,
+                        area,
+                    });
                 }
             }
             _ => {}

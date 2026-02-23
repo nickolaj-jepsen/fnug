@@ -1,4 +1,5 @@
 pub mod app;
+pub(crate) mod context_menu;
 pub(crate) mod event;
 mod key_handler;
 pub mod log_state;

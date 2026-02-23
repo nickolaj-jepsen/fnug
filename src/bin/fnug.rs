@@ -285,8 +285,9 @@ async fn run_app(
                         if matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
                             let old_hover = app.mouse.hover_row;
                             let old_toolbar_hover = app.toolbar.hover;
+                            let had_context_menu = app.context_menu.is_some();
                             app.handle_mouse(mouse, tree_area, terminal_area);
-                            if app.mouse.hover_row != old_hover || app.toolbar.hover != old_toolbar_hover {
+                            if app.mouse.hover_row != old_hover || app.toolbar.hover != old_toolbar_hover || had_context_menu {
                                 needs_render = true;
                             }
                         } else {
