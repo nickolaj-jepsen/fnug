@@ -26,6 +26,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -- -D warnings
 
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check
+          src: python/
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: format --check
+          src: python/
+
   test:
     strategy:
       matrix:
