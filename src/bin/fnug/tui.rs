@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -24,7 +24,71 @@ use fnug::tui::log_state::LogBuffer;
 /// # Errors
 ///
 /// Returns an error if terminal setup or the event loop fails.
-#[allow(clippy::too_many_lines)]
+/// Start a config file watcher that sends `ConfigChanged` events with manual 1s debounce.
+fn start_config_watcher(
+    config_path: &Path,
+    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
+) -> Option<Box<dyn notify::Watcher>> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+    use std::time::Instant;
+
+    let last_reload = Arc::new(parking_lot::Mutex::new(Instant::now()));
+
+    match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        if let Ok(event) = res
+            && matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
+        {
+            let mut last = last_reload.lock();
+            if last.elapsed().as_secs() >= 1 {
+                *last = Instant::now();
+                let _ = event_tx.blocking_send(AppEvent::ConfigChanged);
+            }
+        }
+    }) {
+        Ok(mut watcher) => {
+            if let Err(e) = watcher.watch(config_path, RecursiveMode::NonRecursive) {
+                warn!("Config file watcher not started: {e}");
+                None
+            } else {
+                info!("Config file watcher started for {}", config_path.display());
+                Some(Box::new(watcher))
+            }
+        }
+        Err(e) => {
+            warn!("Config file watcher not started: {e}");
+            None
+        }
+    }
+}
+
+/// Start a file watcher that forwards watch events to the app event channel.
+fn start_file_watcher(
+    config: &CommandGroup,
+    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let all_commands: Vec<_> = config.all_commands().into_iter().cloned().collect();
+    match watch_commands(all_commands) {
+        Ok((mut watcher_rx, _watcher)) => {
+            info!("File watcher started");
+            Some(tokio::spawn(async move {
+                while let Some(commands) = watcher_rx.recv().await {
+                    if event_tx
+                        .send(AppEvent::WatcherTriggered(commands))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }))
+        }
+        Err(e) => {
+            warn!("File watcher not started: {e}");
+            None
+        }
+    }
+}
+
 pub async fn run(
     config: CommandGroup,
     cwd: PathBuf,
@@ -55,7 +119,6 @@ pub async fn run(
     // Create app
     let mut app = App::new(config.clone(), cwd, config_path.clone(), log_buffer);
     if let Some(ref result) = check_result {
-        // Carry over check state: select failed commands and auto-start them
         let initial_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.apply_check_result(result, initial_area);
     } else {
@@ -65,67 +128,8 @@ pub async fn run(
     // Connect the logger to the app's event channel for redraw notifications
     fnug::logger::connect_event_sender(app.event_tx.clone());
 
-    // Start config file watcher for hot-reload
-    let config_watcher_handle = {
-        use notify::{EventKind, RecursiveMode, Watcher};
-        use std::time::Instant;
-
-        let event_tx = app.event_tx.clone();
-        let watched_path = config_path;
-        let last_reload = Arc::new(parking_lot::Mutex::new(Instant::now()));
-
-        match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res
-                && matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
-            {
-                // Manual debounce: skip events within 1s of last reload
-                let mut last = last_reload.lock();
-                if last.elapsed().as_secs() >= 1 {
-                    *last = Instant::now();
-                    let _ = event_tx.blocking_send(AppEvent::ConfigChanged);
-                }
-            }
-        }) {
-            Ok(mut watcher) => {
-                if let Err(e) = watcher.watch(&watched_path, RecursiveMode::NonRecursive) {
-                    warn!("Config file watcher not started: {e}");
-                    None
-                } else {
-                    info!("Config file watcher started for {}", watched_path.display());
-                    // Keep watcher alive by boxing it
-                    Some(Box::new(watcher))
-                }
-            }
-            Err(e) => {
-                warn!("Config file watcher not started: {e}");
-                None
-            }
-        }
-    };
-
-    // Start file watcher
-    let all_commands: Vec<_> = config.all_commands().into_iter().cloned().collect();
-    let event_tx = app.event_tx.clone();
-    let watcher_handle = match watch_commands(all_commands) {
-        Ok((mut watcher_rx, _watcher)) => {
-            info!("File watcher started");
-            Some(tokio::spawn(async move {
-                while let Some(commands) = watcher_rx.recv().await {
-                    if event_tx
-                        .send(AppEvent::WatcherTriggered(commands))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }))
-        }
-        Err(e) => {
-            warn!("File watcher not started: {e}");
-            None
-        }
-    };
+    let config_watcher_handle = start_config_watcher(&config_path, app.event_tx.clone());
+    let file_watcher_handle = start_file_watcher(&config, app.event_tx.clone());
 
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app).await;
@@ -133,7 +137,7 @@ pub async fn run(
     // Shutdown: kill processes, abort tasks
     app.shutdown();
     drop(config_watcher_handle);
-    if let Some(handle) = watcher_handle {
+    if let Some(handle) = file_watcher_handle {
         handle.abort();
     }
 
