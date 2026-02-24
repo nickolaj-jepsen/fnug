@@ -218,17 +218,20 @@ pub struct App {
 fn collect_inactive_groups(
     group: &CommandGroup,
     selected: &HashMap<String, bool>,
-    out: &mut Vec<String>,
+    to_collapse: &mut Vec<String>,
+    to_expand: &mut Vec<String>,
 ) {
     for child in &group.children {
         let has_selected = child
             .all_commands()
             .iter()
             .any(|cmd| *selected.get(&cmd.id).unwrap_or(&false));
-        if !has_selected {
-            out.push(child.id.clone());
+        if has_selected {
+            to_expand.push(child.id.clone());
+        } else {
+            to_collapse.push(child.id.clone());
         }
-        collect_inactive_groups(child, selected, out);
+        collect_inactive_groups(child, selected, to_collapse, to_expand);
     }
 }
 
@@ -320,12 +323,22 @@ impl App {
         self.rebuild_visible_nodes();
     }
 
-    /// Collapse groups that contain no selected commands, skipping the root.
+    /// Collapse groups that contain no selected commands and expand groups
+    /// that do, skipping the root.
     fn collapse_inactive_groups(&mut self) {
         let mut to_collapse = Vec::new();
-        collect_inactive_groups(&self.config, &self.selected, &mut to_collapse);
+        let mut to_expand = Vec::new();
+        collect_inactive_groups(
+            &self.config,
+            &self.selected,
+            &mut to_collapse,
+            &mut to_expand,
+        );
         for id in to_collapse {
             self.expanded.insert(id, false);
+        }
+        for id in to_expand {
+            self.expanded.insert(id, true);
         }
     }
 
