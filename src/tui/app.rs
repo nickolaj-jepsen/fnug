@@ -563,9 +563,7 @@ impl App {
     }
 
     pub(super) fn update_active_terminal(&mut self) {
-        if let Some(id) = self.current_command_id()
-            && (self.processes.contains_key(&id) || self.pending_deps.contains_key(&id))
-        {
+        if let Some(id) = self.current_command_id() {
             self.active_terminal_id = Some(id);
         }
     }
