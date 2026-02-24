@@ -4,7 +4,7 @@
 //! and git changes. It allows users to define commands and command groups in a configuration
 //! file, with flexible automation rules for when commands should be executed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use log::{debug, warn};
@@ -82,14 +82,34 @@ fn validate_tree(root: &CommandGroup) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn check_duplicates(group: &CommandGroup, seen: &mut HashSet<String>) -> Result<(), ConfigError> {
-    if !seen.insert(group.id.clone()) {
-        return Err(ConfigError::DuplicateId(group.id.clone()));
-    }
+/// Walk a command tree, calling `visit_group` on each group and `visit_cmd` on each command.
+/// Short-circuits on the first error.
+fn walk_tree(
+    group: &CommandGroup,
+    visit_group: &mut impl FnMut(&CommandGroup) -> Result<(), ConfigError>,
+    visit_cmd: &mut impl FnMut(&Command) -> Result<(), ConfigError>,
+) -> Result<(), ConfigError> {
+    visit_group(group)?;
     for cmd in &group.commands {
-        if !seen.insert(cmd.id.clone()) {
-            return Err(ConfigError::DuplicateId(cmd.id.clone()));
+        visit_cmd(cmd)?;
+    }
+    for child in &group.children {
+        walk_tree(child, visit_group, visit_cmd)?;
+    }
+    Ok(())
+}
+
+fn check_duplicates(group: &CommandGroup, seen: &mut HashSet<String>) -> Result<(), ConfigError> {
+    fn check_id(id: &str, seen: &mut HashSet<String>) -> Result<(), ConfigError> {
+        if !seen.insert(id.to_string()) {
+            return Err(ConfigError::DuplicateId(id.to_string()));
         }
+        Ok(())
+    }
+
+    check_id(&group.id, seen)?;
+    for cmd in &group.commands {
+        check_id(&cmd.id, seen)?;
     }
     for child in &group.children {
         check_duplicates(child, seen)?;
@@ -98,51 +118,50 @@ fn check_duplicates(group: &CommandGroup, seen: &mut HashSet<String>) -> Result<
 }
 
 fn check_empty_names(group: &CommandGroup) -> Result<(), ConfigError> {
-    if group.name.trim().is_empty() {
-        return Err(ConfigError::Validation(format!(
-            "Group with id '{}' has an empty name",
-            group.id
-        )));
-    }
-    for cmd in &group.commands {
-        if cmd.name.trim().is_empty() {
-            return Err(ConfigError::Validation(format!(
-                "Command with id '{}' has an empty name",
-                cmd.id
-            )));
-        }
-    }
-    for child in &group.children {
-        check_empty_names(child)?;
-    }
-    Ok(())
+    walk_tree(
+        group,
+        &mut |g| {
+            if g.name.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "Group with id '{}' has an empty name",
+                    g.id
+                )));
+            }
+            Ok(())
+        },
+        &mut |cmd| {
+            if cmd.name.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "Command with id '{}' has an empty name",
+                    cmd.id
+                )));
+            }
+            Ok(())
+        },
+    )
 }
 
 fn check_empty_commands(group: &CommandGroup) -> Result<(), ConfigError> {
-    for cmd in &group.commands {
+    walk_tree(group, &mut |_| Ok(()), &mut |cmd| {
         if cmd.cmd.trim().is_empty() {
             return Err(ConfigError::Validation(format!(
                 "Command '{}' has an empty cmd string",
                 cmd.name
             )));
         }
-    }
-    for child in &group.children {
-        check_empty_commands(child)?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Validate that all `depends_on` references resolve and there are no cycles
 fn validate_dependencies(root: &CommandGroup) -> Result<(), ConfigError> {
-    // Collect all command IDs
-    let mut all_ids = HashSet::new();
-    collect_command_ids(root, &mut all_ids);
+    let commands = root.all_commands();
+    let cmd_by_id: HashMap<&str, &Command> = commands.iter().map(|c| (c.id.as_str(), *c)).collect();
 
     // Validate references
-    for cmd in root.all_commands() {
+    for cmd in &commands {
         for dep in &cmd.depends_on {
-            if !all_ids.contains(dep.as_str()) {
+            if !cmd_by_id.contains_key(dep.as_str()) {
                 return Err(ConfigError::Validation(format!(
                     "Command '{}' depends on '{}' which does not exist",
                     cmd.name, dep
@@ -151,42 +170,32 @@ fn validate_dependencies(root: &CommandGroup) -> Result<(), ConfigError> {
         }
     }
 
-    // Cycle detection via DFS
-    let commands: Vec<&Command> = root.all_commands();
+    // Cycle detection via DFS with O(1) lookup
     let mut visited = HashSet::new();
     let mut stack = HashSet::new();
     for cmd in &commands {
         if !visited.contains(cmd.id.as_str()) {
-            detect_cycle(cmd.id.as_str(), &commands, &mut visited, &mut stack)?;
+            detect_cycle(cmd.id.as_str(), &cmd_by_id, &mut visited, &mut stack)?;
         }
     }
 
     Ok(())
 }
 
-fn collect_command_ids<'a>(group: &'a CommandGroup, ids: &mut HashSet<&'a str>) {
-    for cmd in &group.commands {
-        ids.insert(&cmd.id);
-    }
-    for child in &group.children {
-        collect_command_ids(child, ids);
-    }
-}
-
 fn detect_cycle<'a>(
     id: &'a str,
-    commands: &[&'a Command],
+    cmd_by_id: &HashMap<&str, &'a Command>,
     visited: &mut HashSet<&'a str>,
     stack: &mut HashSet<&'a str>,
 ) -> Result<(), ConfigError> {
     visited.insert(id);
     stack.insert(id);
 
-    if let Some(cmd) = commands.iter().find(|c| c.id == id) {
+    if let Some(cmd) = cmd_by_id.get(id) {
         for dep in &cmd.depends_on {
             let dep_str: &str = dep.as_str();
             if !visited.contains(dep_str) {
-                detect_cycle(dep_str, commands, visited, stack)?;
+                detect_cycle(dep_str, cmd_by_id, visited, stack)?;
             } else if stack.contains(dep_str) {
                 return Err(ConfigError::Validation(format!(
                     "Circular dependency detected involving '{dep}'"
@@ -200,12 +209,17 @@ fn detect_cycle<'a>(
 }
 
 fn check_empty_groups(group: &CommandGroup) {
-    for child in &group.children {
-        if child.commands.is_empty() && child.children.is_empty() {
-            warn!("Group '{}' has no commands and no children", child.name);
-        }
-        check_empty_groups(child);
-    }
+    // walk_tree requires Result return; use Infallible since this never fails.
+    let _ = walk_tree(
+        group,
+        &mut |g| {
+            if g.commands.is_empty() && g.children.is_empty() {
+                warn!("Group '{}' has no commands and no children", g.name);
+            }
+            Ok(())
+        },
+        &mut |_| Ok(()),
+    );
 }
 
 #[cfg(test)]
