@@ -32,7 +32,7 @@ struct ListLintsParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct RunLintsParams {
+struct FailFastParams {
     /// Stop on first failure instead of running all commands. Useful for quick
     /// feedback when you expect failures.
     #[schemars(default)]
@@ -44,14 +44,6 @@ struct RunLintParams {
     /// The command name or id to run. Use `list_lints` to discover available
     /// commands. Matches by exact id or case-insensitive name.
     command: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct RunAllParams {
-    /// Stop on first failure instead of running all commands. Useful for quick
-    /// feedback when you expect failures.
-    #[schemars(default)]
-    fail_fast: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +101,11 @@ pub struct FnugMcp {
     tool_router: ToolRouter<Self>,
 }
 
+/// Convert any `Display` error into an MCP internal error.
+fn mcp_err(e: impl std::fmt::Display) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(e.to_string(), None)
+}
+
 /// Walk the command tree, collecting (command, `group_path`) pairs.
 fn flatten_commands<'a>(group: &'a CommandGroup, path: &str) -> Vec<(&'a Command, String)> {
     let mut result = Vec::new();
@@ -151,8 +148,7 @@ impl FnugMcp {
         let config = self.config.clone();
         let result = tokio::task::spawn_blocking(move || {
             let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
-            let selected = selectors::get_selected_commands(all_commands)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let selected = selectors::get_selected_commands(all_commands).map_err(mcp_err)?;
             let selected_ids: HashSet<&str> = selected.iter().map(|c| c.id.as_str()).collect();
 
             let flat = flatten_commands(&config, &config.name);
@@ -219,11 +215,10 @@ impl FnugMcp {
                 })
                 .collect();
 
-            serde_json::to_string_pretty(&infos)
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
+            serde_json::to_string_pretty(&infos).map_err(mcp_err)
         })
         .await
-        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))??;
+        .map_err(mcp_err)??;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -238,21 +233,11 @@ impl FnugMcp {
     )]
     async fn run_lints(
         &self,
-        Parameters(params): Parameters<RunLintsParams>,
+        Parameters(params): Parameters<FailFastParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let config = self.config.clone();
-        let cwd = self.cwd.clone();
         let fail_fast = params.fail_fast.unwrap_or(false);
-
-        let result = tokio::task::spawn_blocking(move || {
-            run_commands(&config, &cwd, fail_fast, &CommandSelection::GitSelected)
-        })
-        .await
-        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))??;
-
-        let json = serde_json::to_string_pretty(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        self.run_and_serialize(CommandSelection::GitSelected, fail_fast)
+            .await
     }
 
     #[tool(
@@ -266,19 +251,8 @@ impl FnugMcp {
         &self,
         Parameters(params): Parameters<RunLintParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let config = self.config.clone();
-        let cwd = self.cwd.clone();
-        let target = params.command;
-
-        let result = tokio::task::spawn_blocking(move || {
-            run_commands(&config, &cwd, false, &CommandSelection::Single(target))
-        })
-        .await
-        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))??;
-
-        let json = serde_json::to_string_pretty(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        self.run_and_serialize(CommandSelection::Single(params.command), false)
+            .await
     }
 
     #[tool(
@@ -290,20 +264,29 @@ impl FnugMcp {
     )]
     async fn run_all(
         &self,
-        Parameters(params): Parameters<RunAllParams>,
+        Parameters(params): Parameters<FailFastParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let fail_fast = params.fail_fast.unwrap_or(false);
+        self.run_and_serialize(CommandSelection::All, fail_fast)
+            .await
+    }
+}
+
+impl FnugMcp {
+    async fn run_and_serialize(
+        &self,
+        selection: CommandSelection,
+        fail_fast: bool,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let config = self.config.clone();
         let cwd = self.cwd.clone();
-        let fail_fast = params.fail_fast.unwrap_or(false);
 
-        let result = tokio::task::spawn_blocking(move || {
-            run_commands(&config, &cwd, fail_fast, &CommandSelection::All)
-        })
-        .await
-        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))??;
+        let result =
+            tokio::task::spawn_blocking(move || run_commands(&config, &cwd, fail_fast, &selection))
+                .await
+                .map_err(mcp_err)??;
 
-        let json = serde_json::to_string_pretty(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(mcp_err)?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
@@ -351,6 +334,9 @@ fn run_commands(
 ) -> Result<RunResult, rmcp::ErrorData> {
     let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
 
+    // Hoisted so references in the GitSelected branch live long enough.
+    let git_selected;
+
     let selected: Vec<&Command> = match *selection {
         CommandSelection::Single(ref target) => {
             let found = all_commands
@@ -363,9 +349,9 @@ fn run_commands(
         }
         CommandSelection::All => all_commands.iter().collect(),
         CommandSelection::GitSelected => {
-            let selected_owned = selectors::get_selected_commands(all_commands.clone())
-                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            if selected_owned.is_empty() {
+            git_selected =
+                selectors::get_selected_commands(all_commands.clone()).map_err(mcp_err)?;
+            if git_selected.is_empty() {
                 return Ok(RunResult {
                     total: 0,
                     passed: 0,
@@ -375,12 +361,7 @@ fn run_commands(
                     commands: vec![],
                 });
             }
-            let selected_ids: HashSet<String> =
-                selected_owned.iter().map(|c| c.id.clone()).collect();
-            all_commands
-                .iter()
-                .filter(|c| selected_ids.contains(&c.id))
-                .collect()
+            git_selected.iter().collect()
         }
     };
 
