@@ -1,0 +1,15 @@
+{
+	"servers": {
+		"fnug": {
+			"type": "stdio",
+			"command": "nix",
+			"args": [
+				"develop",
+				"--command",
+				"fnug",
+				"mcp"
+			]
+		}
+	},
+	"inputs": []
+}

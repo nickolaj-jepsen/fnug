@@ -56,6 +56,8 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Start an MCP server over stdio
+    Mcp,
 }
 
 fn main() -> ExitCode {
@@ -104,6 +106,10 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Some(Commands::InitHooks { force }) => {
             fnug::init_hooks::run(&cwd, force)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Some(Commands::Mcp) => {
+            fnug::mcp::run(config, cwd).await?;
             return Ok(ExitCode::SUCCESS);
         }
         None => None,

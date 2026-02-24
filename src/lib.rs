@@ -19,6 +19,7 @@ pub mod commands;
 pub mod config_file;
 pub mod init_hooks;
 pub mod logger;
+pub mod mcp;
 pub mod pty;
 pub mod selectors;
 pub mod theme;

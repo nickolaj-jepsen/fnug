@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Instant;
 
@@ -14,6 +14,76 @@ use crate::selectors::{self, SelectorError};
 pub enum CheckError {
     #[error("selector error: {0}")]
     Selector(#[from] SelectorError),
+}
+
+/// Result of executing a single command with captured output.
+pub(crate) struct CommandResult {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration: std::time::Duration,
+}
+
+/// Expand selected commands to include all transitive dependencies.
+pub(crate) fn expand_dependencies<'a>(
+    selected: &[&'a Command],
+    all_commands: &'a [Command],
+) -> Vec<&'a Command> {
+    let cmd_by_id: HashMap<&str, &Command> =
+        all_commands.iter().map(|c| (c.id.as_str(), c)).collect();
+
+    let mut selected_ids: HashSet<String> = selected.iter().map(|c| c.id.clone()).collect();
+    let mut queue: VecDeque<String> = selected_ids.iter().cloned().collect();
+    while let Some(id) = queue.pop_front() {
+        if let Some(cmd) = cmd_by_id.get(id.as_str()) {
+            for dep in &cmd.depends_on {
+                if selected_ids.insert(dep.clone()) {
+                    queue.push_back(dep.clone());
+                }
+            }
+        }
+    }
+
+    all_commands
+        .iter()
+        .filter(|c| selected_ids.contains(&c.id))
+        .collect()
+}
+
+/// Execute a single command, capturing stdout and stderr.
+pub(crate) fn execute_command(cmd: &Command, cwd: &Path) -> CommandResult {
+    let cmd_cwd = if cmd.cwd.as_os_str().is_empty() {
+        cwd
+    } else {
+        &cmd.cwd
+    };
+
+    let start = Instant::now();
+    let output = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(&cmd.cmd)
+        .current_dir(cmd_cwd)
+        .envs(&cmd.env)
+        .output();
+    let duration = start.elapsed();
+
+    match output {
+        Ok(o) => CommandResult {
+            success: o.status.success(),
+            exit_code: o.status.code(),
+            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+            duration,
+        },
+        Err(e) => CommandResult {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: e.to_string(),
+            duration,
+        },
+    }
 }
 
 /// Result of a headless check run, carrying state for TUI handoff.
@@ -105,30 +175,10 @@ pub fn run(
         });
     }
 
-    // Build lookup of all commands by ID
-    let cmd_by_id: HashMap<&str, &Command> =
-        all_commands.iter().map(|c| (c.id.as_str(), c)).collect();
-
-    // Expand dependencies: pull in any depends_on targets not already selected
-    let mut selected_ids: HashSet<String> = selected.iter().map(|c| c.id.clone()).collect();
-    let mut queue: VecDeque<String> = selected_ids.iter().cloned().collect();
-    while let Some(id) = queue.pop_front() {
-        if let Some(cmd) = cmd_by_id.get(id.as_str()) {
-            for dep in &cmd.depends_on {
-                if selected_ids.insert(dep.clone()) {
-                    queue.push_back(dep.clone());
-                }
-            }
-        }
-    }
-
-    // Collect the full set of commands to run
-    let commands_to_run: Vec<&Command> = all_commands
-        .iter()
-        .filter(|c| selected_ids.contains(&c.id))
-        .collect();
-
-    // Topological sort (Kahn's algorithm)
+    // Expand dependencies and topologically sort
+    let selected_refs: Vec<&Command> = selected.iter().collect();
+    let commands_to_run = expand_dependencies(&selected_refs, &all_commands);
+    let selected_ids: HashSet<String> = commands_to_run.iter().map(|c| c.id.clone()).collect();
     let ordered = topo_sort(&commands_to_run);
 
     // Execute sequentially
@@ -169,39 +219,30 @@ pub fn run(
             &cmd.cwd
         };
 
-        let start = Instant::now();
         let success;
 
         if mute_success {
-            let output = ProcessCommand::new("sh")
-                .arg("-c")
-                .arg(&cmd.cmd)
-                .current_dir(cmd_cwd)
-                .envs(&cmd.env)
-                .output();
-            let elapsed = start.elapsed();
+            let result = execute_command(cmd, cmd_cwd);
 
-            match output {
-                Ok(o) if o.status.success() => {
-                    eprintln!(
-                        "{} {}",
-                        sty.green("PASS"),
-                        sty.dim(&format_duration(elapsed))
-                    );
-                    success = true;
-                }
-                Ok(o) => {
-                    eprintln!("{} {}", sty.red("FAIL"), sty.dim(&format_duration(elapsed)));
-                    let _ = std::io::stderr().write_all(&o.stdout);
-                    let _ = std::io::stderr().write_all(&o.stderr);
-                    success = false;
-                }
-                Err(_) => {
-                    eprintln!("{} {}", sty.red("FAIL"), sty.dim(&format_duration(elapsed)));
-                    success = false;
-                }
+            if result.success {
+                eprintln!(
+                    "{} {}",
+                    sty.green("PASS"),
+                    sty.dim(&format_duration(result.duration))
+                );
+                success = true;
+            } else {
+                eprintln!(
+                    "{} {}",
+                    sty.red("FAIL"),
+                    sty.dim(&format_duration(result.duration))
+                );
+                let _ = std::io::stderr().write_all(result.stdout.as_bytes());
+                let _ = std::io::stderr().write_all(result.stderr.as_bytes());
+                success = false;
             }
         } else {
+            let start = Instant::now();
             let status = ProcessCommand::new("sh")
                 .arg("-c")
                 .arg(&cmd.cmd)
@@ -295,7 +336,7 @@ fn print_summary(
 
 /// Topological sort using Kahn's algorithm.
 /// Commands with no dependencies come first.
-fn topo_sort<'a>(commands: &[&'a Command]) -> Vec<&'a Command> {
+pub(crate) fn topo_sort<'a>(commands: &[&'a Command]) -> Vec<&'a Command> {
     let ids: HashSet<&str> = commands.iter().map(|c| c.id.as_str()).collect();
 
     // in-degree: count of deps that are in our set
