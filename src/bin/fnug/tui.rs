@@ -62,31 +62,45 @@ fn start_config_watcher(
 }
 
 /// Start a file watcher that forwards watch events to the app event channel.
+/// The watcher setup (inotify registration) runs on a blocking thread to avoid
+/// stalling TUI startup when watching many/large directories.
 fn start_file_watcher(
     config: &CommandGroup,
     event_tx: tokio::sync::mpsc::Sender<AppEvent>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> tokio::task::JoinHandle<()> {
     let all_commands: Vec<_> = config.all_commands().into_iter().cloned().collect();
-    match watch_commands(all_commands) {
-        Ok((mut watcher_rx, _watcher)) => {
-            info!("File watcher started");
-            Some(tokio::spawn(async move {
-                while let Some(commands) = watcher_rx.recv().await {
-                    if event_tx
-                        .send(AppEvent::WatcherTriggered(commands))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }))
+
+    tokio::spawn(async move {
+        // Setup watcher on a blocking thread (registering inotify watches for
+        // large directory trees is slow and would block the TUI event loop).
+        let result = tokio::task::spawn_blocking(move || watch_commands(all_commands)).await;
+
+        let (mut watcher_rx, _watcher) = match result {
+            Ok(Ok(handle)) => {
+                info!("File watcher started");
+                handle
+            }
+            Ok(Err(e)) => {
+                warn!("File watcher not started: {e}");
+                return;
+            }
+            Err(e) => {
+                warn!("File watcher task failed: {e}");
+                return;
+            }
+        };
+
+        // Forward watch events to app. _watcher is kept alive by this scope.
+        while let Some(commands) = watcher_rx.recv().await {
+            if event_tx
+                .send(AppEvent::WatcherTriggered(commands))
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
-        Err(e) => {
-            warn!("File watcher not started: {e}");
-            None
-        }
-    }
+    })
 }
 
 pub async fn run(
@@ -138,9 +152,7 @@ pub async fn run(
     // Shutdown: kill processes, abort tasks
     app.shutdown();
     drop(config_watcher_handle);
-    if let Some(handle) = file_watcher_handle {
-        handle.abort();
-    }
+    file_watcher_handle.abort();
 
     // Cleanup terminal
     disable_raw_mode()?;
