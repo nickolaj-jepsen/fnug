@@ -67,8 +67,8 @@ Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from cwd upward. Co
 Releases are automated via GitHub Actions (`.github/workflows/release.yaml`), triggered when the version in `Cargo.toml` changes on the `main` branch. The workflow automatically creates and pushes the `vX.Y.Z` git tag.
 
 1. Update the version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if the vendored crate changed)
-2. Commit: `git commit -m "chore: bump version to X.Y.Z"`
-3. Push: `git push`
+2. Run `cargo generate-lockfile` to update `Cargo.lock`
+3. Commit: `git commit -m "chore: bump version to X.Y.Z"`
 
 ## Python Package
 
