@@ -165,7 +165,8 @@ impl App {
             KeyCode::Char('g') => {
                 // Git auto-select
                 self.selected.clear();
-                self.run_git_selection();
+                self.apply_always_selection();
+                self.spawn_git_selection();
             }
             KeyCode::Enter => {
                 self.run_selected(terminal_area);

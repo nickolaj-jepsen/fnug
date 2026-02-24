@@ -122,7 +122,8 @@ pub async fn run(
         let initial_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.apply_check_result(result, initial_area);
     } else {
-        app.run_git_selection();
+        app.apply_always_selection();
+        app.spawn_git_selection();
     }
 
     // Connect the logger to the app's event channel for redraw notifications

@@ -3,7 +3,7 @@ use log::debug;
 use crate::commands::command::Command;
 use thiserror::Error;
 
-mod always;
+pub(crate) mod always;
 mod git;
 pub mod watch;
 

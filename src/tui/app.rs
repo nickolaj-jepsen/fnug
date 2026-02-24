@@ -58,6 +58,7 @@ pub enum AppEvent {
     WatcherTriggered(Vec<Command>),
     LogUpdated,
     ConfigChanged,
+    GitSelectionComplete(u64, Result<Vec<Command>, String>),
 }
 
 /// Which pane currently has keyboard focus
@@ -214,6 +215,10 @@ pub struct App {
     pub(super) pending_deps: HashMap<String, Vec<String>>,
     /// Active context menu (right-click)
     pub context_menu: Option<ContextMenu>,
+    /// Handle for in-flight async git selection task
+    git_selection_handle: Option<JoinHandle<()>>,
+    /// Generation counter for staleness detection of git selection results
+    git_selection_generation: u64,
 }
 
 /// Recursively collect IDs of groups that contain no selected commands.
@@ -274,6 +279,8 @@ impl App {
             search: SearchState::Inactive,
             pending_deps: HashMap::new(),
             context_menu: None,
+            git_selection_handle: None,
+            git_selection_generation: 0,
         };
         app.rebuild_visible_nodes();
         app
@@ -309,22 +316,43 @@ impl App {
         }
     }
 
-    /// Run initial git selection
-    pub fn run_git_selection(&mut self) {
+    /// Synchronously apply always-selected commands (no I/O, instant)
+    pub fn apply_always_selection(&mut self) {
+        use crate::selectors::RunnableSelector;
+        use crate::selectors::always::AlwaysSelector;
+
         let commands: Vec<Command> = self.config.all_commands().into_iter().cloned().collect();
-        match get_selected_commands(commands) {
-            Ok(selected) => {
-                for cmd in &selected {
+        match AlwaysSelector::split_active_commands(commands) {
+            Ok((always_cmds, _)) => {
+                for cmd in &always_cmds {
                     self.selected.insert(cmd.id.clone(), true);
                 }
-                debug!("Git-selected {} commands", selected.len());
+                debug!("Always-selected {} commands", always_cmds.len());
             }
             Err(e) => {
-                error!("Git selection failed: {e}");
+                error!("Always selection failed: {e}");
             }
         }
         self.collapse_inactive_groups();
         self.rebuild_visible_nodes();
+    }
+
+    /// Spawn async git selection on a background thread
+    pub fn spawn_git_selection(&mut self) {
+        // Abort any in-flight selection
+        if let Some(handle) = self.git_selection_handle.take() {
+            handle.abort();
+        }
+
+        self.git_selection_generation += 1;
+        let generation = self.git_selection_generation;
+        let commands: Vec<Command> = self.config.all_commands().into_iter().cloned().collect();
+        let event_tx = self.event_tx.clone();
+
+        self.git_selection_handle = Some(tokio::task::spawn_blocking(move || {
+            let result = get_selected_commands(commands).map_err(|e| e.to_string());
+            let _ = event_tx.blocking_send(AppEvent::GitSelectionComplete(generation, result));
+        }));
     }
 
     /// Collapse groups that contain no selected commands and expand groups
@@ -415,6 +443,24 @@ impl App {
                     self.start_command(&cmd.id, terminal_area, false);
                 }
             }
+            AppEvent::GitSelectionComplete(generation, result) => {
+                if generation == self.git_selection_generation {
+                    self.git_selection_handle = None;
+                    match result {
+                        Ok(selected) => {
+                            for cmd in &selected {
+                                self.selected.insert(cmd.id.clone(), true);
+                            }
+                            debug!("Git-selected {} commands", selected.len());
+                        }
+                        Err(e) => {
+                            error!("Git selection failed: {e}");
+                        }
+                    }
+                    self.collapse_inactive_groups();
+                    self.mark_tree_dirty();
+                }
+            }
             AppEvent::LogUpdated => {
                 // Redraw happens automatically on next frame
             }
@@ -448,7 +494,8 @@ impl App {
 
                 self.config = new_config;
                 self.cwd = new_cwd;
-                self.mark_tree_dirty();
+                self.apply_always_selection();
+                self.spawn_git_selection();
                 info!("Configuration reloaded successfully");
             }
             Err(e) => {
@@ -498,6 +545,9 @@ impl App {
 
     /// Shut down all processes and abort all spawned tasks
     pub fn shutdown(&mut self) {
+        if let Some(handle) = self.git_selection_handle.take() {
+            handle.abort();
+        }
         for (id, proc) in self.processes.drain() {
             proc.kill_and_abort(&id);
         }
@@ -739,7 +789,8 @@ impl App {
             }
             ToolbarAction::GitSelect => {
                 self.selected.clear();
-                self.run_git_selection();
+                self.apply_always_selection();
+                self.spawn_git_selection();
             }
             ToolbarAction::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
