@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Args;
@@ -15,7 +15,7 @@ pub struct InitHooksArgs {
 /// # Errors
 ///
 /// Returns an error if hook installation fails.
-pub fn run(args: &InitHooksArgs, cwd: &PathBuf) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub fn run(args: &InitHooksArgs, cwd: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
     fnug::init_hooks::run(cwd, args.force)?;
     Ok(ExitCode::SUCCESS)
 }

@@ -1,5 +1,5 @@
-use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Args;
@@ -38,7 +38,7 @@ pub enum CheckOutcome {
 pub fn run(
     args: &CheckArgs,
     config: &CommandGroup,
-    cwd: &PathBuf,
+    cwd: &Path,
 ) -> Result<CheckOutcome, Box<dyn std::error::Error>> {
     let result = fnug::check::run(config, cwd, args.fail_fast, args.mute_success)?;
     if result.exit_code == 0 {
@@ -48,7 +48,7 @@ pub fn run(
     // On failure in an interactive terminal, offer to open the TUI
     if !args.no_tui && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
         eprint!("Open TUI to investigate? [y/N] ");
-        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let _ = std::io::stderr().flush();
         let mut answer = String::new();
         std::io::stdin().read_line(&mut answer)?;
         if answer.trim().eq_ignore_ascii_case("y") {

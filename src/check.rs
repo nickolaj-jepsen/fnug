@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as ProcessCommand;
 use std::time::Instant;
 
@@ -150,15 +150,68 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
+/// Execute a command with captured output, printing only failures.
+fn execute_muted(cmd: &Command, cwd: &Path, sty: &Style) -> bool {
+    let result = execute_command(cmd, cwd);
+    if result.success {
+        eprintln!(
+            "{} {}",
+            sty.green("PASS"),
+            sty.dim(&format_duration(result.duration))
+        );
+    } else {
+        eprintln!(
+            "{} {}",
+            sty.red("FAIL"),
+            sty.dim(&format_duration(result.duration))
+        );
+        let _ = std::io::stderr().write_all(result.stdout.as_bytes());
+        let _ = std::io::stderr().write_all(result.stderr.as_bytes());
+    }
+    result.success
+}
+
+/// Execute a command with inherited stdio (output streams directly to terminal).
+fn execute_streaming(cmd: &Command, cwd: &Path, sty: &Style) -> bool {
+    let cmd_cwd = if cmd.cwd.as_os_str().is_empty() {
+        cwd
+    } else {
+        &cmd.cwd
+    };
+
+    let start = Instant::now();
+    let status = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(&cmd.cmd)
+        .current_dir(cmd_cwd)
+        .envs(&cmd.env)
+        .status();
+    let elapsed = start.elapsed();
+
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!(
+                "{} {}",
+                sty.green("PASS"),
+                sty.dim(&format_duration(elapsed))
+            );
+            true
+        }
+        _ => {
+            eprintln!("{} {}", sty.red("FAIL"), sty.dim(&format_duration(elapsed)));
+            false
+        }
+    }
+}
+
 /// Run all selected commands headlessly and report results.
 ///
 /// # Errors
 ///
 /// Returns `CheckError::Selector` if git-based command selection fails.
-#[allow(clippy::too_many_lines)]
 pub fn run(
     config: &CommandGroup,
-    cwd: &PathBuf,
+    cwd: &Path,
     fail_fast: bool,
     mute_success: bool,
 ) -> Result<CheckResult, CheckError> {
@@ -213,59 +266,11 @@ pub fn run(
         eprint!("{} {} ", sty.bold(&prefix), cmd.name);
         let _ = std::io::stderr().flush();
 
-        let cmd_cwd = if cmd.cwd.as_os_str().is_empty() {
-            cwd
+        let success = if mute_success {
+            execute_muted(cmd, cwd, &sty)
         } else {
-            &cmd.cwd
+            execute_streaming(cmd, cwd, &sty)
         };
-
-        let success;
-
-        if mute_success {
-            let result = execute_command(cmd, cmd_cwd);
-
-            if result.success {
-                eprintln!(
-                    "{} {}",
-                    sty.green("PASS"),
-                    sty.dim(&format_duration(result.duration))
-                );
-                success = true;
-            } else {
-                eprintln!(
-                    "{} {}",
-                    sty.red("FAIL"),
-                    sty.dim(&format_duration(result.duration))
-                );
-                let _ = std::io::stderr().write_all(result.stdout.as_bytes());
-                let _ = std::io::stderr().write_all(result.stderr.as_bytes());
-                success = false;
-            }
-        } else {
-            let start = Instant::now();
-            let status = ProcessCommand::new("sh")
-                .arg("-c")
-                .arg(&cmd.cmd)
-                .current_dir(cmd_cwd)
-                .envs(&cmd.env)
-                .status();
-            let elapsed = start.elapsed();
-
-            match status {
-                Ok(s) if s.success() => {
-                    eprintln!(
-                        "{} {}",
-                        sty.green("PASS"),
-                        sty.dim(&format_duration(elapsed))
-                    );
-                    success = true;
-                }
-                _ => {
-                    eprintln!("{} {}", sty.red("FAIL"), sty.dim(&format_duration(elapsed)));
-                    success = false;
-                }
-            }
-        }
 
         if success {
             passed += 1;
@@ -357,7 +362,7 @@ pub(crate) fn topo_sort<'a>(commands: &[&'a Command]) -> Vec<&'a Command> {
         }
     }
 
-    let cmd_map: HashMap<&str, &&Command> = commands.iter().map(|c| (c.id.as_str(), c)).collect();
+    let cmd_map: HashMap<&str, &Command> = commands.iter().map(|c| (c.id.as_str(), *c)).collect();
 
     // Seed queue in input order for stable sorting
     let mut queue: VecDeque<&str> = commands
@@ -368,8 +373,8 @@ pub(crate) fn topo_sort<'a>(commands: &[&'a Command]) -> Vec<&'a Command> {
 
     let mut result = Vec::with_capacity(commands.len());
     while let Some(id) = queue.pop_front() {
-        if let Some(cmd) = cmd_map.get(id) {
-            result.push(**cmd);
+        if let Some(&cmd) = cmd_map.get(id) {
+            result.push(cmd);
         }
         if let Some(deps) = dependents.get(id) {
             for &dep_id in deps {

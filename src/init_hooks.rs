@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -27,7 +27,7 @@ fnug check --fail-fast --mute-success
 /// Returns `InitHooksError::NoRepo` if no git repository is found,
 /// `InitHooksError::HookExists` if a hook already exists (unless `force` is set),
 /// or `InitHooksError::Io` on write failure.
-pub fn run(cwd: &PathBuf, force: bool) -> Result<(), InitHooksError> {
+pub fn run(cwd: &Path, force: bool) -> Result<(), InitHooksError> {
     let repo = git2::Repository::discover(cwd)?;
     let git_dir = repo.path(); // .git/
     let hooks_dir = git_dir.join("hooks");
