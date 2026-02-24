@@ -357,10 +357,7 @@ fn run_commands(
                 .iter()
                 .find(|c| c.id == *target || c.name.eq_ignore_ascii_case(target))
                 .ok_or_else(|| {
-                    rmcp::ErrorData::invalid_params(
-                        format!("Command not found: {target}"),
-                        None,
-                    )
+                    rmcp::ErrorData::invalid_params(format!("Command not found: {target}"), None)
                 })?;
             vec![found]
         }
