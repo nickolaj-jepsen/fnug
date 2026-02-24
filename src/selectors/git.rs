@@ -1,78 +1,75 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
 use log::debug;
-use regex_cache::LazyRegex;
 
 use crate::commands::command::Command;
 use crate::selectors::{RunnableSelector, SelectorError};
 
-#[derive(Default)]
-struct GitScanner {
-    repository_cache: HashMap<PathBuf, PathBuf>,
-    repo_changes_cache: HashMap<PathBuf, Vec<PathBuf>>,
+/// Discover the git repo root for a given path, using a cache to avoid
+/// repeated filesystem traversal for paths in the same repo.
+fn discover_repo(
+    path: &Path,
+    cache: &mut HashMap<PathBuf, PathBuf>,
+) -> Result<PathBuf, git2::Error> {
+    if let Some(cached) = cache.get(path) {
+        return Ok(cached.clone());
+    }
+    let repo_path = Repository::discover_path(path, &[] as &[&Path])?;
+    // discover_path returns the .git directory; we want the parent (worktree root)
+    let repo_path = repo_path
+        .parent()
+        .ok_or_else(|| git2::Error::from_str("Git repo path has no parent directory"))?
+        .to_path_buf();
+    debug!("Discovered git repo at {}", repo_path.display());
+    cache.insert(path.to_path_buf(), repo_path.clone());
+    Ok(repo_path)
 }
 
-impl GitScanner {
-    fn get_repo(&mut self, path: &Path) -> Result<PathBuf, git2::Error> {
-        if let Some(cached_path) = self.repository_cache.get(path).cloned() {
-            Ok(cached_path)
-        } else {
-            let repo_path = Repository::discover_path(path, &[] as &[&Path])?;
-            // This is the .git directory, we want the parent directory
-            let repo_path = repo_path
-                .parent()
-                .ok_or_else(|| git2::Error::from_str("Git repo path has no parent directory"))?
-                .to_path_buf();
-            debug!("Discovered git repo at {}", repo_path.display());
-            self.repository_cache
-                .insert(path.to_path_buf(), repo_path.clone());
-            Ok(repo_path)
-        }
-    }
+/// Open a repo and collect all non-ignored changed file paths.
+/// This is the expensive I/O operation we want to parallelize.
+fn scan_repo(repo_path: &Path) -> Result<Vec<PathBuf>, git2::Error> {
+    let changes: Vec<PathBuf> = Repository::open(repo_path)?
+        .statuses(None)?
+        .iter()
+        .filter(|entry| !entry.status().is_ignored())
+        .filter_map(|status| status.path().map(PathBuf::from))
+        .collect();
+    debug!(
+        "Found {} changed files in {}",
+        changes.len(),
+        repo_path.display()
+    );
+    Ok(changes)
+}
 
-    fn get_changes(&mut self, repo: &Path) -> Result<Vec<PathBuf>, git2::Error> {
-        if let Some(cached_changes) = self.repo_changes_cache.get(repo).cloned() {
-            Ok(cached_changes)
-        } else {
-            let changes: Vec<PathBuf> = Repository::open(repo)?
-                .statuses(None)?
-                .iter()
-                .filter(|entry| !entry.status().is_ignored())
-                .filter_map(|status| status.path().map(PathBuf::from))
-                .collect();
-            debug!(
-                "Found {} changed files in {}",
-                changes.len(),
-                repo.display()
-            );
-            self.repo_changes_cache
-                .insert(repo.to_path_buf(), changes.clone());
-            Ok(changes)
-        }
-    }
-
-    fn has_changes(&mut self, path: &Path, patterns: &[LazyRegex]) -> Result<bool, git2::Error> {
-        let repo = self.get_repo(path)?;
-        let changes = self.get_changes(&repo)?;
-
+/// Check whether a command has matching git changes given pre-scanned repo data.
+fn command_has_changes(
+    cmd: &Command,
+    path_to_repo: &HashMap<PathBuf, PathBuf>,
+    repo_changes: &HashMap<PathBuf, Vec<PathBuf>>,
+) -> bool {
+    cmd.auto.path.iter().any(|path| {
+        let Some(repo_path) = path_to_repo.get(path) else {
+            return false;
+        };
+        let Some(changes) = repo_changes.get(repo_path) else {
+            return false;
+        };
         let has_match = changes
             .iter()
-            .map(|change| repo.join(change))
+            .map(|change| repo_path.join(change))
             .filter(|change| change.starts_with(path))
             .any(|change| {
                 let s = change.to_string_lossy();
-                patterns.iter().any(|pattern| pattern.is_match(&s))
+                cmd.auto.regex.iter().any(|pattern| pattern.is_match(&s))
             });
-
-        debug!(
-            "Path {} {} git changes",
-            path.display(),
-            if has_match { "has" } else { "has no" }
-        );
-        Ok(has_match)
-    }
+        if has_match {
+            debug!("Path {} has git changes", path.display());
+        }
+        has_match
+    })
 }
 
 pub(crate) struct GitSelector {}
@@ -81,31 +78,67 @@ impl RunnableSelector for GitSelector {
     fn split_active_commands(
         commands: Vec<Command>,
     ) -> Result<(Vec<Command>, Vec<Command>), SelectorError> {
-        let mut git_scanner = GitScanner::default();
+        // 1. Separate git-enabled commands from non-git commands
+        let (git_commands, non_git): (Vec<_>, Vec<_>) = commands
+            .into_iter()
+            .partition(|c| c.auto.git.unwrap_or(false));
 
-        let mut with_git = Vec::new();
-        let mut other = Vec::new();
+        if git_commands.is_empty() {
+            return Ok((vec![], non_git));
+        }
 
-        for command in commands {
-            if command.auto.git.unwrap_or(false) {
-                let has_git_changes = command.auto.path.iter().try_fold(
-                    false,
-                    |acc, path| -> Result<bool, SelectorError> {
-                        Ok(acc || git_scanner.has_changes(path, &command.auto.regex)?)
-                    },
-                )?;
-
-                if has_git_changes {
-                    debug!("Git-selected command '{}'", command.name);
-                    with_git.push(command);
-                } else {
-                    other.push(command);
+        // 2. Discover repos for each command's paths (sequential, fast filesystem traversal)
+        let mut discover_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let mut path_to_repo: HashMap<PathBuf, PathBuf> = HashMap::new();
+        for cmd in &git_commands {
+            for path in &cmd.auto.path {
+                if !path_to_repo.contains_key(path) {
+                    let repo_path = discover_repo(path, &mut discover_cache)?;
+                    path_to_repo.insert(path.clone(), repo_path);
                 }
-            } else {
-                other.push(command);
             }
         }
 
-        Ok((with_git, other))
+        // 3. Collect unique repo paths
+        let unique_repos: Vec<PathBuf> = path_to_repo
+            .values()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        // 4. Scan all repos in parallel (the expensive I/O part)
+        let repo_changes: HashMap<PathBuf, Vec<PathBuf>> = std::thread::scope(|s| {
+            let handles: Vec<_> = unique_repos
+                .into_iter()
+                .map(|repo_path| {
+                    s.spawn(move || -> Result<(PathBuf, Vec<PathBuf>), git2::Error> {
+                        let changes = scan_repo(&repo_path)?;
+                        Ok((repo_path, changes))
+                    })
+                })
+                .collect();
+
+            let mut results = HashMap::new();
+            for handle in handles {
+                let (path, changes) = handle.join().unwrap()?;
+                results.insert(path, changes);
+            }
+            Ok::<_, git2::Error>(results)
+        })?;
+
+        // 5. Match each command's patterns against its repo's cached changes
+        let mut with_git = Vec::new();
+        let mut without_git = Vec::new();
+        for cmd in git_commands {
+            if command_has_changes(&cmd, &path_to_repo, &repo_changes) {
+                debug!("Git-selected command '{}'", cmd.name);
+                with_git.push(cmd);
+            } else {
+                without_git.push(cmd);
+            }
+        }
+
+        Ok((with_git, without_git.into_iter().chain(non_git).collect()))
     }
 }
