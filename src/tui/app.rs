@@ -436,12 +436,8 @@ impl App {
                 for cmd in &commands {
                     self.selected.insert(cmd.id.clone(), true);
                 }
+                self.collapse_inactive_groups();
                 self.mark_tree_dirty();
-                // Auto-run triggered commands
-                let terminal_area = Rect::new(0, 0, 80, 24); // will be corrected on next render
-                for cmd in commands {
-                    self.start_command(&cmd.id, terminal_area, false);
-                }
             }
             AppEvent::GitSelectionComplete(generation, result) => {
                 if generation == self.git_selection_generation {
