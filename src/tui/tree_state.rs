@@ -1,6 +1,6 @@
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::app::{CommandStatus, ProcessInstance};
 use super::tree_widget::{NodeKind, VisibleNode};
@@ -8,7 +8,7 @@ use super::tree_widget::{NodeKind, VisibleNode};
 /// Shared state passed through recursive tree flattening
 pub(super) struct TreeContext<'a> {
     pub expanded: &'a HashMap<String, bool>,
-    pub selected: &'a HashMap<String, bool>,
+    pub selected: &'a HashSet<String>,
     pub processes: &'a HashMap<String, ProcessInstance>,
     pub error_messages: &'a HashMap<String, String>,
     pub nodes: &'a mut Vec<VisibleNode>,
@@ -118,7 +118,7 @@ pub(super) fn flatten_group(
         }
 
         for (i, cmd) in visible_commands.iter().enumerate() {
-            let is_selected = *ctx.selected.get(&cmd.id).unwrap_or(&false);
+            let is_selected = ctx.selected.contains(&cmd.id);
             let (status, duration) = if let Some(msg) = ctx.error_messages.get(&cmd.id) {
                 (CommandStatus::Error(msg.clone()), None)
             } else if let Some(proc) = ctx.processes.get(&cmd.id) {
@@ -165,13 +165,13 @@ impl StatusCounts {
 
 fn count_status(
     group: &CommandGroup,
-    selected_map: &HashMap<String, bool>,
+    selected_map: &HashSet<String>,
     processes: &HashMap<String, ProcessInstance>,
     error_messages: &HashMap<String, String>,
 ) -> StatusCounts {
     let mut counts = StatusCounts::default();
     for cmd in &group.commands {
-        if *selected_map.get(&cmd.id).unwrap_or(&false) {
+        if selected_map.contains(&cmd.id) {
             counts.selected += 1;
         }
         if error_messages.contains_key(&cmd.id) {

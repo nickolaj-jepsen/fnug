@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -190,7 +190,7 @@ pub struct App {
     /// Track which groups are expanded (by group id)
     pub(super) expanded: HashMap<String, bool>,
     /// Track which commands are selected (by command id)
-    pub(super) selected: HashMap<String, bool>,
+    pub(super) selected: HashSet<String>,
     /// Mouse interaction state
     pub mouse: MouseState,
     /// Cached toolbar layout
@@ -223,7 +223,7 @@ pub struct App {
 /// Skips the root group (called on children directly).
 fn collect_inactive_groups(
     group: &CommandGroup,
-    selected: &HashMap<String, bool>,
+    selected: &HashSet<String>,
     to_collapse: &mut Vec<String>,
     to_expand: &mut Vec<String>,
 ) {
@@ -231,7 +231,7 @@ fn collect_inactive_groups(
         let has_selected = child
             .all_commands()
             .iter()
-            .any(|cmd| *selected.get(&cmd.id).unwrap_or(&false));
+            .any(|cmd| selected.contains(&cmd.id));
         if has_selected {
             to_expand.push(child.id.clone());
         } else {
@@ -259,7 +259,7 @@ impl App {
             should_quit: false,
             focus: Focus::Tree,
             expanded: HashMap::new(),
-            selected: HashMap::new(),
+            selected: HashSet::new(),
             mouse: MouseState::default(),
             toolbar: ToolbarCache::default(),
             error_messages: HashMap::new(),
@@ -287,8 +287,11 @@ impl App {
     ) {
         // Mark only the failed commands as selected
         for id in &result.selected_ids {
-            let is_failed = result.failed_ids.contains(id);
-            self.selected.insert(id.clone(), is_failed);
+            if result.failed_ids.contains(id) {
+                self.selected.insert(id.clone());
+            } else {
+                self.selected.remove(id);
+            }
         }
         self.collapse_inactive_groups();
         self.rebuild_visible_nodes();
@@ -317,7 +320,7 @@ impl App {
         match AlwaysSelector::split_active_commands(commands) {
             Ok((always_cmds, _)) => {
                 for cmd in &always_cmds {
-                    self.selected.insert(cmd.id.clone(), true);
+                    self.selected.insert(cmd.id.clone());
                 }
                 debug!("Always-selected {} commands", always_cmds.len());
             }
@@ -405,7 +408,7 @@ impl App {
                     };
                 }
                 if exit_code == 0 {
-                    self.selected.insert(cmd_id.clone(), false);
+                    self.selected.remove(&cmd_id);
                     // Check pending deps - start commands whose deps are now satisfied
                     self.resolve_dependency(&cmd_id);
                 } else {
@@ -426,7 +429,7 @@ impl App {
             }
             AppEvent::WatcherTriggered(commands) => {
                 for cmd in &commands {
-                    self.selected.insert(cmd.id.clone(), true);
+                    self.selected.insert(cmd.id.clone());
                 }
                 self.collapse_inactive_groups();
                 self.mark_tree_dirty();
@@ -437,7 +440,7 @@ impl App {
                     match result {
                         Ok(selected) => {
                             for cmd in &selected {
-                                self.selected.insert(cmd.id.clone(), true);
+                                self.selected.insert(cmd.id.clone());
                             }
                             debug!("Git-selected {} commands", selected.len());
                         }
@@ -546,20 +549,26 @@ impl App {
                     if let Some(group) = find_group_in_group(&self.config, &node.id) {
                         let cmd_ids: Vec<String> =
                             group.all_commands().iter().map(|c| c.id.clone()).collect();
-                        let all_selected = cmd_ids
-                            .iter()
-                            .all(|id| *self.selected.get(id).unwrap_or(&false));
-                        let new_state = !all_selected;
+                        let all_selected = cmd_ids.iter().all(|id| self.selected.contains(id));
+                        let select = !all_selected;
                         for id in cmd_ids {
-                            self.selected.insert(id, new_state);
+                            if select {
+                                self.selected.insert(id);
+                            } else {
+                                self.selected.remove(&id);
+                            }
                         }
                         // Keep expand/collapse in sync: expand when selecting, collapse when deselecting
-                        self.expanded.insert(node.id.clone(), new_state);
+                        self.expanded.insert(node.id.clone(), select);
                         self.mark_tree_dirty();
                     }
                 }
                 NodeKind::Command { selected, .. } => {
-                    self.selected.insert(node.id.clone(), !selected);
+                    if *selected {
+                        self.selected.remove(&node.id);
+                    } else {
+                        self.selected.insert(node.id.clone());
+                    }
                     self.mark_tree_dirty();
                 }
             }
@@ -621,7 +630,7 @@ impl App {
             (ContextMenuTarget::Group { id, .. }, ContextMenuAction::SelectAll) => {
                 if let Some(group) = find_group_in_group(&self.config, id) {
                     for cmd in group.all_commands() {
-                        self.selected.insert(cmd.id.clone(), true);
+                        self.selected.insert(cmd.id.clone());
                     }
                     self.mark_tree_dirty();
                 }
@@ -629,7 +638,7 @@ impl App {
             (ContextMenuTarget::Group { id, .. }, ContextMenuAction::DeselectAll) => {
                 if let Some(group) = find_group_in_group(&self.config, id) {
                     for cmd in group.all_commands() {
-                        self.selected.insert(cmd.id.clone(), false);
+                        self.selected.remove(&cmd.id);
                     }
                     self.mark_tree_dirty();
                 }
@@ -642,7 +651,7 @@ impl App {
                     let selected_ids: Vec<String> = group
                         .all_commands()
                         .iter()
-                        .filter(|c| *self.selected.get(&c.id).unwrap_or(&false))
+                        .filter(|c| self.selected.contains(&c.id))
                         .map(|c| c.id.clone())
                         .collect();
                     for cmd_id in &selected_ids {
@@ -654,11 +663,11 @@ impl App {
                 }
             }
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Select) => {
-                self.selected.insert(id.clone(), true);
+                self.selected.insert(id.clone());
                 self.mark_tree_dirty();
             }
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Deselect) => {
-                self.selected.insert(id.clone(), false);
+                self.selected.remove(id);
                 self.mark_tree_dirty();
             }
             (

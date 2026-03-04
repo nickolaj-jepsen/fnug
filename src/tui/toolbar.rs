@@ -93,7 +93,7 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
             let cursor_node = app.visible_nodes.get(app.cursor);
 
             // "Run selected (N)" — only when there are selected commands
-            let selected_count: usize = app.selected.values().filter(|&&v| v).count();
+            let selected_count = app.selected.len();
             if selected_count > 0 {
                 shortcuts.push(Shortcut::new(
                     "ENTER",

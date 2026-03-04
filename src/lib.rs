@@ -137,13 +137,11 @@ fn walk_tree(
     visit_cmd: &mut impl FnMut(&Command) -> Result<(), ConfigError>,
 ) -> Result<(), ConfigError> {
     visit_group(group)?;
-    for cmd in &group.commands {
-        visit_cmd(cmd)?;
-    }
-    for child in &group.children {
-        walk_tree(child, visit_group, visit_cmd)?;
-    }
-    Ok(())
+    group.commands.iter().try_for_each(&mut *visit_cmd)?;
+    group
+        .children
+        .iter()
+        .try_for_each(|child| walk_tree(child, visit_group, visit_cmd))
 }
 
 fn check_duplicates(group: &CommandGroup, seen: &mut HashSet<String>) -> Result<(), ConfigError> {

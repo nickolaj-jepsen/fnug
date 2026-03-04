@@ -23,24 +23,19 @@ fn commands_for_paths<'a>(
     paths: &[PathBuf],
     path_map: &'a HashMap<PathBuf, Vec<Command>>,
 ) -> Vec<&'a Command> {
-    let mut commands = Vec::new();
-    for path in paths {
-        for (key, value) in path_map {
-            if path.starts_with(key) {
-                for cmd in value {
-                    if cmd
-                        .auto
-                        .regex
-                        .iter()
-                        .any(|re| re.is_match(&path.to_string_lossy()))
-                    {
-                        commands.push(cmd);
-                    }
-                }
-            }
-        }
-    }
-    commands
+    paths
+        .iter()
+        .flat_map(|path| {
+            path_map
+                .iter()
+                .filter(move |(key, _)| path.starts_with(key))
+                .flat_map(move |(_, cmds)| {
+                    let path_str = path.to_string_lossy();
+                    cmds.iter()
+                        .filter(move |cmd| cmd.auto.regex.iter().any(|re| re.is_match(&path_str)))
+                })
+        })
+        .collect()
 }
 
 fn path_lookup_table(commands: Vec<Command>) -> HashMap<PathBuf, Vec<Command>> {

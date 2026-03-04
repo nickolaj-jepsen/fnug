@@ -106,21 +106,50 @@ fn mcp_err(e: impl std::fmt::Display) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(e.to_string(), None)
 }
 
+/// Check whether a command matches the `list_lints` filter parameters.
+fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParams) -> bool {
+    if let Some(ref g) = params.group
+        && !group_path.to_lowercase().contains(&g.to_lowercase())
+    {
+        return false;
+    }
+    if let Some(ref n) = params.name {
+        let n_lower = n.to_lowercase();
+        if !cmd.name.to_lowercase().contains(&n_lower) && !cmd.id.to_lowercase().contains(&n_lower)
+        {
+            return false;
+        }
+    }
+    if let Some(ref at) = params.auto_type {
+        match at.to_lowercase().as_str() {
+            "git" if cmd.auto.git != Some(true) => return false,
+            "watch" if cmd.auto.watch != Some(true) => return false,
+            "always" if cmd.auto.always != Some(true) => return false,
+            "none"
+                if cmd.auto.git == Some(true)
+                    || cmd.auto.watch == Some(true)
+                    || cmd.auto.always == Some(true) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Walk the command tree, collecting (command, `group_path`) pairs.
 fn flatten_commands<'a>(group: &'a CommandGroup, path: &str) -> Vec<(&'a Command, String)> {
-    let mut result = Vec::new();
-    for cmd in &group.commands {
-        result.push((cmd, path.to_string()));
-    }
-    for child in &group.children {
+    let own = group.commands.iter().map(|cmd| (cmd, path.to_string()));
+    let nested = group.children.iter().flat_map(|child| {
         let child_path = if path.is_empty() {
             child.name.clone()
         } else {
             format!("{path} > {}", child.name)
         };
-        result.extend(flatten_commands(child, &child_path));
-    }
-    result
+        flatten_commands(child, &child_path)
+    });
+    own.chain(nested).collect()
 }
 
 #[tool_router]
@@ -155,50 +184,7 @@ impl FnugMcp {
 
             let infos: Vec<LintInfo> = flat
                 .into_iter()
-                .filter(|(cmd, group_path): &(&Command, String)| {
-                    if let Some(ref g) = params.group
-                        && !group_path.to_lowercase().contains(&g.to_lowercase())
-                    {
-                        return false;
-                    }
-                    if let Some(ref n) = params.name {
-                        let n_lower = n.to_lowercase();
-                        if !cmd.name.to_lowercase().contains(&n_lower)
-                            && !cmd.id.to_lowercase().contains(&n_lower)
-                        {
-                            return false;
-                        }
-                    }
-                    if let Some(ref at) = params.auto_type {
-                        match at.to_lowercase().as_str() {
-                            "git" => {
-                                if cmd.auto.git != Some(true) {
-                                    return false;
-                                }
-                            }
-                            "watch" => {
-                                if cmd.auto.watch != Some(true) {
-                                    return false;
-                                }
-                            }
-                            "always" => {
-                                if cmd.auto.always != Some(true) {
-                                    return false;
-                                }
-                            }
-                            "none" => {
-                                if cmd.auto.git == Some(true)
-                                    || cmd.auto.watch == Some(true)
-                                    || cmd.auto.always == Some(true)
-                                {
-                                    return false;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    true
-                })
+                .filter(|(cmd, group_path)| matches_lint_filters(cmd, group_path, &params))
                 .map(|(cmd, group_path)| LintInfo {
                     selected: selected_ids.contains(cmd.id.as_str()),
                     id: cmd.id.clone(),

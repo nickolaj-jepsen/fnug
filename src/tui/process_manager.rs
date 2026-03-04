@@ -160,12 +160,7 @@ impl App {
 
     /// Start all selected commands (deps are handled by `start_command`)
     pub fn run_selected(&mut self, terminal_area: Rect) {
-        let selected_ids: Vec<String> = self
-            .selected
-            .iter()
-            .filter(|(_, v)| **v)
-            .map(|(k, _)| k.clone())
-            .collect();
+        let selected_ids: Vec<String> = self.selected.iter().cloned().collect();
 
         info!("Running {} selected commands", selected_ids.len());
         for id in &selected_ids {

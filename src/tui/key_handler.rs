@@ -133,7 +133,7 @@ impl App {
                             self.mark_tree_dirty();
                         }
                         NodeKind::Command { selected: true, .. } => {
-                            self.selected.insert(node.id.clone(), false);
+                            self.selected.remove(&node.id);
                             self.mark_tree_dirty();
                         }
                         _ => {}
@@ -152,7 +152,7 @@ impl App {
                         NodeKind::Command {
                             selected: false, ..
                         } => {
-                            self.selected.insert(node.id.clone(), true);
+                            self.selected.insert(node.id.clone());
                             self.mark_tree_dirty();
                         }
                         _ => {}
