@@ -32,8 +32,10 @@ fn commands_for_paths<'a>(
                 .filter(move |(key, _)| path.starts_with(key))
                 .flat_map(move |(_, cmds)| {
                     let path_str = path.to_string_lossy();
-                    cmds.iter()
-                        .filter(move |cmd| cmd.auto.regex.iter().any(|re| re.is_match(&path_str)))
+                    cmds.iter().filter(move |cmd| {
+                        cmd.auto.regex.is_empty()
+                            || cmd.auto.regex.iter().any(|re| re.is_match(&path_str))
+                    })
                 })
         })
         .filter(|cmd| seen.insert(cmd.id.clone()))
@@ -232,6 +234,18 @@ mod tests {
         let matching_commands = commands_for_paths(&changed_paths, &path_map);
 
         // Same command matches both .rs and .toml, but should be deduplicated
+        assert_eq!(matching_commands.len(), 1);
+        assert_eq!(matching_commands[0].name, "test1");
+    }
+
+    #[test]
+    fn test_commands_for_paths_empty_regex_matches_all() {
+        let cmd = create_test_command("test1", vec!["docs"], vec![]);
+        let path_map = create_path_map(vec![cmd]);
+
+        let changed_paths = vec![PathBuf::from("docs/demo.tape")];
+        let matching_commands = commands_for_paths(&changed_paths, &path_map);
+
         assert_eq!(matching_commands.len(), 1);
         assert_eq!(matching_commands[0].name, "test1");
     }
