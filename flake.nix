@@ -86,10 +86,7 @@
         packages.default = pkgs.fnug;
 
         devShells.default = pkgs.mkShell {
-          inputsFrom = [self'.packages.default];
-
           packages = [
-            self'.packages.default
             pkgs.cachix
             pkgs.alejandra
             pkgs.statix
@@ -97,6 +94,7 @@
             pkgs.uv
             pkgs.maturin
             pkgs.ruff
+            pkgs.vhs
             (pkgs.python3.withPackages (ps: [ps.pyyaml]))
           ];
 
