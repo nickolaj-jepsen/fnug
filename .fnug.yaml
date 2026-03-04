@@ -1,5 +1,6 @@
 fnug_version: 0.1.0
 name: fnug
+workspace: true
 children:
   - name: rust
     auto:
@@ -58,30 +59,3 @@ children:
         cmd: statix check .
       - name: deadnix
         cmd: deadnix .
-  - name: debug
-    commands:
-      - name: htop
-        cmd: htop
-      - name: recursive?!
-        cmd: cargo run --bin fnug
-      - name: A very very very long name
-        cmd: cat src/pty/terminal.rs
-      - name: always-fails
-        cmd: exit 1
-    children:
-      - name: nested-auto
-        auto:
-          always: true
-        commands:
-          - name: test-auto
-            cmd: cat src/pty/terminal.rs
-          - name: test-not-auto
-            auto:
-              always: false
-            cmd: cat src/pty/terminal.rs
-      - name: not-expanded
-        auto:
-          always: false
-        commands:
-          - name: test-not-expanded
-            cmd: cat src/pty/terminal.rs
