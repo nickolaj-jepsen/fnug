@@ -133,6 +133,27 @@ commands:
         - "\\.rs$"
 ```
 
+### Excluding commands from check mode
+
+Commands with `auto.check: false` are skipped during `fnug check` (and git hooks) but remain auto-selected in the TUI. Use `fnug check --all` to include them.
+
+Useful for commands that are too slow or noisy for pre-commit checks but you still want to run them automatically in the TUI.
+
+```yaml
+fnug_version: 0.1.0
+name: my-project
+commands:
+  - name: unit tests
+    cmd: cargo test
+    auto:
+      git: true
+  - name: integration tests
+    cmd: cargo test --release
+    auto:
+      git: true
+      check: false   # skip in `fnug check`, still auto-selected in TUI
+```
+
 ### Nested groups with inheritance
 
 Groups inherit `cwd`, `auto`, and `env` settings from their parent.
