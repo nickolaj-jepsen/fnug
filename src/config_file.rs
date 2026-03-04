@@ -75,6 +75,7 @@ pub struct ConfigAuto {
     pub path: Option<Vec<PathBuf>>,
     pub regex: Option<Vec<String>>,
     pub always: Option<bool>,
+    pub check: Option<bool>,
 }
 
 impl TryFrom<ConfigAuto> for Auto {
@@ -88,6 +89,7 @@ impl TryFrom<ConfigAuto> for Auto {
             git: config.git,
             path: config.path.unwrap_or_default(),
             always: config.always,
+            check: config.check,
         })
     }
 }

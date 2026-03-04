@@ -214,10 +214,15 @@ pub fn run(
     cwd: &Path,
     fail_fast: bool,
     mute_success: bool,
+    all: bool,
 ) -> Result<CheckResult, CheckError> {
     let sty = Style::new();
     let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
-    let selected = selectors::get_selected_commands(all_commands.clone())?;
+    let mut selected = selectors::get_selected_commands(all_commands.clone())?;
+
+    if !all {
+        selected.retain(|cmd| cmd.auto.check != Some(false));
+    }
 
     if selected.is_empty() {
         eprintln!("{}", sty.dim("No commands selected."));

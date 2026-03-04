@@ -107,6 +107,7 @@ impl Auto {
             path,
             regex,
             always: self.always.or(other.always),
+            check: self.check.or(other.check),
         }
     }
 }
@@ -142,6 +143,7 @@ impl Inheritable for Auto {
         self.path.clone_from(&inheritance.auto.path);
         self.regex.clone_from(&inheritance.auto.regex);
         self.always = inheritance.auto.always;
+        self.check = inheritance.auto.check;
 
         Ok(())
     }
@@ -292,6 +294,7 @@ mod tests {
             path: vec![],
             regex: vec![],
             always: Some(false),
+            check: None,
         };
         let mut group = CommandGroup {
             id: "1".to_string(),
@@ -329,6 +332,7 @@ mod tests {
             path: vec![root.clone()],
             regex: vec![],
             always: Some(false),
+            check: None,
         };
 
         let child_group = CommandGroup {
@@ -383,6 +387,7 @@ mod tests {
             path: vec![],
             regex: vec![],
             always: Some(false),
+            check: None,
         };
 
         let mut group = CommandGroup {
@@ -418,6 +423,7 @@ mod tests {
             vec![],
             vec![".*\\.rs$".to_string()],
             Some(false),
+            None,
         )
         .unwrap();
         let child_auto = Auto::create(
@@ -426,6 +432,7 @@ mod tests {
             vec![],
             vec!["[invalid".to_string()],
             Some(false),
+            None,
         );
         assert!(child_auto.is_err());
 
@@ -464,6 +471,7 @@ mod tests {
                 path: vec![],
                 regex: vec![],
                 always: Some(false),
+                check: None,
             },
             ..Default::default()
         };
@@ -489,6 +497,7 @@ mod tests {
                 path: vec![],
                 regex: vec![],
                 always: Some(false),
+                check: None,
             },
             cwd: root.clone(),
             commands: vec![Command {
@@ -503,6 +512,7 @@ mod tests {
                     path: vec![],
                     regex: vec![],
                     always: Some(false),
+                    check: None,
                 },
                 ..Default::default()
             }],
@@ -522,6 +532,7 @@ mod tests {
                 path: vec![root.clone()],
                 regex: vec![],
                 always: Some(false),
+                check: None,
             },
             cwd: root.clone(),
             commands: vec![Command {
@@ -536,6 +547,7 @@ mod tests {
                     path: vec![],
                     regex: vec![],
                     always: Some(false),
+                    check: None,
                 },
                 ..Default::default()
             }],

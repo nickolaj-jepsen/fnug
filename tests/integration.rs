@@ -10,7 +10,7 @@ fn write_config(dir: &std::path::Path, content: &str) {
 fn load_and_check(dir: &std::path::Path, fail_fast: bool) -> i32 {
     let path = dir.join(".fnug.yaml").to_string_lossy().to_string();
     let (config, cwd) = load_config(Some(&path), false).unwrap();
-    fnug::check::run(&config, &cwd, fail_fast, false)
+    fnug::check::run(&config, &cwd, fail_fast, false, false)
         .unwrap()
         .exit_code
 }

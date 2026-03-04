@@ -67,6 +67,7 @@ struct AutoRules {
     git: Option<bool>,
     watch: Option<bool>,
     always: Option<bool>,
+    check: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +196,7 @@ impl FnugMcp {
                         git: cmd.auto.git,
                         watch: cmd.auto.watch,
                         always: cmd.auto.always,
+                        check: cmd.auto.check,
                     },
                     depends_on: cmd.depends_on.clone(),
                     group: group_path,
@@ -321,7 +323,7 @@ fn run_commands(
     let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
 
     // Hoisted so references in the GitSelected branch live long enough.
-    let git_selected;
+    let mut git_selected;
 
     let selected: Vec<&Command> = match *selection {
         CommandSelection::Single(ref target) => {
@@ -337,6 +339,7 @@ fn run_commands(
         CommandSelection::GitSelected => {
             git_selected =
                 selectors::get_selected_commands(all_commands.clone()).map_err(mcp_err)?;
+            git_selected.retain(|cmd| cmd.auto.check != Some(false));
             if git_selected.is_empty() {
                 return Ok(RunResult {
                     total: 0,

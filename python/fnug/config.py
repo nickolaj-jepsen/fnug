@@ -26,6 +26,7 @@ class Auto:
     path: list[str] | None = None
     regex: list[str] | None = None
     always: bool | None = None
+    check: bool | None = None
 
 
 @dataclass(slots=True, kw_only=True)

@@ -8,6 +8,7 @@ use fnug::check::CheckResult;
 use fnug::commands::group::CommandGroup;
 
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CheckArgs {
     /// Stop on first failure
     #[arg(long)]
@@ -20,6 +21,10 @@ pub struct CheckArgs {
     /// Suppress stdout/stderr for commands that pass
     #[arg(long)]
     mute_success: bool,
+
+    /// Include commands with `auto.check: false`
+    #[arg(long)]
+    all: bool,
 }
 
 /// Outcome of the check subcommand.
@@ -40,7 +45,7 @@ pub fn run(
     config: &CommandGroup,
     cwd: &Path,
 ) -> Result<CheckOutcome, Box<dyn std::error::Error>> {
-    let result = fnug::check::run(config, cwd, args.fail_fast, args.mute_success)?;
+    let result = fnug::check::run(config, cwd, args.fail_fast, args.mute_success, args.all)?;
     if result.exit_code == 0 {
         return Ok(CheckOutcome::Done(ExitCode::SUCCESS));
     }

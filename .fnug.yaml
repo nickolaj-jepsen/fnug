@@ -59,3 +59,14 @@ children:
         cmd: statix check .
       - name: deadnix
         cmd: deadnix .
+  - name: docs
+    auto:
+      watch: true
+      git: true
+    commands:
+      - name: vhs
+        cmd: vhs docs/demo.tape
+        auto:
+          path:
+            - "./docs/demo.tape"
+          check: false

@@ -166,6 +166,7 @@ mod tests {
                     .collect(),
                 git: None,
                 always: None,
+                check: None,
             },
             ..Default::default()
         }

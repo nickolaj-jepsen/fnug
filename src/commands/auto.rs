@@ -10,6 +10,7 @@ pub struct Auto {
     pub path: Vec<PathBuf>,
     pub regex: Vec<LazyRegex>,
     pub always: Option<bool>,
+    pub check: Option<bool>,
 }
 
 impl Auto {
@@ -22,6 +23,7 @@ impl Auto {
         path: Vec<PathBuf>,
         regex: Vec<String>,
         always: Option<bool>,
+        check: Option<bool>,
     ) -> Result<Self, ConfigError> {
         Ok(Auto {
             watch,
@@ -29,6 +31,7 @@ impl Auto {
             path,
             always,
             regex: parse_regexes(regex)?,
+            check,
         })
     }
 }
