@@ -28,7 +28,7 @@ pub struct Inheritance {
 impl Inheritance {
     fn canonicalize(&mut self) -> Result<(), io::Error> {
         if !self.cwd.as_os_str().is_empty() {
-            self.cwd.canonicalize()?;
+            self.cwd = self.cwd.canonicalize()?;
         }
         self.auto.path = self
             .auto

@@ -18,6 +18,12 @@ use crate::commands::group::CommandGroup;
 pub enum ConfigError {
     #[error("No config file found in current directory or its parents: {0}")]
     ConfigNotFound(PathBuf),
+    #[error("Unable to read config file {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("Unable to find directory: {path:?} (entry: {entry:?})")]
     DirectoryNotFound {
         entry: String,
@@ -202,11 +208,13 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `ConfigError::ConfigNotFound` if the file cannot be read, or
+    /// Returns `ConfigError::Io` if the file cannot be read, or
     /// `ConfigError::Yaml`/`ConfigError::Json` if parsing fails.
     pub fn from_file(file: &Path) -> Result<Config, ConfigError> {
-        let contents = std::fs::read_to_string(file)
-            .map_err(|_| ConfigError::ConfigNotFound(file.to_path_buf()))?;
+        let contents = std::fs::read_to_string(file).map_err(|e| ConfigError::Io {
+            path: file.to_path_buf(),
+            source: e,
+        })?;
         let config: Config = if file.extension().is_some_and(|ext| ext == "json") {
             serde_json::from_str(&contents).map_err(|e| ConfigError::Json {
                 source: e,
