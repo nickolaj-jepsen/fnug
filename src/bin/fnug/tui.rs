@@ -64,12 +64,13 @@ pub async fn run(
     config: CommandGroup,
     cwd: PathBuf,
     log_file: Option<String>,
+    log_level: Option<log::LevelFilter>,
     check_result: Option<CheckResult>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     // Initialize the log buffer and custom logger
     let log_buffer = LogBuffer::new();
     let log_file = log_file.as_ref().map(std::fs::File::create).transpose()?;
-    fnug::logger::init(log_buffer.clone(), log_file);
+    fnug::logger::init(log_buffer.clone(), log_file, log_level);
 
     // Install panic hook that restores the terminal before printing the panic
     let original_hook = std::panic::take_hook();

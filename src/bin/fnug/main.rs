@@ -6,6 +6,7 @@ mod tui;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use log::LevelFilter;
 
 use fnug::load_config;
 
@@ -20,12 +21,22 @@ struct Cli {
     #[arg(long)]
     log_file: Option<String>,
 
+    /// Log level [default: info]
+    #[arg(long, value_parser = parse_level_filter)]
+    log_level: Option<LevelFilter>,
+
     /// Disable workspace resolution (don't search for a parent workspace root)
     #[arg(long)]
     no_workspace: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+fn parse_level_filter(s: &str) -> Result<LevelFilter, String> {
+    s.parse().map_err(|_| {
+        format!("invalid log level '{s}', expected one of: off, error, warn, info, debug, trace")
+    })
 }
 
 #[derive(Subcommand, Debug)]
@@ -65,5 +76,5 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         None => None,
     };
 
-    tui::run(config, cwd, cli.log_file, check_result).await
+    tui::run(config, cwd, cli.log_file, cli.log_level, check_result).await
 }

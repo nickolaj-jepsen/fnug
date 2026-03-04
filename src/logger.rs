@@ -80,14 +80,20 @@ impl Log for FnugLogger {
 /// # Panics
 ///
 /// Panics if called more than once.
-pub fn init(buffer: LogBuffer, log_file: Option<std::fs::File>) {
+pub fn init(
+    buffer: LogBuffer,
+    log_file: Option<std::fs::File>,
+    log_level: Option<log::LevelFilter>,
+) {
     // Initialize the event slot
     EVENT_SLOT.get_or_init(|| Arc::new(Mutex::new(None)));
 
-    let filter = std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(log::LevelFilter::Info);
+    let filter = log_level.unwrap_or_else(|| {
+        std::env::var("FNUG_LOG")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(log::LevelFilter::Info)
+    });
 
     let logger = FnugLogger {
         buffer,

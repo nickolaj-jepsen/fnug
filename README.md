@@ -82,6 +82,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `-c <path>`       | Path to config file                                             |
 | `--no-workspace`  | Disable workspace resolution (don't search for a parent root)   |
 | `--log-file`      | Write logs to a file                                            |
+| `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info) |
 | `--fail-fast`     | Stop on first failure (`check` only)                            |
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
 | `--mute-success`  | Suppress output for passing commands (`check` only)             |
