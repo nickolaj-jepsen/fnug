@@ -38,7 +38,7 @@ Fnug is a standalone Rust binary (Rust 1.93, edition 2024) with a ratatui-based 
 - **`selectors/`** — Auto-selection: `git.rs` (git2-based diff matching), `watch.rs` (notify file watcher), `always.rs`
 - **`pty/`** — `terminal.rs` spawns commands in a PTY via portable-pty with dedicated reader/writer threads feeding a vt100 parser; `messages.rs` formats styled PTY output; `command.rs` builds the shell command
 - **`tui/`** — ratatui UI:
-  - `app.rs` — Main app state + tokio event loop (handles config hot-reload, watcher events, log updates)
+  - `app.rs` — Main app state + tokio event loop (handles watcher events, log updates)
   - `render.rs` — Layout and rendering logic
   - `key_handler.rs` / `mouse_handler.rs` — Input handling
   - `process_manager.rs` — Starting/stopping/restarting command processes
@@ -54,7 +54,6 @@ Fnug is a standalone Rust binary (Rust 1.93, edition 2024) with a ratatui-based 
 - **Dependencies**: Commands can declare `depends_on` other commands; resolved via topological sort (Kahn's algorithm) in check mode
 - **PTY management**: Each command runs in its own PTY with dedicated reader/writer threads feeding a vt100 parser
 - **Watch channel**: Terminal output changes are broadcast via `tokio::sync::watch` to trigger UI redraws
-- **Config hot-reload**: Config file is watched with `notify`; changes trigger re-parse and UI update
 - **Logging**: Custom `log` crate logger writes to a shared ring buffer displayed in a TUI log panel, with optional file output
 - **Async runtime**: Tokio multi-thread runtime drives the event loop, signal handling, and process management
 

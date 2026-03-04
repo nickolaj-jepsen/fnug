@@ -25,15 +25,13 @@ pub mod selectors;
 pub mod theme;
 pub mod tui;
 
-/// Load configuration from a file (or auto-detect), returning the root `CommandGroup`, cwd, and config file path.
+/// Load configuration from a file (or auto-detect), returning the root `CommandGroup` and cwd.
 ///
 /// # Errors
 ///
 /// Returns `ConfigError` if the config file is not found, cannot be parsed,
 /// contains invalid values, or references non-existent directories.
-pub fn load_config(
-    config_file: Option<&str>,
-) -> Result<(CommandGroup, PathBuf, PathBuf), ConfigError> {
+pub fn load_config(config_file: Option<&str>) -> Result<(CommandGroup, PathBuf), ConfigError> {
     let config_path = match config_file {
         Some(file) => {
             let config_path = PathBuf::from(file);
@@ -59,7 +57,7 @@ pub fn load_config(
     validate_tree(&config)?;
     validate_dependencies(&config)?;
     config.inherit(&Inheritance::from(cwd.clone()))?;
-    Ok((config, cwd, config_path))
+    Ok((config, cwd))
 }
 
 /// Warn if the config's `fnug_version` doesn't match the binary version

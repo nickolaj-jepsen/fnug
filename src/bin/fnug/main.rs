@@ -48,7 +48,7 @@ fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let (config, cwd, config_path) = load_config(cli.config.as_deref())?;
+    let (config, cwd) = load_config(cli.config.as_deref())?;
 
     // Dispatch subcommands
     let check_result = match cli.command {
@@ -61,5 +61,5 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         None => None,
     };
 
-    tui::run(config, cwd, config_path, cli.log_file, check_result).await
+    tui::run(config, cwd, cli.log_file, check_result).await
 }

@@ -1,7 +1,6 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
 use crossterm::execute;
@@ -18,48 +17,6 @@ use fnug::commands::group::CommandGroup;
 use fnug::selectors::watch::watch_commands;
 use fnug::tui::app::{App, AppEvent};
 use fnug::tui::log_state::LogBuffer;
-
-/// Launch the interactive TUI.
-///
-/// # Errors
-///
-/// Returns an error if terminal setup or the event loop fails.
-/// Start a config file watcher that sends `ConfigChanged` events with manual 1s debounce.
-fn start_config_watcher(
-    config_path: &Path,
-    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
-) -> Option<Box<dyn notify::Watcher>> {
-    use notify::{EventKind, RecursiveMode, Watcher};
-    use std::time::Instant;
-
-    let last_reload = Arc::new(parking_lot::Mutex::new(Instant::now()));
-
-    match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-        if let Ok(event) = res
-            && matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
-        {
-            let mut last = last_reload.lock();
-            if last.elapsed().as_secs() >= 1 {
-                *last = Instant::now();
-                let _ = event_tx.blocking_send(AppEvent::ConfigChanged);
-            }
-        }
-    }) {
-        Ok(mut watcher) => {
-            if let Err(e) = watcher.watch(config_path, RecursiveMode::NonRecursive) {
-                warn!("Config file watcher not started: {e}");
-                None
-            } else {
-                info!("Config file watcher started for {}", config_path.display());
-                Some(Box::new(watcher))
-            }
-        }
-        Err(e) => {
-            warn!("Config file watcher not started: {e}");
-            None
-        }
-    }
-}
 
 /// Start a file watcher that forwards watch events to the app event channel.
 /// The watcher setup (inotify registration) runs on a blocking thread to avoid
@@ -106,7 +63,6 @@ fn start_file_watcher(
 pub async fn run(
     config: CommandGroup,
     cwd: PathBuf,
-    config_path: PathBuf,
     log_file: Option<String>,
     check_result: Option<CheckResult>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -131,7 +87,7 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(config.clone(), cwd, config_path.clone(), log_buffer);
+    let mut app = App::new(config.clone(), cwd, log_buffer);
     if let Some(ref result) = check_result {
         let initial_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.apply_check_result(result, initial_area);
@@ -143,7 +99,6 @@ pub async fn run(
     // Connect the logger to the app's event channel for redraw notifications
     fnug::logger::connect_event_sender(app.event_tx.clone());
 
-    let config_watcher_handle = start_config_watcher(&config_path, app.event_tx.clone());
     let file_watcher_handle = start_file_watcher(&config, app.event_tx.clone());
 
     // Main event loop
@@ -151,7 +106,6 @@ pub async fn run(
 
     // Shutdown: kill processes, abort tasks
     app.shutdown();
-    drop(config_watcher_handle);
     file_watcher_handle.abort();
 
     // Cleanup terminal

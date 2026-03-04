@@ -9,7 +9,7 @@ fn write_config(dir: &std::path::Path, content: &str) {
 
 fn load_and_check(dir: &std::path::Path, fail_fast: bool) -> i32 {
     let path = dir.join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, cwd, _) = load_config(Some(&path)).unwrap();
+    let (config, cwd) = load_config(Some(&path)).unwrap();
     fnug::check::run(&config, &cwd, fail_fast, false)
         .unwrap()
         .exit_code
@@ -31,7 +31,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, cwd, _) = load_config(Some(&path)).unwrap();
+    let (config, cwd) = load_config(Some(&path)).unwrap();
     assert_eq!(config.name, "root");
     assert_eq!(config.commands.len(), 1);
     assert_eq!(config.commands[0].name, "test");
@@ -61,7 +61,7 @@ children:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, _, _) = load_config(Some(&path)).unwrap();
+    let (config, _) = load_config(Some(&path)).unwrap();
     // Child group should inherit auto settings from parent
     let child = &config.children[0];
     assert_eq!(child.auto.git, Some(true));
@@ -145,7 +145,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, _, _) = load_config(Some(&path)).unwrap();
+    let (config, _) = load_config(Some(&path)).unwrap();
     let all_commands: Vec<_> = config.all_commands().into_iter().cloned().collect();
     let selected = fnug::selectors::get_selected_commands(all_commands).unwrap();
     // Only the always command should be selected
@@ -227,8 +227,8 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, cwd, config_path) = load_config(Some(&path)).unwrap();
-    let app = App::new(config, cwd, config_path, LogBuffer::new());
+    let (config, cwd) = load_config(Some(&path)).unwrap();
+    let app = App::new(config, cwd, LogBuffer::new());
 
     // root + g1 + cmd1 + cmd2 + cmd3 = 5 visible nodes
     assert_eq!(app.visible_nodes.len(), 5);

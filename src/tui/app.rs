@@ -57,7 +57,6 @@ pub enum AppEvent {
     ProcessError(String, String),
     WatcherTriggered(Vec<Command>),
     LogUpdated,
-    ConfigChanged,
     GitSelectionComplete(u64, Result<Vec<Command>, String>),
 }
 
@@ -178,7 +177,6 @@ impl Default for ToolbarCache {
 pub struct App {
     pub config: CommandGroup,
     pub cwd: PathBuf,
-    pub config_path: PathBuf,
     pub visible_nodes: Vec<VisibleNode>,
     pub cursor: usize,
     pub processes: HashMap<String, ProcessInstance>,
@@ -245,17 +243,11 @@ fn collect_inactive_groups(
 
 impl App {
     #[must_use]
-    pub fn new(
-        config: CommandGroup,
-        cwd: PathBuf,
-        config_path: PathBuf,
-        log_buffer: LogBuffer,
-    ) -> Self {
+    pub fn new(config: CommandGroup, cwd: PathBuf, log_buffer: LogBuffer) -> Self {
         let (event_tx, event_rx) = mpsc::channel(256);
         let mut app = App {
             config,
             cwd,
-            config_path,
             visible_nodes: Vec::new(),
             cursor: 0,
             processes: HashMap::new(),
@@ -459,43 +451,6 @@ impl App {
             }
             AppEvent::LogUpdated => {
                 // Redraw happens automatically on next frame
-            }
-            AppEvent::ConfigChanged => {
-                self.reload_config();
-            }
-        }
-    }
-
-    /// Reload configuration from disk, preserving running processes
-    fn reload_config(&mut self) {
-        use crate::load_config;
-        use log::info;
-
-        let config_str = self.config_path.to_string_lossy().to_string();
-        match load_config(Some(&config_str)) {
-            Ok((new_config, new_cwd, _)) => {
-                // Collect IDs that still exist in new config
-                let new_ids: std::collections::HashSet<String> = new_config
-                    .all_commands()
-                    .into_iter()
-                    .map(|c| c.id.clone())
-                    .collect();
-
-                // Remove processes for deleted commands
-                self.processes.retain(|id, _| new_ids.contains(id));
-                self.error_messages.retain(|id, _| new_ids.contains(id));
-                self.expanded.retain(|id, _| new_ids.contains(id));
-                self.selected.retain(|id, _| new_ids.contains(id));
-                self.pending_deps.retain(|id, _| new_ids.contains(id));
-
-                self.config = new_config;
-                self.cwd = new_cwd;
-                self.apply_always_selection();
-                self.spawn_git_selection();
-                info!("Configuration reloaded successfully");
-            }
-            Err(e) => {
-                error!("Failed to reload config: {e}");
             }
         }
     }
@@ -898,7 +853,7 @@ mod tests {
     #[test]
     fn test_flatten_group_renders_correct_tree() {
         let config = make_test_tree();
-        let app = App::new(config, PathBuf::new(), PathBuf::new(), LogBuffer::new());
+        let app = App::new(config, PathBuf::new(), LogBuffer::new());
 
         let lines: Vec<String> = app.visible_nodes.iter().map(render_node_text).collect();
         let expected = vec![
