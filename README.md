@@ -82,6 +82,11 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `-c <path>`       | Path to config file                                             |
 | `--no-workspace`  | Disable workspace resolution (don't search for a parent root)   |
 | `--log-file`      | Write logs to a file                                            |
+| `--fail-fast`     | Stop on first failure (`check` only)                            |
+| `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
+| `--mute-success`  | Suppress output for passing commands (`check` only)             |
+| `--all`           | Include commands with `auto.check: false` (`check` only)        |
+| `--force`         | Overwrite existing hook (`init-hooks` only)                     |
 
 ## Configuration
 
@@ -131,6 +136,20 @@ commands:
         - "./src"
       regex:
         - "\\.rs$"
+```
+
+### Always auto-selection
+
+Mark commands that should always be selected, regardless of git changes or file watching.
+
+```yaml
+fnug_version: 0.1.0
+name: my-project
+commands:
+  - name: typecheck
+    cmd: cargo check
+    auto:
+      always: true
 ```
 
 ### Excluding commands from check mode
@@ -214,6 +233,57 @@ When run from a subdirectory that contains a `.fnug.yaml`, fnug automatically re
 ### Advanced example
 
 See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
+
+### Configuration reference
+
+#### Root fields
+
+| Field          | Type              | Description                                                       |
+| -------------- | ----------------- | ----------------------------------------------------------------- |
+| `fnug_version` | string            | Expected fnug version — warns on mismatch                         |
+| `name`         | string            | Display name for the root group                                   |
+| `workspace`    | bool / object     | Enable workspace mode (see [Workspace](#workspace))               |
+| `commands`     | list              | Top-level commands                                                |
+| `children`     | list              | Nested command groups                                             |
+| `cwd`          | string            | Working directory (inherited by children)                         |
+| `env`          | map               | Environment variables (inherited by children)                     |
+| `auto`         | object            | Default auto rules (inherited by children)                        |
+
+#### Command fields
+
+| Field        | Type              | Description                                                         |
+| ------------ | ----------------- | ------------------------------------------------------------------- |
+| `name`       | string            | Display name (required)                                             |
+| `cmd`        | string            | Shell command to run (required)                                     |
+| `id`         | string            | Custom identifier — defaults to the command name                    |
+| `cwd`        | string            | Working directory override                                          |
+| `env`        | map               | Extra environment variables                                         |
+| `auto`       | object            | Auto-selection rules (see below)                                    |
+| `depends_on` | list of strings   | Command IDs that must finish before this one runs                   |
+| `scrollback` | integer           | PTY scrollback buffer size (number of lines)                        |
+
+#### Group fields
+
+| Field      | Type              | Description                                                           |
+| ---------- | ----------------- | --------------------------------------------------------------------- |
+| `name`     | string            | Display name (required)                                               |
+| `id`       | string            | Custom identifier — defaults to the group name                        |
+| `cwd`      | string            | Working directory (inherited by children)                             |
+| `env`      | map               | Environment variables (inherited by children)                         |
+| `auto`     | object            | Default auto rules (inherited by children)                            |
+| `commands` | list              | Commands in this group                                                |
+| `children` | list              | Nested child groups                                                   |
+
+#### Auto fields
+
+| Field    | Type              | Description                                                             |
+| -------- | ----------------- | ----------------------------------------------------------------------- |
+| `git`    | bool              | Select when git-changed files match `path`/`regex`                      |
+| `watch`  | bool              | Select when watched files match `path`/`regex`                          |
+| `always` | bool              | Always selected regardless of changes                                   |
+| `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`)                        |
+| `regex`  | list of strings   | Regex patterns to match against file paths (e.g. `"\\.rs$"`)           |
+| `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
 
 ## Keyboard Shortcuts
 
