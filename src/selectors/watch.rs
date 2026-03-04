@@ -23,6 +23,7 @@ fn commands_for_paths<'a>(
     paths: &[PathBuf],
     path_map: &'a HashMap<PathBuf, Vec<Command>>,
 ) -> Vec<&'a Command> {
+    let mut seen = std::collections::HashSet::new();
     paths
         .iter()
         .flat_map(|path| {
@@ -35,6 +36,7 @@ fn commands_for_paths<'a>(
                         .filter(move |cmd| cmd.auto.regex.iter().any(|re| re.is_match(&path_str)))
                 })
         })
+        .filter(|cmd| seen.insert(cmd.id.clone()))
         .collect()
 }
 
@@ -229,6 +231,8 @@ mod tests {
         ];
         let matching_commands = commands_for_paths(&changed_paths, &path_map);
 
-        assert_eq!(matching_commands.len(), 2);
+        // Same command matches both .rs and .toml, but should be deduplicated
+        assert_eq!(matching_commands.len(), 1);
+        assert_eq!(matching_commands[0].name, "test1");
     }
 }

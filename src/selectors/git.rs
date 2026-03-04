@@ -62,6 +62,9 @@ fn command_has_changes(
             .map(|change| repo_path.join(change))
             .filter(|change| change.starts_with(path))
             .any(|change| {
+                if cmd.auto.regex.is_empty() {
+                    return true;
+                }
                 let s = change.to_string_lossy();
                 cmd.auto.regex.iter().any(|pattern| pattern.is_match(&s))
             });
