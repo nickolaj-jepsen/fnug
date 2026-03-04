@@ -13,17 +13,6 @@ impl App {
         reason = "key handler covers all keyboard shortcuts in one match"
     )]
     pub fn handle_key(&mut self, key: KeyEvent, terminal_area: Rect) {
-        // Global keys
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
-            return;
-        }
-
-        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.fullscreen = !self.fullscreen;
-            return;
-        }
-
         // Context menu navigation
         if self.context_menu.is_some() {
             match key.code {
@@ -43,7 +32,7 @@ impl App {
             return;
         }
 
-        // If terminal is focused and the active process is interactive, forward to PTY
+        // If terminal is focused, forward keys to PTY (including Ctrl+C, Ctrl+R)
         if matches!(self.focus, Focus::Terminal) {
             if key.code == KeyCode::Esc {
                 self.focus = Focus::Tree;
@@ -59,6 +48,17 @@ impl App {
                 }
                 return;
             }
+        }
+
+        // Global keys (only when terminal is not focused)
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return;
+        }
+
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.fullscreen = !self.fullscreen;
+            return;
         }
 
         // Phase 1: Search editing mode — typing in search bar
