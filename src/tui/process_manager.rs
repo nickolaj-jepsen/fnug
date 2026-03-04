@@ -147,15 +147,10 @@ impl App {
         self.mark_tree_dirty();
     }
 
-    /// Clear a command's terminal
+    /// Clear a command's terminal and kill the process if running
     pub fn clear_command(&mut self, cmd_id: &str) {
         if let Some(proc) = self.processes.remove(cmd_id) {
-            if let Err(e) = proc.terminal.clear() {
-                warn!("Failed to clear terminal '{cmd_id}': {e}");
-            }
-            for handle in proc.task_handles {
-                handle.abort();
-            }
+            proc.kill_and_abort(cmd_id);
         }
         self.mark_tree_dirty();
     }
