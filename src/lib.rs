@@ -24,6 +24,7 @@ pub mod pty;
 pub mod selectors;
 pub mod theme;
 pub mod tui;
+pub mod workspace;
 
 /// Load configuration from a file (or auto-detect), returning the root `CommandGroup` and cwd.
 ///
@@ -31,7 +32,10 @@ pub mod tui;
 ///
 /// Returns `ConfigError` if the config file is not found, cannot be parsed,
 /// contains invalid values, or references non-existent directories.
-pub fn load_config(config_file: Option<&str>) -> Result<(CommandGroup, PathBuf), ConfigError> {
+pub fn load_config(
+    config_file: Option<&str>,
+    no_workspace: bool,
+) -> Result<(CommandGroup, PathBuf), ConfigError> {
     let config_path = match config_file {
         Some(file) => {
             let config_path = PathBuf::from(file);
@@ -42,6 +46,14 @@ pub fn load_config(config_file: Option<&str>) -> Result<(CommandGroup, PathBuf),
         }
         None => Config::find_config()?,
     };
+
+    // If workspace resolution is enabled, check for a parent workspace root
+    let config_path = if no_workspace {
+        config_path
+    } else {
+        find_workspace_root(&config_path)?.unwrap_or(config_path)
+    };
+
     let cwd = config_path
         .parent()
         .ok_or_else(|| ConfigError::ConfigNotFound(config_path.clone()))?
@@ -51,13 +63,50 @@ pub fn load_config(config_file: Option<&str>) -> Result<(CommandGroup, PathBuf),
         config_path.display(),
         cwd.display()
     );
-    let parsed = Config::from_file(&config_path)?;
+    let mut parsed = Config::from_file(&config_path)?;
     validate_version(&parsed.fnug_version);
+
+    // Discover and merge workspace sub-configs before converting
+    if let Some(ref ws) = parsed.workspace {
+        workspace::discover_and_merge(ws, &cwd, &mut parsed.root)?;
+    }
+
     let mut config: CommandGroup = parsed.root.try_into()?;
     validate_tree(&config)?;
     validate_dependencies(&config)?;
     config.inherit(&Inheritance::from(cwd.clone()))?;
     Ok((config, cwd))
+}
+
+/// Search upward from a config file's directory for a parent config with `workspace` enabled.
+/// Returns `Some(parent_config_path)` if found, `None` otherwise.
+fn find_workspace_root(config_path: &std::path::Path) -> Result<Option<PathBuf>, ConfigError> {
+    let config_dir = config_path
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .ok_or_else(|| ConfigError::ConfigNotFound(config_path.to_path_buf()))?;
+
+    let mut search_dir = config_dir.clone();
+    while search_dir.pop() {
+        if let Some(candidate) = config_file::find_config_in_dir(&search_dir) {
+            let parsed = Config::from_file(&candidate)?;
+            if matches!(
+                parsed.workspace,
+                Some(
+                    config_file::WorkspaceConfig::Enabled(true)
+                        | config_file::WorkspaceConfig::Options(_)
+                )
+            ) {
+                debug!(
+                    "Found workspace root: {} (from {})",
+                    candidate.display(),
+                    config_path.display()
+                );
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Warn if the config's `fnug_version` doesn't match the binary version

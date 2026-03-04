@@ -46,6 +46,8 @@ pub enum ConfigError {
     DuplicateId(String),
     #[error("Invalid config: {0}")]
     Validation(String),
+    #[error("Workspace discovery error: {0}")]
+    Workspace(String),
 }
 
 /// Parse a list of regex pattern strings into compiled regexes.
@@ -120,6 +122,21 @@ impl TryFrom<ConfigCommand> for Command {
     }
 }
 
+/// Configuration for workspace discovery options
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkspaceOptions {
+    pub paths: Option<Vec<String>>,
+    pub max_depth: Option<usize>,
+}
+
+/// Workspace configuration: either a boolean or explicit options
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum WorkspaceConfig {
+    Enabled(bool),
+    Options(WorkspaceOptions),
+}
+
 /// Configuration for a group of commands
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ConfigCommandGroup {
@@ -164,12 +181,19 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub fnug_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceConfig>,
     #[serde(flatten)]
     pub root: ConfigCommandGroup,
 }
 
 /// List of supported configuration file names
-const FILENAMES: [&str; 3] = [".fnug.json", ".fnug.yaml", ".fnug.yml"];
+pub(crate) const FILENAMES: [&str; 3] = [".fnug.json", ".fnug.yaml", ".fnug.yml"];
+
+/// Find a config file in a specific directory, returning the first match.
+pub(crate) fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
+    FILENAMES.iter().map(|f| dir.join(f)).find(|p| p.exists())
+}
 
 impl Config {
     /// Loads and parses a configuration file.

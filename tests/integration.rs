@@ -9,7 +9,7 @@ fn write_config(dir: &std::path::Path, content: &str) {
 
 fn load_and_check(dir: &std::path::Path, fail_fast: bool) -> i32 {
     let path = dir.join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, cwd) = load_config(Some(&path)).unwrap();
+    let (config, cwd) = load_config(Some(&path), false).unwrap();
     fnug::check::run(&config, &cwd, fail_fast, false)
         .unwrap()
         .exit_code
@@ -31,7 +31,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, cwd) = load_config(Some(&path)).unwrap();
+    let (config, cwd) = load_config(Some(&path), false).unwrap();
     assert_eq!(config.name, "root");
     assert_eq!(config.commands.len(), 1);
     assert_eq!(config.commands[0].name, "test");
@@ -61,7 +61,7 @@ children:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, _) = load_config(Some(&path)).unwrap();
+    let (config, _) = load_config(Some(&path), false).unwrap();
     // Child group should inherit auto settings from parent
     let child = &config.children[0];
     assert_eq!(child.auto.git, Some(true));
@@ -86,7 +86,7 @@ children:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let result = load_config(Some(&path));
+    let result = load_config(Some(&path), false);
     assert!(result.is_err());
     match result.unwrap_err() {
         ConfigError::DuplicateId(id) => assert_eq!(id, "dup"),
@@ -116,7 +116,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let result = load_config(Some(&path));
+    let result = load_config(Some(&path), false);
     assert!(result.is_err());
     match result.unwrap_err() {
         ConfigError::Regex { pattern, .. } => assert_eq!(pattern, "[invalid"),
@@ -145,7 +145,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, _) = load_config(Some(&path)).unwrap();
+    let (config, _) = load_config(Some(&path), false).unwrap();
     let all_commands: Vec<_> = config.all_commands().into_iter().cloned().collect();
     let selected = fnug::selectors::get_selected_commands(all_commands).unwrap();
     // Only the always command should be selected
@@ -169,7 +169,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let result = load_config(Some(&path));
+    let result = load_config(Some(&path), false);
     assert!(result.is_err());
     match result.unwrap_err() {
         ConfigError::Validation(msg) => assert!(msg.contains("empty name"), "got: {msg}"),
@@ -193,7 +193,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let result = load_config(Some(&path));
+    let result = load_config(Some(&path), false);
     assert!(result.is_err());
     match result.unwrap_err() {
         ConfigError::Validation(msg) => assert!(msg.contains("empty cmd"), "got: {msg}"),
@@ -227,7 +227,7 @@ commands:
 "#,
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let (config, cwd) = load_config(Some(&path)).unwrap();
+    let (config, cwd) = load_config(Some(&path), false).unwrap();
     let app = App::new(config, cwd, LogBuffer::new());
 
     // root + g1 + cmd1 + cmd2 + cmd3 = 5 visible nodes
@@ -394,8 +394,8 @@ commands:
 
 // ─── init-hooks tests ───
 
-fn init_git_repo(dir: &std::path::Path) {
-    git2::Repository::init(dir).unwrap();
+fn init_git_repo(dir: &std::path::Path) -> git2::Repository {
+    git2::Repository::init(dir).unwrap()
 }
 
 #[test]
@@ -440,4 +440,278 @@ fn test_init_hooks_force_overwrites() {
 
     let hook_path = dir.path().join(".git/hooks/pre-commit");
     assert!(hook_path.exists());
+}
+
+// ─── workspace tests ───
+
+/// Helper: create a git repo with files added to the index.
+fn setup_git_workspace(dir: &std::path::Path, files: &[(&str, &str)]) {
+    let repo = init_git_repo(dir);
+    for (path, content) in files {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, content).unwrap();
+    }
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+}
+
+#[test]
+fn test_workspace_git_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_config = r#"
+fnug_version: "0.0.27"
+name: root
+id: root
+workspace: true
+commands:
+  - name: root-cmd
+    id: root-cmd
+    cmd: echo root
+"#;
+    let sub_config = r#"
+fnug_version: "0.0.27"
+name: sub-package
+id: sub-pkg
+commands:
+  - name: sub-cmd
+    id: sub-cmd
+    cmd: echo sub
+"#;
+    setup_git_workspace(
+        dir.path(),
+        &[
+            (".fnug.yaml", root_config),
+            ("packages/foo/.fnug.yaml", sub_config),
+        ],
+    );
+
+    let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
+    let (config, _) = load_config(Some(&path), false).unwrap();
+
+    assert_eq!(config.name, "root");
+    // Root should have the sub-package as a child group
+    assert_eq!(config.children.len(), 1);
+    assert_eq!(config.children[0].name, "sub-package");
+    assert_eq!(config.children[0].commands.len(), 1);
+    assert_eq!(config.children[0].commands[0].name, "sub-cmd");
+}
+
+#[test]
+fn test_workspace_glob_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_config = r#"
+fnug_version: "0.0.27"
+name: root
+id: root
+workspace:
+  paths:
+    - "./packages/*/"
+commands:
+  - name: root-cmd
+    id: root-cmd
+    cmd: echo root
+"#;
+    let sub_a = r#"
+fnug_version: "0.0.27"
+name: pkg-a
+id: pkg-a
+commands:
+  - name: cmd-a
+    id: cmd-a
+    cmd: echo a
+"#;
+    let sub_b = r#"
+fnug_version: "0.0.27"
+name: pkg-b
+id: pkg-b
+commands:
+  - name: cmd-b
+    id: cmd-b
+    cmd: echo b
+"#;
+    std::fs::create_dir_all(dir.path().join("packages/a")).unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/b")).unwrap();
+    write_config(dir.path(), root_config);
+    std::fs::write(dir.path().join("packages/a/.fnug.yaml"), sub_a).unwrap();
+    std::fs::write(dir.path().join("packages/b/.fnug.yaml"), sub_b).unwrap();
+
+    let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
+    let (config, _) = load_config(Some(&path), false).unwrap();
+
+    assert_eq!(config.name, "root");
+    assert_eq!(config.children.len(), 2);
+
+    let mut child_names: Vec<&str> = config.children.iter().map(|c| c.name.as_str()).collect();
+    child_names.sort();
+    assert_eq!(child_names, vec!["pkg-a", "pkg-b"]);
+}
+
+#[test]
+fn test_workspace_sub_config_inherits_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_config = r#"
+fnug_version: "0.0.27"
+name: root
+id: root
+workspace:
+  paths:
+    - "./packages/*/"
+commands:
+  - name: root-cmd
+    id: root-cmd
+    cmd: echo root
+"#;
+    let sub_config = r#"
+fnug_version: "0.0.27"
+name: sub
+id: sub
+commands:
+  - name: sub-cmd
+    id: sub-cmd
+    cmd: echo sub
+"#;
+    std::fs::create_dir_all(dir.path().join("packages/foo")).unwrap();
+    write_config(dir.path(), root_config);
+    std::fs::write(dir.path().join("packages/foo/.fnug.yaml"), sub_config).unwrap();
+
+    let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
+    let (config, _) = load_config(Some(&path), false).unwrap();
+
+    let sub_group = &config.children[0];
+    assert_eq!(sub_group.cwd, dir.path().join("packages/foo"));
+}
+
+#[test]
+fn test_workspace_duplicate_ids_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_config = r#"
+fnug_version: "0.0.27"
+name: root
+id: root
+workspace:
+  paths:
+    - "./packages/*/"
+commands:
+  - name: root-cmd
+    id: dup-id
+    cmd: echo root
+"#;
+    let sub_config = r#"
+fnug_version: "0.0.27"
+name: sub
+id: sub
+commands:
+  - name: sub-cmd
+    id: dup-id
+    cmd: echo sub
+"#;
+    std::fs::create_dir_all(dir.path().join("packages/foo")).unwrap();
+    write_config(dir.path(), root_config);
+    std::fs::write(dir.path().join("packages/foo/.fnug.yaml"), sub_config).unwrap();
+
+    let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
+    let result = load_config(Some(&path), false);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ConfigError::DuplicateId(id) => assert_eq!(id, "dup-id"),
+        other => panic!("Expected DuplicateId, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_workspace_no_sub_configs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_config = r#"
+fnug_version: "0.0.27"
+name: root
+id: root
+workspace: true
+commands:
+  - name: root-cmd
+    id: root-cmd
+    cmd: echo root
+"#;
+    setup_git_workspace(dir.path(), &[(".fnug.yaml", root_config)]);
+
+    let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
+    let (config, _) = load_config(Some(&path), false).unwrap();
+    assert_eq!(config.name, "root");
+    assert!(config.children.is_empty());
+}
+
+#[test]
+fn test_workspace_false_disables() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_config = r#"
+fnug_version: "0.0.27"
+name: root
+id: root
+workspace: false
+commands:
+  - name: root-cmd
+    id: root-cmd
+    cmd: echo root
+"#;
+    let sub_config = r#"
+fnug_version: "0.0.27"
+name: sub
+id: sub
+commands:
+  - name: sub-cmd
+    id: sub-cmd
+    cmd: echo sub
+"#;
+    setup_git_workspace(
+        dir.path(),
+        &[
+            (".fnug.yaml", root_config),
+            ("packages/foo/.fnug.yaml", sub_config),
+        ],
+    );
+
+    let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
+    let (config, _) = load_config(Some(&path), false).unwrap();
+    assert!(config.children.is_empty());
+}
+
+#[test]
+fn test_workspace_sub_config_workspace_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_config = r#"
+fnug_version: "0.0.27"
+name: root
+id: root
+workspace:
+  paths:
+    - "./packages/*/"
+commands:
+  - name: root-cmd
+    id: root-cmd
+    cmd: echo root
+"#;
+    // Sub-config also declares workspace — should be ignored
+    let sub_config = r#"
+fnug_version: "0.0.27"
+name: sub
+id: sub
+workspace: true
+commands:
+  - name: sub-cmd
+    id: sub-cmd
+    cmd: echo sub
+"#;
+    std::fs::create_dir_all(dir.path().join("packages/foo")).unwrap();
+    write_config(dir.path(), root_config);
+    std::fs::write(dir.path().join("packages/foo/.fnug.yaml"), sub_config).unwrap();
+
+    let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
+    let (config, _) = load_config(Some(&path), false).unwrap();
+
+    // Should still load fine, just the sub's workspace field is ignored
+    assert_eq!(config.children.len(), 1);
+    assert_eq!(config.children[0].name, "sub");
 }

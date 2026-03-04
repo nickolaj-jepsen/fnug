@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long)]
     log_file: Option<String>,
 
+    /// Disable workspace resolution (don't search for a parent workspace root)
+    #[arg(long)]
+    no_workspace: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -48,7 +52,7 @@ fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let (config, cwd) = load_config(cli.config.as_deref())?;
+    let (config, cwd) = load_config(cli.config.as_deref(), cli.no_workspace)?;
 
     // Dispatch subcommands
     let check_result = match cli.command {
