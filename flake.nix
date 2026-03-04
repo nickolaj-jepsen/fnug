@@ -68,7 +68,6 @@
       };
 
       perSystem = {
-        self',
         pkgs,
         system,
         ...
