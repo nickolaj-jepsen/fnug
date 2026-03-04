@@ -70,13 +70,9 @@ fn spawn_pty(command: &Command, size: TerminalSize) -> Result<SpawnedPty, Proces
     Ok((child, pair.master))
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Process variant uses fixed [u8; 1024] buffer; boxing adds indirection in hot path"
-)]
 #[derive(Debug)]
 enum TerminalUpdate {
-    Process([u8; 1024]),
+    Process(Vec<u8>),
     Resize(TerminalSize),
     Echo(Vec<u8>),
     Scroll(isize),
@@ -159,8 +155,8 @@ fn spawn_pty_reader(
                     debug!("PTY reader EOF");
                     break;
                 }
-                Ok(_) => {
-                    if update_tx.send(TerminalUpdate::Process(buf)).is_err() {
+                Ok(n) => {
+                    if update_tx.send(TerminalUpdate::Process(buf[..n].to_vec())).is_err() {
                         debug!("PTY reader: terminal update channel closed");
                         break;
                     }

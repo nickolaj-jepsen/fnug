@@ -12,7 +12,7 @@ impl From<&Command> for CommandBuilder {
         );
         let mut command_builder = CommandBuilder::new("sh");
         command_builder.args(["-c", &command.cmd]);
-        for (key, value) in std::env::vars() {
+        for (key, value) in std::env::vars_os() {
             command_builder.env(key, value);
         }
         for (key, value) in &command.env {
