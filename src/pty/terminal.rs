@@ -156,7 +156,10 @@ fn spawn_pty_reader(
                     break;
                 }
                 Ok(n) => {
-                    if update_tx.send(TerminalUpdate::Process(buf[..n].to_vec())).is_err() {
+                    if update_tx
+                        .send(TerminalUpdate::Process(buf[..n].to_vec()))
+                        .is_err()
+                    {
                         debug!("PTY reader: terminal update channel closed");
                         break;
                     }
