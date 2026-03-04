@@ -5,23 +5,21 @@
 
 [![CI](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
 [![Crates.io](https://img.shields.io/crates/v/fnug)](https://crates.io/crates/fnug)
+[![image](https://img.shields.io/pypi/v/fnug.svg)](https://pypi.python.org/pypi/fnug)
 
 Fnug is a TUI command runner that automatically selects and executes lint and test commands based on git changes or file watching. Think of it as a terminal multiplexer (like [tmux](https://github.com/tmux/tmux/wiki)), but purpose-built for running your dev commands side by side.
 
-<img width="1182" height="749" alt="image" src="https://github.com/user-attachments/assets/45e19cee-ab77-44a6-ac26-382c8adb76cf" />
+![Fnug demo](docs/demo.gif)
 
 ## Features
 
-- **TUI with full keyboard and mouse support** — navigate, select, and run commands from a terminal UI
 - **Git integration** — automatically select commands based on uncommitted file changes
 - **File watching** — monitor the file system and re-select commands when files change
 - **Terminal emulation with scrollback** — full PTY support for interactive commands and long output
-- **Headless mode** (`fnug check`) — run selected commands without the TUI, useful for CI and pre-commit hooks
+- **Headless mode** (`fnug check`) — run selected commands without the TUI, useful for CI
 - **Git hook integration** (`fnug init-hooks`) — install a pre-commit hook that runs `fnug check`
-- **Search/filter** — press `/` to filter the command tree
 - **Command dependencies** — define `depends_on` to control execution order
 - **Environment variables** — set per-command or per-group env vars
-- **Configurable scrollback** — set scrollback buffer size per command
 - **Nested command groups** — organize commands into a hierarchical tree with inherited settings
 
 ## Installation
@@ -30,6 +28,16 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 
 ```bash
 cargo install fnug
+```
+
+### From PyPI
+
+```bash
+# With uv
+uv tool install fnug
+
+# With pipx
+pipx install fnug
 ```
 
 ### From GitHub Releases
@@ -60,13 +68,11 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 ### Subcommands
 
-| Command | Description |
-|---------|-------------|
-| `fnug` | Launch the TUI |
-| `fnug check` | Run selected commands headlessly (exit code reflects pass/fail) |
-| `fnug check --fail-fast` | Stop on first failure |
-| `fnug init-hooks` | Install a git pre-commit hook that runs `fnug check` |
-| `fnug init-hooks --force` | Overwrite an existing pre-commit hook |
+| Command           | Description                                                     |
+| ----------------- | --------------------------------------------------------------- |
+| `fnug`            | Launch the TUI                                                  |
+| `fnug check`      | Run selected commands headlessly (exit code reflects pass/fail) |
+| `fnug init-hooks` | Install a git pre-commit hook that runs `fnug check`            |
 
 ## Configuration
 
@@ -149,26 +155,26 @@ See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
 
 ## Keyboard Shortcuts
 
-| Key | Context | Action |
-|-----|---------|--------|
-| `j` / `↓` | Tree | Move down |
-| `k` / `↑` | Tree | Move up |
-| `h` / `←` | Tree | Collapse group / Deselect command |
-| `l` / `→` | Tree | Expand group / Select command |
-| `Space` | Tree | Toggle expand/select |
-| `Enter` | Tree | Run all selected commands |
-| `r` | Tree | Run current command |
-| `s` | Tree | Stop current command |
-| `c` | Tree | Clear current command |
-| `g` | Tree | Git auto-select |
-| `/` | Tree | Search/filter commands |
-| `Esc` | Search | Clear search |
-| `L` | Tree | Toggle log panel |
-| `Tab` | Tree | Focus terminal |
-| `Esc` | Terminal | Back to tree |
-| `Ctrl+R` | Global | Toggle fullscreen |
-| `Ctrl+C` | Global | Quit |
-| `q` | Tree | Quit |
+| Key       | Context  | Action                            |
+| --------- | -------- | --------------------------------- |
+| `j` / `↓` | Tree     | Move down                         |
+| `k` / `↑` | Tree     | Move up                           |
+| `h` / `←` | Tree     | Collapse group / Deselect command |
+| `l` / `→` | Tree     | Expand group / Select command     |
+| `Space`   | Tree     | Toggle expand/select              |
+| `Enter`   | Tree     | Run all selected commands         |
+| `r`       | Tree     | Run current command               |
+| `s`       | Tree     | Stop current command              |
+| `c`       | Tree     | Clear current command             |
+| `g`       | Tree     | Git auto-select                   |
+| `/`       | Tree     | Search/filter commands            |
+| `Esc`     | Search   | Clear search                      |
+| `L`       | Tree     | Toggle log panel                  |
+| `Tab`     | Tree     | Focus terminal                    |
+| `Esc`     | Terminal | Back to tree                      |
+| `Ctrl+R`  | Global   | Toggle fullscreen                 |
+| `Ctrl+C`  | Global   | Quit                              |
+| `q`       | Tree     | Quit                              |
 
 ### Mouse
 
@@ -177,9 +183,4 @@ See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
 - **Click** the selection orb (●/○) or arrow (▼/▶) to toggle
 - **Drag** the separator between tree and terminal to resize
 - **Scroll wheel** in the terminal panel to scroll output
-
-## Demo
-
-Old version (pre 0.1.0)
-
-https://github.com/nickolaj-jepsen/fnug/assets/1039554/8f8a4d34-8beb-4fb4-9bbc-6fd0a4a384be
+- **Right-click** a command for a context menu with run/stop/clear options
