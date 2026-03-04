@@ -13,6 +13,8 @@ impl App {
         reason = "key handler covers all keyboard shortcuts in one match"
     )]
     pub fn handle_key(&mut self, key: KeyEvent, terminal_area: Rect) {
+        self.last_terminal_area = terminal_area;
+
         // Context menu navigation
         if self.context_menu.is_some() {
             match key.code {

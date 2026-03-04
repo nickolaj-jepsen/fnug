@@ -393,5 +393,13 @@ pub(crate) fn topo_sort<'a>(commands: &[&'a Command]) -> Vec<&'a Command> {
         }
     }
 
+    debug_assert_eq!(
+        result.len(),
+        commands.len(),
+        "topo_sort: dependency cycle detected — {} of {} commands emitted",
+        result.len(),
+        commands.len()
+    );
+
     result
 }

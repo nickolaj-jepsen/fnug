@@ -213,6 +213,8 @@ pub struct App {
     pub(super) pending_deps: HashMap<String, Vec<String>>,
     /// Active context menu (right-click)
     pub context_menu: Option<ContextMenu>,
+    /// Last known terminal area for dependency resolution
+    pub last_terminal_area: Rect,
     /// Handle for in-flight async git selection task
     git_selection_handle: Option<JoinHandle<()>>,
     /// Generation counter for staleness detection of git selection results
@@ -271,6 +273,7 @@ impl App {
             search: SearchState::Inactive,
             pending_deps: HashMap::new(),
             context_menu: None,
+            last_terminal_area: Rect::default(),
             git_selection_handle: None,
             git_selection_generation: 0,
         };
@@ -469,12 +472,11 @@ impl App {
         }
         for cmd_id in ready {
             self.pending_deps.remove(&cmd_id);
-            let terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
-            self.start_command(&cmd_id, terminal_area, false);
+            self.start_command(&cmd_id, self.last_terminal_area, false);
         }
     }
 
-    /// Propagate failure to commands waiting on a failed dependency
+    /// Propagate failure to commands waiting on a failed dependency (recursive)
     fn fail_dependents(&mut self, failed_id: &str) {
         let failed_id_owned = failed_id.to_string();
         let dependents: Vec<String> = self
@@ -493,7 +495,9 @@ impl App {
                 .find_command(failed_id)
                 .map_or_else(|| failed_id.to_string(), |c| c.name.clone());
             let msg = format!("Dependency '{failed_name}' failed");
-            self.error_messages.insert(cmd_id, msg);
+            self.error_messages.insert(cmd_id.clone(), msg);
+            // Recursively fail any commands that depend on this one
+            self.fail_dependents(&cmd_id);
         }
     }
 

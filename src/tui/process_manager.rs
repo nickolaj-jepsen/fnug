@@ -46,6 +46,8 @@ impl App {
     /// Pass `false` for background starts (dependency resolution, watcher
     /// triggers) so the user's current view is not disrupted.
     pub fn start_command(&mut self, cmd_id: &str, terminal_area: Rect, set_active: bool) {
+        self.last_terminal_area = terminal_area;
+
         let Some(cmd) = self.find_command(cmd_id) else {
             return;
         };
