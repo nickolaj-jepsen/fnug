@@ -21,6 +21,7 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 - **Command dependencies** — define `depends_on` to control execution order
 - **Environment variables** — set per-command or per-group env vars
 - **Nested command groups** — organize commands into a hierarchical tree with inherited settings
+- **Workspace support** — discover and merge `.fnug.yaml` files from subdirectories in mono-repos
 
 ## Installation
 
@@ -73,6 +74,14 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `fnug`            | Launch the TUI                                                  |
 | `fnug check`      | Run selected commands headlessly (exit code reflects pass/fail) |
 | `fnug init-hooks` | Install a git pre-commit hook that runs `fnug check`            |
+
+### Flags
+
+| Flag              | Description                                                     |
+| ----------------- | --------------------------------------------------------------- |
+| `-c <path>`       | Path to config file                                             |
+| `--no-workspace`  | Disable workspace resolution (don't search for a parent root)   |
+| `--log-file`      | Write logs to a file                                            |
 
 ## Configuration
 
@@ -148,6 +157,38 @@ children:
       - name: clippy
         cmd: cargo clippy
 ```
+
+### Workspace
+
+Workspace mode discovers `.fnug.yaml` files in subdirectories and merges them as child groups. This is useful for mono-repos where each package has its own config.
+
+When `workspace: true`, fnug walks the filesystem (skipping `.gitignore`'d and hidden directories) to find sub-configs. Files do not need to be git-tracked to be discovered.
+
+```yaml
+# Auto-discover sub-configs (walks up to 5 levels deep)
+fnug_version: 0.1.0
+name: my-monorepo
+workspace: true
+commands:
+  - name: root-lint
+    cmd: echo "root"
+```
+
+```yaml
+# Custom max scan depth
+workspace:
+  max_depth: 2
+```
+
+```yaml
+# Explicit glob patterns
+workspace:
+  paths:
+    - "./packages/*/"
+    - "./apps/*/"
+```
+
+When run from a subdirectory that contains a `.fnug.yaml`, fnug automatically resolves upward to the nearest workspace root. Use `--no-workspace` to disable this behavior.
 
 ### Advanced example
 

@@ -24,8 +24,9 @@ Fnug is a standalone Rust binary (Rust 1.93, edition 2024) with a ratatui-based 
 ### Module overview (`src/`)
 
 - **`bin/fnug.rs`** — Binary entry point: parses CLI args (clap), loads config, launches TUI or subcommands (`check`, `init-hooks`)
-- **`lib.rs`** — `load_config()`: finds/parses config, validates tree (duplicate IDs, empty names, dependency cycles), applies inheritance
+- **`lib.rs`** — `load_config()`: finds/parses config, resolves workspace root, validates tree (duplicate IDs, empty names, dependency cycles), applies inheritance
 - **`config_file.rs`** — Finds and parses `.fnug.yaml`/`.fnug.yml`/`.fnug.json` (serde)
+- **`workspace.rs`** — Workspace discovery for mono-repos: walks filesystem (respecting `.gitignore`) or expands glob patterns to find sub-configs, merges them as child `CommandGroup`s
 - **`check.rs`** — Headless command runner: selects commands, resolves `depends_on` with topological sort, runs sequentially, reports pass/fail/skip
 - **`init_hooks.rs`** — Installs a git pre-commit hook that runs `fnug check`
 - **`logger.rs`** — Custom `log` implementation: writes to a ring buffer (`LogBuffer`) and optional file, notifies TUI for redraws
@@ -60,6 +61,8 @@ Fnug is a standalone Rust binary (Rust 1.93, edition 2024) with a ratatui-based 
 ## Configuration
 
 Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from cwd upward. Config defines a tree of `CommandGroup`s containing `Command`s with optional `auto` rules (git, watch, always). Commands support `depends_on` for ordering, `env` for environment variables, and `scrollback` for PTY buffer size.
+
+Workspace mode (`workspace: true` or `workspace: { paths: [...] }`) discovers sub-configs in subdirectories and merges them as child groups. Git-based discovery walks the filesystem (skipping `.gitignore`'d and hidden dirs) up to `max_depth` (default 5). When run from a subdirectory, fnug automatically resolves upward to the nearest workspace root. Use `--no-workspace` to disable this.
 
 ## Releasing
 
