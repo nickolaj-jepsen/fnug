@@ -56,6 +56,14 @@ class CommandGroup:
 
 
 @dataclass(slots=True, kw_only=True)
+class WorkspaceOptions:
+    """Workspace discovery options for mono-repo setups."""
+
+    paths: list[str] | None = None
+    max_depth: int | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class Config:
     """Root configuration for a .fnug.yaml file."""
 
@@ -67,6 +75,7 @@ class Config:
     commands: list[Command] | None = None
     children: list[CommandGroup] | None = None
     env: dict[str, str] | None = None
+    workspace: bool | WorkspaceOptions | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a dictionary with None values stripped."""
