@@ -1,6 +1,6 @@
 mod check;
-mod init_hooks;
 mod mcp;
+mod setup;
 mod tui;
 
 use std::process::ExitCode;
@@ -43,8 +43,8 @@ fn parse_level_filter(s: &str) -> Result<LevelFilter, String> {
 enum Commands {
     /// Run selected commands headlessly (useful for pre-commit hooks)
     Check(check::CheckArgs),
-    /// Install a git pre-commit hook that runs `fnug check`
-    InitHooks(init_hooks::InitHooksArgs),
+    /// Interactive setup wizard for git hooks and MCP server configuration
+    Setup(setup::SetupArgs),
     /// Start an MCP server over stdio
     Mcp,
 }
@@ -63,6 +63,16 @@ fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    // Setup can work without a config file
+    if let Some(Commands::Setup(ref args)) = cli.command {
+        let config_result = load_config(cli.config.as_deref(), cli.no_workspace);
+        let (config, cwd) = match config_result {
+            Ok((config, cwd)) => (Some(config), cwd),
+            Err(_) => (None, std::env::current_dir()?),
+        };
+        return setup::run(args, &cwd, config.as_ref());
+    }
+
     let (config, cwd) = load_config(cli.config.as_deref(), cli.no_workspace)?;
 
     // Dispatch subcommands
@@ -71,8 +81,8 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             check::CheckOutcome::Done(code) => return Ok(code),
             check::CheckOutcome::OpenTui(result) => Some(result),
         },
-        Some(Commands::InitHooks(ref args)) => return init_hooks::run(args, &cwd),
         Some(Commands::Mcp) => return mcp::run(config, cwd).await,
+        Some(Commands::Setup(_)) => unreachable!(),
         None => None,
     };
 

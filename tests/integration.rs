@@ -392,21 +392,23 @@ commands:
     assert!(!marker.exists(), "second command should not have run");
 }
 
-// ─── init-hooks tests ───
+// ─── setup hooks tests ───
 
 fn init_git_repo(dir: &std::path::Path) -> git2::Repository {
     git2::Repository::init(dir).unwrap()
 }
 
 #[test]
-fn test_init_hooks_creates_hook() {
+fn test_setup_hooks_install() {
     let dir = tempfile::tempdir().unwrap();
     init_git_repo(dir.path());
 
-    fnug::init_hooks::run(&dir.path().to_path_buf(), false).unwrap();
+    assert!(!fnug::setup::hooks::is_installed(dir.path()));
+    fnug::setup::hooks::install(dir.path(), false).unwrap();
 
     let hook_path = dir.path().join(".git/hooks/pre-commit");
     assert!(hook_path.exists());
+    assert!(fnug::setup::hooks::is_installed(dir.path()));
 
     #[cfg(unix)]
     {
@@ -416,30 +418,169 @@ fn test_init_hooks_creates_hook() {
     }
 
     let contents = std::fs::read_to_string(&hook_path).unwrap();
-    assert!(contents.contains("fnug check --fail-fast"));
+    assert!(contents.contains("fnug check --fail-fast --mute-success"));
+    assert!(!contents.contains("--no-workspace"));
 }
 
 #[test]
-fn test_init_hooks_refuses_overwrite() {
+fn test_setup_hooks_install_no_workspace() {
     let dir = tempfile::tempdir().unwrap();
     init_git_repo(dir.path());
 
-    fnug::init_hooks::run(&dir.path().to_path_buf(), false).unwrap();
-    let result = fnug::init_hooks::run(&dir.path().to_path_buf(), false);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("already exists"));
+    fnug::setup::hooks::install(dir.path(), true).unwrap();
+
+    let contents = std::fs::read_to_string(dir.path().join(".git/hooks/pre-commit")).unwrap();
+    assert!(contents.contains("--no-workspace"));
 }
 
 #[test]
-fn test_init_hooks_force_overwrites() {
+fn test_setup_hooks_remove() {
     let dir = tempfile::tempdir().unwrap();
     init_git_repo(dir.path());
 
-    fnug::init_hooks::run(&dir.path().to_path_buf(), false).unwrap();
-    fnug::init_hooks::run(&dir.path().to_path_buf(), true).unwrap();
+    fnug::setup::hooks::install(dir.path(), false).unwrap();
+    assert!(fnug::setup::hooks::is_installed(dir.path()));
+
+    fnug::setup::hooks::remove(dir.path()).unwrap();
+    assert!(!fnug::setup::hooks::is_installed(dir.path()));
+    assert!(!dir.path().join(".git/hooks/pre-commit").exists());
+}
+
+#[test]
+fn test_setup_hooks_reinstall() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    fnug::setup::hooks::install(dir.path(), false).unwrap();
+    fnug::setup::hooks::install(dir.path(), false).unwrap();
 
     let hook_path = dir.path().join(".git/hooks/pre-commit");
     assert!(hook_path.exists());
+    // Should not duplicate fnug lines
+    let contents = std::fs::read_to_string(&hook_path).unwrap();
+    assert_eq!(contents.matches("# fnug").count(), 1);
+}
+
+#[test]
+fn test_setup_hooks_preserves_existing_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Simulate an existing hook (e.g. husky)
+    let hook_path = dir.path().join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+    std::fs::write(&hook_path, "#!/bin/sh\nnpx lint-staged\n").unwrap();
+
+    fnug::setup::hooks::install(dir.path(), false).unwrap();
+
+    let contents = std::fs::read_to_string(&hook_path).unwrap();
+    assert!(
+        contents.contains("npx lint-staged"),
+        "existing hook should be preserved"
+    );
+    assert!(contents.contains("fnug check"), "fnug should be appended");
+}
+
+#[test]
+fn test_setup_hooks_remove_preserves_other_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Create a hook with both fnug and other content
+    let hook_path = dir.path().join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+    std::fs::write(&hook_path, "#!/bin/sh\nnpx lint-staged\n").unwrap();
+
+    fnug::setup::hooks::install(dir.path(), false).unwrap();
+    fnug::setup::hooks::remove(dir.path()).unwrap();
+
+    // File should still exist with the other hook content
+    assert!(hook_path.exists());
+    let contents = std::fs::read_to_string(&hook_path).unwrap();
+    assert!(
+        contents.contains("npx lint-staged"),
+        "other hook should be preserved"
+    );
+    assert!(!contents.contains("fnug"), "fnug lines should be removed");
+}
+
+// ─── setup MCP tests ───
+
+use fnug::setup::mcp::Editor;
+
+#[test]
+fn test_setup_mcp_install_and_detect() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for editor in Editor::ALL {
+        assert!(!editor.is_installed(dir.path()));
+        editor.install(dir.path()).unwrap();
+        assert!(editor.is_installed(dir.path()));
+    }
+}
+
+#[test]
+fn test_setup_mcp_remove_deletes_empty_file() {
+    let dir = tempfile::tempdir().unwrap();
+
+    Editor::ClaudeCode.install(dir.path()).unwrap();
+    Editor::ClaudeCode.remove(dir.path()).unwrap();
+
+    assert!(!Editor::ClaudeCode.is_installed(dir.path()));
+    assert!(!dir.path().join(".mcp.json").exists());
+}
+
+#[test]
+fn test_setup_mcp_remove_cleans_empty_dir() {
+    let dir = tempfile::tempdir().unwrap();
+
+    Editor::VsCode.install(dir.path()).unwrap();
+    assert!(dir.path().join(".vscode/mcp.json").exists());
+
+    Editor::VsCode.remove(dir.path()).unwrap();
+    assert!(!dir.path().join(".vscode/mcp.json").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_setup_mcp_preserves_other_entries() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Write a config with an existing server
+    let path = dir.path().join(".mcp.json");
+    std::fs::write(&path, r#"{"mcpServers": {"other": {"command": "other"}}}"#).unwrap();
+
+    Editor::ClaudeCode.install(dir.path()).unwrap();
+    assert!(Editor::ClaudeCode.is_installed(dir.path()));
+
+    Editor::ClaudeCode.remove(dir.path()).unwrap();
+    assert!(!Editor::ClaudeCode.is_installed(dir.path()));
+    // File should still exist with the other server
+    assert!(path.exists());
+    let content: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(content.get("mcpServers").unwrap().get("other").is_some());
+}
+
+#[test]
+fn test_setup_mcp_remove_with_empty_inputs_array() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Simulate VS Code adding an empty "inputs" array alongside servers
+    let vscode_dir = dir.path().join(".vscode");
+    std::fs::create_dir_all(&vscode_dir).unwrap();
+    std::fs::write(
+        vscode_dir.join("mcp.json"),
+        r#"{"inputs": [], "servers": {"fnug": {"type": "stdio", "command": "fnug", "args": ["mcp"]}}}"#,
+    )
+    .unwrap();
+
+    assert!(Editor::VsCode.is_installed(dir.path()));
+    Editor::VsCode.remove(dir.path()).unwrap();
+
+    // File and dir should be cleaned up since only empty scaffolding remains
+    assert!(!vscode_dir.join("mcp.json").exists());
+    assert!(!vscode_dir.exists());
 }
 
 // ─── workspace tests ───
