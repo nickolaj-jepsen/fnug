@@ -14,6 +14,7 @@ pub enum ToolbarAction {
     Run,
     Stop,
     Clear,
+    Copy,
     GitSelect,
     ToggleFullscreen,
     FocusTerminal,
@@ -116,7 +117,7 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
                     if matches!(status, CommandStatus::Running) {
                         shortcuts.push(Shortcut::new("S", "Stop", ToolbarAction::Stop));
                     }
-                    shortcuts.push(Shortcut::new("C", "Clear", ToolbarAction::Clear));
+                    shortcuts.push(Shortcut::new("C", "Copy", ToolbarAction::Copy));
                 }
                 Some(NodeKind::Group {
                     selected, total, ..

@@ -683,6 +683,9 @@ impl App {
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Stop) => {
                 self.stop_command(id);
             }
+            (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Copy) => {
+                self.copy_command_output(id);
+            }
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Clear) => {
                 self.clear_command(id);
             }
@@ -712,6 +715,11 @@ impl App {
             (ContextMenuTarget::Terminal, ContextMenuAction::Stop) => {
                 if let Some(id) = self.active_terminal_id.clone() {
                     self.stop_command(&id);
+                }
+            }
+            (ContextMenuTarget::Terminal, ContextMenuAction::Copy) => {
+                if let Some(id) = self.active_terminal_id.clone() {
+                    self.copy_command_output(&id);
                 }
             }
             (ContextMenuTarget::Terminal, ContextMenuAction::Clear) => {
@@ -749,6 +757,11 @@ impl App {
             ToolbarAction::Clear => {
                 if let Some(id) = self.current_command_id() {
                     self.clear_command(&id);
+                }
+            }
+            ToolbarAction::Copy => {
+                if let Some(id) = self.current_command_id() {
+                    self.copy_command_output(&id);
                 }
             }
             ToolbarAction::GitSelect => {

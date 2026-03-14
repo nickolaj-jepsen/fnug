@@ -1,13 +1,64 @@
-use log::{debug, error, info, warn};
-use ratatui::layout::Rect;
+use std::io::Write;
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
+
+use log::{debug, error, info, warn};
+use ratatui::layout::Rect;
 
 use crate::pty::terminal::{Terminal, TerminalSize};
 use crate::pty::{format_failure_message, format_start_message, format_success_message};
 
 use super::app::{App, AppEvent, CommandStatus, ProcessInstance};
 use super::tree_state::find_group_in_group;
+
+/// Copy text to the system clipboard using platform-native commands.
+fn set_clipboard(text: &str) -> Result<(), String> {
+    // Try clipboard commands in order of preference
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+
+    for (cmd, args) in candidates {
+        let result = StdCommand::new(cmd)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn();
+
+        match result {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take()
+                    && let Err(e) = stdin.write_all(text.as_bytes())
+                {
+                    return Err(format!("{cmd}: failed to write: {e}"));
+                }
+                match child.wait() {
+                    Ok(status) if status.success() => return Ok(()),
+                    Ok(status) => {
+                        return Err(format!("{cmd}: exited with {status}"));
+                    }
+                    Err(e) => {
+                        return Err(format!("{cmd}: failed to wait: {e}"));
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!("{cmd}: {e}"));
+            }
+        }
+    }
+
+    Err("no clipboard command found (tried wl-copy, xclip, xsel)".into())
+}
 
 impl App {
     fn spawn_exit_watcher(
@@ -145,6 +196,40 @@ impl App {
             warn!("Failed to kill process '{cmd_id}': {e}");
         }
         self.mark_tree_dirty();
+    }
+
+    /// Copy a command's terminal output to the system clipboard
+    pub fn copy_command_output(&self, cmd_id: &str) {
+        let Some(proc) = self.processes.get(cmd_id) else {
+            info!("No process found for '{cmd_id}', nothing to copy");
+            return;
+        };
+        let mut parser = proc.terminal.parser().lock();
+        let scrollback_len = parser.screen().scrollback_len();
+        let original_scrollback = parser.screen().scrollback();
+        parser.set_scrollback(scrollback_len);
+        let contents = parser.screen().contents();
+        parser.set_scrollback(original_scrollback);
+        drop(parser);
+
+        // Strip fnug's own echoed lines (start banner and result status)
+        let contents: String = contents
+            .lines()
+            .filter(|line| !line.contains('❱'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let contents = contents.trim().to_string();
+
+        let len = contents.len();
+        info!("Copying {len} bytes from '{cmd_id}' to clipboard");
+
+        std::thread::spawn(move || {
+            if let Err(e) = set_clipboard(&contents) {
+                log::error!("Failed to copy to clipboard: {e}");
+            } else {
+                log::info!("Copied to clipboard successfully");
+            }
+        });
     }
 
     /// Clear a command's terminal and kill the process if running

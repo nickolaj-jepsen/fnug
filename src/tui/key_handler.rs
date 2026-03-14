@@ -187,7 +187,7 @@ impl App {
             }
             KeyCode::Char('c') => {
                 if let Some(id) = self.current_command_id() {
-                    self.clear_command(&id);
+                    self.copy_command_output(&id);
                 }
             }
             KeyCode::Char('/') => {

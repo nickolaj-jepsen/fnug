@@ -38,6 +38,7 @@ pub enum ContextMenuAction {
     Restart,
     Stop,
     Clear,
+    Copy,
     ScrollToTop,
     ScrollToBottom,
 }
@@ -200,8 +201,14 @@ pub fn build_command_menu(selected: bool, status: &CommandStatus) -> Vec<Context
             enabled: is_running,
         },
         ContextMenuItem {
-            label: "Clear",
+            label: "Copy output",
             hint: "c",
+            action: ContextMenuAction::Copy,
+            enabled: has_finished || is_running,
+        },
+        ContextMenuItem {
+            label: "Clear",
+            hint: "",
             action: ContextMenuAction::Clear,
             enabled: true,
         },
@@ -253,8 +260,14 @@ pub fn build_terminal_menu(
     }
 
     items.push(ContextMenuItem {
-        label: "Clear",
+        label: "Copy output",
         hint: "c",
+        action: ContextMenuAction::Copy,
+        enabled: has_process,
+    });
+    items.push(ContextMenuItem {
+        label: "Clear",
+        hint: "",
         action: ContextMenuAction::Clear,
         enabled: has_process,
     });
@@ -476,8 +489,10 @@ mod tests {
         let items = build_terminal_menu(false, false, None);
         assert_eq!(items[0].label, "Run");
         assert!(items[0].enabled);
-        assert_eq!(items[1].label, "Clear");
-        assert!(!items[1].enabled); // Clear disabled when no process
+        assert_eq!(items[1].label, "Copy output");
+        assert!(!items[1].enabled); // Copy disabled when no process
+        assert_eq!(items[2].label, "Clear");
+        assert!(!items[2].enabled); // Clear disabled when no process
     }
 
     #[test]
