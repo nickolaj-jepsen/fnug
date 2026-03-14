@@ -4,6 +4,7 @@ pub(crate) mod event;
 mod key_handler;
 pub mod log_state;
 mod mouse_handler;
+pub(crate) mod overlay;
 mod process_manager;
 mod render;
 pub(crate) mod terminal_widget;

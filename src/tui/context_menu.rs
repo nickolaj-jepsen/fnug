@@ -332,53 +332,8 @@ impl Widget for &ContextMenu {
         }
         let rect = Rect::new(x, y, w, h);
 
-        // Dim entire background to ~50% by overwriting fg colors with DarkGray
-        let dim_style = Style::default()
-            .fg(Color::DarkGray)
-            .remove_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-        for row in area.y..area.bottom() {
-            for col in area.x..area.right() {
-                buf[(col, row)].set_style(dim_style);
-            }
-        }
-
-        // Clear menu background (reset any inherited styles like UNDERLINED)
-        let reset_style = Style::reset().bg(Color::Rgb(30, 30, 30)).fg(Color::White);
-        for row in rect.y..rect.bottom() {
-            for col in rect.x..rect.right() {
-                buf[(col, row)].set_style(reset_style).set_symbol(" ");
-            }
-        }
-
-        // Draw border
-        let border_style = Style::reset().fg(theme::ACCENT).bg(Color::Rgb(30, 30, 30));
-        // Top/bottom borders
-        for col in rect.x..rect.right() {
-            buf[(col, rect.y)].set_style(border_style).set_symbol("─");
-            buf[(col, rect.bottom() - 1)]
-                .set_style(border_style)
-                .set_symbol("─");
-        }
-        // Left/right borders
-        for row in rect.y..rect.bottom() {
-            buf[(rect.x, row)].set_style(border_style).set_symbol("│");
-            buf[(rect.right() - 1, row)]
-                .set_style(border_style)
-                .set_symbol("│");
-        }
-        // Corners
-        buf[(rect.x, rect.y)]
-            .set_style(border_style)
-            .set_symbol("┌");
-        buf[(rect.right() - 1, rect.y)]
-            .set_style(border_style)
-            .set_symbol("┐");
-        buf[(rect.x, rect.bottom() - 1)]
-            .set_style(border_style)
-            .set_symbol("└");
-        buf[(rect.right() - 1, rect.bottom() - 1)]
-            .set_style(border_style)
-            .set_symbol("┘");
+        super::overlay::dim_background(buf, area);
+        super::overlay::draw_bordered_panel(buf, rect);
 
         // Draw items
         let inner_x = rect.x + 1;
@@ -397,14 +352,16 @@ impl Widget for &ContextMenu {
             let style = if !item.enabled {
                 Style::reset()
                     .fg(Color::DarkGray)
-                    .bg(Color::Rgb(30, 30, 30))
+                    .bg(super::overlay::OVERLAY_BG)
             } else if is_selected {
                 Style::reset()
                     .fg(Color::White)
                     .bg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::reset().fg(Color::White).bg(Color::Rgb(30, 30, 30))
+                Style::reset()
+                    .fg(Color::White)
+                    .bg(super::overlay::OVERLAY_BG)
             };
 
             // Fill row background
@@ -416,11 +373,13 @@ impl Widget for &ContextMenu {
             let mut spans = vec![Span::raw(" "), Span::styled(item.label, style)];
             if !item.hint.is_empty() {
                 let hint_style = if is_selected && item.enabled {
-                    Style::reset().fg(Color::Rgb(30, 30, 30)).bg(theme::ACCENT)
+                    Style::reset()
+                        .fg(super::overlay::OVERLAY_BG)
+                        .bg(theme::ACCENT)
                 } else {
                     Style::reset()
                         .fg(Color::DarkGray)
-                        .bg(Color::Rgb(30, 30, 30))
+                        .bg(super::overlay::OVERLAY_BG)
                 };
                 // Pad between label and hint
                 let used = 1 + item.label.len() + item.hint.len() + 1;
