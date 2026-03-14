@@ -1,0 +1,15 @@
+---
+source: src/tui/tree_widget.rs
+expression: render_tree_text(&nodes)
+---
+▼ mono (3/6)
+├─▼ frontend (1/2)
+│ ├─● eslint ✔
+│ └─○ tsc
+├─▼ backend (2/3)
+│ ├─▼ lints (1/2)
+│ │ ├─● clippy ✔
+│ │ └─● fmt ✔
+│ └─○ cargo test ⧗
+└─▼ infra (0/1)
+  └─○ terraform validate

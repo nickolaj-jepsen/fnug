@@ -1,0 +1,8 @@
+---
+source: src/tui/tree_widget.rs
+expression: render_tree_text(&nodes)
+---
+▼ project (2/3)
+├─● lint
+├─● test
+└─○ build

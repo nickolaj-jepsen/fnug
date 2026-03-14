@@ -1,0 +1,9 @@
+---
+source: src/tui/tree_widget.rs
+expression: render_tree_text(&nodes)
+---
+▼ workspace (2/4)
+├─▶ rust (2/2)
+└─▼ python (0/2)
+  ├─○ ruff
+  └─○ mypy

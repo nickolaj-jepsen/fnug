@@ -1,0 +1,10 @@
+---
+source: src/tui/tree_widget.rs
+expression: render_tree_text(&nodes)
+---
+▼ ci (3/5)
+├─● lint ✔ (250ms)
+├─● test ⧗
+├─● build ✘
+├─○ deploy ◌
+└─○ notify ⚠

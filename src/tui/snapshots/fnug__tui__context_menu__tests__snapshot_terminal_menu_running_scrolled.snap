@@ -1,0 +1,10 @@
+---
+source: src/tui/context_menu.rs
+expression: render_menu_text(&items)
+---
+ Scroll to top
+ Scroll to bottom
+ Restart  [r]
+ Stop  [s]
+ Copy output  [c]
+ Clear

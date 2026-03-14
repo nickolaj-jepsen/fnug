@@ -44,6 +44,7 @@ strip = "symbols"
 
 [dev-dependencies]
 tempfile = "3.25.0"
+insta = "1"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

@@ -1,0 +1,10 @@
+---
+source: src/tui/context_menu.rs
+expression: render_menu_text(&items)
+---
+ Deselect  [Space]
+~Run  [r]
+ Restart
+ Stop  [s]
+ Copy output  [c]
+ Clear

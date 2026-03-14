@@ -359,6 +359,220 @@ mod tests {
         }
     }
 
+    /// Render a full tree to a multi-line string for snapshot testing.
+    fn render_tree_text(nodes: &[VisibleNode]) -> String {
+        nodes
+            .iter()
+            .map(render_node_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn group_node_with_status(
+        id: &str,
+        name: &str,
+        depth: usize,
+        is_last: bool,
+        ancestors: Vec<bool>,
+        expanded: bool,
+        success: u16,
+        running: u16,
+        failure: u16,
+        selected: u16,
+        total: u16,
+    ) -> VisibleNode {
+        VisibleNode {
+            id: id.to_string(),
+            depth,
+            is_last_sibling: is_last,
+            ancestor_is_last: ancestors,
+            kind: NodeKind::Group {
+                name: name.to_string(),
+                expanded,
+                success,
+                running,
+                failure,
+                selected,
+                total,
+            },
+        }
+    }
+
+    fn cmd_node_with_duration(
+        id: &str,
+        name: &str,
+        depth: usize,
+        is_last: bool,
+        ancestors: Vec<bool>,
+        selected: bool,
+        status: CommandStatus,
+        duration: Option<std::time::Duration>,
+    ) -> VisibleNode {
+        VisibleNode {
+            id: id.to_string(),
+            depth,
+            is_last_sibling: is_last,
+            ancestor_is_last: ancestors,
+            kind: NodeKind::Command {
+                name: name.to_string(),
+                selected,
+                status,
+                duration,
+            },
+        }
+    }
+
+    #[test]
+    fn test_snapshot_basic_tree() {
+        let nodes = vec![
+            group_node("root", "project", 0, true, vec![], true, 2, 3),
+            cmd_node("a", "lint", 1, false, vec![], true, CommandStatus::Pending),
+            cmd_node("b", "test", 1, false, vec![], true, CommandStatus::Pending),
+            cmd_node("c", "build", 1, true, vec![], false, CommandStatus::Pending),
+        ];
+        insta::assert_snapshot!(render_tree_text(&nodes));
+    }
+
+    #[test]
+    fn test_snapshot_status_indicators() {
+        let nodes = vec![
+            group_node_with_status("root", "ci", 0, true, vec![], true, 1, 1, 1, 3, 5),
+            cmd_node_with_duration(
+                "a",
+                "lint",
+                1,
+                false,
+                vec![],
+                true,
+                CommandStatus::Success,
+                Some(std::time::Duration::from_millis(250)),
+            ),
+            cmd_node("b", "test", 1, false, vec![], true, CommandStatus::Running),
+            cmd_node(
+                "c",
+                "build",
+                1,
+                false,
+                vec![],
+                true,
+                CommandStatus::Failure(1),
+            ),
+            cmd_node(
+                "d",
+                "deploy",
+                1,
+                false,
+                vec![],
+                false,
+                CommandStatus::WaitingForDeps,
+            ),
+            cmd_node(
+                "e",
+                "notify",
+                1,
+                true,
+                vec![],
+                false,
+                CommandStatus::Error("timeout".into()),
+            ),
+        ];
+        insta::assert_snapshot!(render_tree_text(&nodes));
+    }
+
+    #[test]
+    fn test_snapshot_collapsed_groups() {
+        let nodes = vec![
+            group_node("root", "workspace", 0, true, vec![], true, 2, 4),
+            group_node("rust", "rust", 1, false, vec![], false, 2, 2),
+            group_node("py", "python", 1, true, vec![], true, 0, 2),
+            cmd_node(
+                "a",
+                "ruff",
+                2,
+                false,
+                vec![true],
+                false,
+                CommandStatus::Pending,
+            ),
+            cmd_node(
+                "b",
+                "mypy",
+                2,
+                true,
+                vec![true],
+                false,
+                CommandStatus::Pending,
+            ),
+        ];
+        insta::assert_snapshot!(render_tree_text(&nodes));
+    }
+
+    #[test]
+    fn test_snapshot_nested_tree() {
+        let nodes = vec![
+            group_node("root", "mono", 0, true, vec![], true, 3, 6),
+            group_node("fe", "frontend", 1, false, vec![], true, 1, 2),
+            cmd_node(
+                "eslint",
+                "eslint",
+                2,
+                false,
+                vec![false],
+                true,
+                CommandStatus::Success,
+            ),
+            cmd_node(
+                "tsc",
+                "tsc",
+                2,
+                true,
+                vec![false],
+                false,
+                CommandStatus::Pending,
+            ),
+            group_node("be", "backend", 1, false, vec![], true, 2, 3),
+            group_node("lint", "lints", 2, false, vec![false], true, 1, 2),
+            cmd_node(
+                "clippy",
+                "clippy",
+                3,
+                false,
+                vec![false, false],
+                true,
+                CommandStatus::Success,
+            ),
+            cmd_node(
+                "fmt",
+                "fmt",
+                3,
+                true,
+                vec![false, false],
+                true,
+                CommandStatus::Success,
+            ),
+            cmd_node(
+                "cargo-test",
+                "cargo test",
+                2,
+                true,
+                vec![false],
+                false,
+                CommandStatus::Running,
+            ),
+            group_node("infra", "infra", 1, true, vec![], true, 0, 1),
+            cmd_node(
+                "tf",
+                "terraform validate",
+                2,
+                true,
+                vec![true],
+                false,
+                CommandStatus::Pending,
+            ),
+        ];
+        insta::assert_snapshot!(render_tree_text(&nodes));
+    }
+
     #[test]
     fn test_command_status_icons() {
         let success = cmd_node("s", "test", 1, false, vec![], false, CommandStatus::Success);

@@ -1,0 +1,8 @@
+---
+source: src/tui/context_menu.rs
+expression: render_menu_text(&items)
+---
+ Expand  [l]
+ Select all  [Space]
+ Run group  [r]
+~Run selected

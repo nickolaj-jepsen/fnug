@@ -441,6 +441,71 @@ impl Widget for &ContextMenu {
 mod tests {
     use super::*;
 
+    /// Render menu items as a text table for snapshot testing.
+    fn render_menu_text(items: &[ContextMenuItem]) -> String {
+        items
+            .iter()
+            .map(|item| {
+                let enabled = if item.enabled { " " } else { "~" };
+                let hint = if item.hint.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [{}]", item.hint)
+                };
+                format!("{enabled}{}{hint}", item.label)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_snapshot_group_menu_collapsed_none_selected() {
+        let items = build_group_menu(false, 0, 4);
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
+    #[test]
+    fn test_snapshot_group_menu_expanded_all_selected() {
+        let items = build_group_menu(true, 4, 4);
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
+    #[test]
+    fn test_snapshot_group_menu_partial_selection() {
+        let items = build_group_menu(true, 2, 4);
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
+    #[test]
+    fn test_snapshot_command_menu_pending() {
+        let items = build_command_menu(false, &CommandStatus::Pending);
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
+    #[test]
+    fn test_snapshot_command_menu_running_selected() {
+        let items = build_command_menu(true, &CommandStatus::Running);
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
+    #[test]
+    fn test_snapshot_command_menu_failed() {
+        let items = build_command_menu(false, &CommandStatus::Failure(1));
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
+    #[test]
+    fn test_snapshot_terminal_menu_no_process() {
+        let items = build_terminal_menu(false, false, None);
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
+    #[test]
+    fn test_snapshot_terminal_menu_running_scrolled() {
+        let items = build_terminal_menu(true, true, Some(&CommandStatus::Running));
+        insta::assert_snapshot!(render_menu_text(&items));
+    }
+
     #[test]
     fn test_build_group_menu_collapsed() {
         let items = build_group_menu(false, 0, 4);
