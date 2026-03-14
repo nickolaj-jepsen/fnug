@@ -12,3 +12,6 @@ dist/
 .venv/
 *.whl
 uv.lock
+
+# Claude
+.claude/worktrees/
