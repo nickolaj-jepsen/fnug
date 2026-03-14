@@ -1,101 +1,113 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## What is Fnug?
 
-Fnug is a TUI-based command runner / terminal multiplexer that auto-selects and executes lint/test commands based on git changes or file watching. It is a standalone Rust binary using ratatui for the terminal UI. It also provides a headless `check` mode for CI/pre-commit hooks.
+Fnug is a TUI command runner that auto-selects lint/test commands based on git changes or file watching. Standalone Rust binary (edition 2024, Rust 1.93) with a ratatui TUI. Also provides headless `check` mode for CI/pre-commit and an MCP server for editor integration.
 
-## Development Commands
+## Development
+
+Nix dev environment via `flake.nix` + `direnv`. All tools (rust toolchain, ruff, alejandra, maturin, etc.) are provided by the flake.
 
 ```bash
+# Rust
 cargo fmt                                              # Format
-cargo clippy --fix --allow-dirty --allow-staged        # Lint
+cargo clippy --fix --allow-dirty --allow-staged        # Lint (auto-fix)
+cargo clippy -- -D warnings                            # Lint (check only)
 cargo test                                             # Run tests
 cargo build                                            # Debug build
-cargo run --bin fnug                                   # Run TUI
-cargo run --bin fnug -- check                          # Run headless check
+
+# Nix
+alejandra --check .                                    # Format check
+statix check .                                         # Lint
+deadnix .                                              # Dead code check
+
+# Python (python/ directory)
+ruff check python/                                     # Lint
+ruff format --check python/                            # Format check
+
+# Run
+cargo run --bin fnug                                   # TUI mode
+cargo run --bin fnug -- check                          # Headless check
+cargo run --bin fnug -- setup                          # Interactive setup wizard
+cargo run --bin fnug -- mcp                            # MCP server (stdio)
 ```
+
+The project dogfoods itself — see `.fnug.yaml` for the lint/test config. The fnug MCP server is also available in this workspace for running checks.
 
 ## Architecture
 
-Fnug is a standalone Rust binary (Rust 1.93, edition 2024) with a ratatui-based TUI.
+### Source layout (`src/`)
 
-### Module overview (`src/`)
-
-- **`bin/fnug.rs`** — Binary entry point: parses CLI args (clap), loads config, launches TUI or subcommands (`check`, `init-hooks`)
-- **`lib.rs`** — `load_config()`: finds/parses config, resolves workspace root, validates tree (duplicate IDs, empty names, dependency cycles), applies inheritance
-- **`config_file.rs`** — Finds and parses `.fnug.yaml`/`.fnug.yml`/`.fnug.json` (serde)
-- **`workspace.rs`** — Workspace discovery for mono-repos: walks filesystem (respecting `.gitignore`) or expands glob patterns to find sub-configs, merges them as child `CommandGroup`s
-- **`check.rs`** — Headless command runner: selects commands, resolves `depends_on` with topological sort, runs sequentially, reports pass/fail/skip
-- **`init_hooks.rs`** — Installs a git pre-commit hook that runs `fnug check`
-- **`logger.rs`** — Custom `log` implementation: writes to a ring buffer (`LogBuffer`) and optional file, notifies TUI for redraws
-- **`theme.rs`** — Color constants for the UI (accent, status colors, toolbar palette)
-- **`commands/`** — Data structures:
-  - `command.rs` — `Command` struct (id, name, cmd, cwd, auto, env, depends_on, scrollback)
-  - `group.rs` — `CommandGroup` (nested tree of groups and commands)
-  - `auto.rs` — `Auto` rules (git, watch, always)
-  - `inherit.rs` — `Inheritable` trait for cascading settings from parent to children
-- **`selectors/`** — Auto-selection: `git.rs` (git2-based diff matching), `watch.rs` (notify file watcher), `always.rs`
-- **`pty/`** — `terminal.rs` spawns commands in a PTY via portable-pty with dedicated reader/writer threads feeding a vt100 parser; `messages.rs` formats styled PTY output; `command.rs` builds the shell command
-- **`tui/`** — ratatui UI:
-  - `app.rs` — Main app state + tokio event loop (handles watcher events, log updates)
-  - `render.rs` — Layout and rendering logic
-  - `key_handler.rs` / `mouse_handler.rs` — Input handling
-  - `process_manager.rs` — Starting/stopping/restarting command processes
-  - `tree_widget.rs` / `tree_state.rs` — Command tree navigation
-  - `terminal_widget.rs` — PTY output renderer
-  - `toolbar.rs` — Bottom toolbar with keybind hints
-  - `log_state.rs` — `LogBuffer` / `LogEntry` ring buffer for in-TUI log panel
-  - `event.rs` — Crossterm-to-app event translation
+| Directory/File | Purpose |
+|---|---|
+| `bin/fnug/` | Binary entry point: CLI (clap), dispatches to TUI, check, setup, or MCP |
+| `lib.rs` | `load_config()` — find/parse config, validate (duplicate IDs, cycles, empty names), apply inheritance |
+| `config_file.rs` | Config file discovery and serde parsing (`.fnug.yaml`/`.yml`/`.json`) |
+| `workspace.rs` | Workspace discovery: filesystem walk or glob expansion, merges sub-configs |
+| `check.rs` | Headless runner: dependency resolution (topological sort), sequential execution, exit codes |
+| `mcp.rs` | MCP server (rmcp): exposes `list_lints`, `run_all`, `run_lint` tools over stdio |
+| `setup/` | Interactive wizard: git hook install/remove, MCP editor config (nvim, vscode, zed, cursor) |
+| `commands/` | Data model: `Command`, `CommandGroup`, `Auto` rules, `Inheritable` trait |
+| `selectors/` | Auto-selection logic: `git.rs` (git2 diff matching), `watch.rs` (notify), `always.rs` |
+| `pty/` | PTY management: spawns commands via portable-pty, reader/writer threads, vt100 parser |
+| `tui/` | ratatui UI: app state/event loop, rendering, input handling, tree widget, process manager |
+| `logger.rs` | Custom `log` impl: ring buffer for TUI log panel + optional file output |
+| `theme.rs` | Color constants |
 
 ### Key patterns
 
-- **Inheritance**: Settings (cwd, auto rules) cascade from parent `CommandGroup` to children via `Inheritable` trait
-- **Dependencies**: Commands can declare `depends_on` other commands; resolved via topological sort (Kahn's algorithm) in check mode
-- **PTY management**: Each command runs in its own PTY with dedicated reader/writer threads feeding a vt100 parser
-- **Watch channel**: Terminal output changes are broadcast via `tokio::sync::watch` to trigger UI redraws
-- **Logging**: Custom `log` crate logger writes to a shared ring buffer displayed in a TUI log panel, with optional file output
-- **Async runtime**: Tokio multi-thread runtime drives the event loop, signal handling, and process management
+- **Inheritance** — Settings (cwd, auto rules) cascade parent→child via `Inheritable` trait
+- **Dependencies** — `depends_on` resolved via topological sort (Kahn's algorithm) in check mode
+- **PTY** — Each command gets its own PTY with dedicated reader/writer threads feeding a vt100 parser
+- **Async** — Tokio multi-thread runtime for event loop, signals, and process management
+- **Watch channel** — `tokio::sync::watch` broadcasts PTY output changes to trigger UI redraws
+
+## Testing
+
+Integration tests live in `tests/integration.rs`. Pattern: write config to a `tempfile::tempdir()`, call `load_config()` or `check::run()`, assert results.
+
+```rust
+let dir = tempfile::tempdir().unwrap();
+write_config(dir.path(), r#"..."#);
+let (config, cwd) = load_config(Some(&path), false).unwrap();
+```
+
+Unit tests for validation logic are in `lib.rs` (`#[cfg(test)]` module).
 
 ## Configuration
 
-Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from cwd upward. Config defines a tree of `CommandGroup`s containing `Command`s with optional `auto` rules (git, watch, always). Commands support `depends_on` for ordering, `env` for environment variables, and `scrollback` for PTY buffer size.
+Fnug searches for `.fnug.yaml`/`.yml`/`.json` from cwd upward. Config is a tree of `CommandGroup`s containing `Command`s with optional `auto` rules (git, watch, always). Commands support `depends_on`, `env`, and `scrollback`.
 
-Workspace mode (`workspace: true` or `workspace: { paths: [...] }`) discovers sub-configs in subdirectories and merges them as child groups. Git-based discovery walks the filesystem (skipping `.gitignore`'d and hidden dirs) up to `max_depth` (default 5). When run from a subdirectory, fnug automatically resolves upward to the nearest workspace root. Use `--no-workspace` to disable this.
+Workspace mode (`workspace: true` or `workspace: { paths: [...] }`) discovers sub-configs in subdirectories. When run from a subdirectory, fnug resolves upward to the nearest workspace root. Use `--no-workspace` to disable.
 
 ## Releasing
 
-Releases are automated via GitHub Actions (`.github/workflows/release.yaml`), triggered when the version in `Cargo.toml` changes on the `main` branch. The workflow automatically creates and pushes the `vX.Y.Z` git tag.
+Automated via GitHub Actions (`release.yaml`), triggered when the version in `Cargo.toml` changes on `main`. Publishes to crates.io (fnug-vt100 first, then fnug) and PyPI.
 
-1. Update the version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if the vendored crate changed)
-2. Run `cargo generate-lockfile` to update `Cargo.lock`
-3. Commit: `git commit -m "chore: bump version to X.Y.Z"`
+1. Update version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if vendored crate changed)
+2. `cargo generate-lockfile`
+3. `git commit -m "chore: bump version to X.Y.Z"`
 
 ## Python Package
 
-Fnug is also published to PyPI via maturin (`bindings = "bin"`). The Python wrapper lives in `python/fnug/`.
+Published to PyPI via maturin (`bindings = "bin"`). Wrapper in `python/fnug/` provides `run()`, `check()`, and programmatic config generation (`config.py`).
 
 ```bash
 uv venv && source .venv/bin/activate.fish
 uv pip install maturin pyyaml
-maturin develop --release                              # Build & install locally
-python -c "import fnug; fnug.run('--help')"            # Verify wrapper
-python -c "from fnug.config import Config, Command; print(Config(name='test', commands=[Command(name='t', cmd='echo hi')]).to_yaml())"
+maturin develop --release
 ```
 
 ## Commit Messages
 
-- Use conventional commits (e.g. `feat:`, `fix:`, `chore:`)
-- Be as concise as possible
-- Max line width of 72 characters
-- Avoid writing a body unless necessary
-- For breaking changes, include `BREAKING CHANGE:` in the body with a description
-- Split up large changes into multiple commits if possible (e.g. separate refactors from feature additions)
+- Conventional commits (`feat:`, `fix:`, `chore:`, etc.)
+- Concise, max 72 chars wide, no body unless necessary
+- `BREAKING CHANGE:` in body for breaking changes
+- Split large changes into multiple commits
 
 ## Code Style
 
-- Rust: rustfmt + clippy (pedantic), edition 2024
-- Python: ruff (select = ALL, see pyproject.toml for ignores)
-- Vendored dependency: `vendor/vt100` (modified vt100 crate, published as `fnug-vt100`)
-- Key crates: ratatui, crossterm, tokio, clap, git2, portable-pty, notify, log, parking_lot
+- **Rust**: rustfmt + clippy pedantic (module_name_repetitions allowed), edition 2024
+- **Python**: ruff with `select = ALL` (see pyproject.toml for ignores)
+- **Nix**: alejandra + statix + deadnix
+- **Vendored dep**: `vendor/vt100` is a modified vt100 fork published as `fnug-vt100` — version must be bumped separately when changed
