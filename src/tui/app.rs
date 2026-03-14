@@ -221,6 +221,25 @@ pub struct App {
     git_selection_generation: u64,
 }
 
+/// Collect all group IDs in the tree (including root).
+fn collect_all_group_ids(group: &CommandGroup) -> Vec<String> {
+    let mut ids = vec![group.id.clone()];
+    for child in &group.children {
+        ids.extend(collect_all_group_ids(child));
+    }
+    ids
+}
+
+/// Collect group IDs of all children (excluding root).
+fn collect_child_group_ids(group: &CommandGroup) -> Vec<String> {
+    let mut ids = Vec::new();
+    for child in &group.children {
+        ids.push(child.id.clone());
+        ids.extend(collect_child_group_ids(child));
+    }
+    ids
+}
+
 /// Recursively collect IDs of groups that contain no selected commands.
 /// Skips the root group (called on children directly).
 fn collect_inactive_groups(
@@ -499,6 +518,24 @@ impl App {
             // Recursively fail any commands that depend on this one
             self.fail_dependents(&cmd_id);
         }
+    }
+
+    /// Expand all groups in the tree
+    pub fn expand_all(&mut self) {
+        let ids = collect_all_group_ids(&self.config);
+        for id in ids {
+            self.expanded.insert(id, true);
+        }
+        self.mark_tree_dirty();
+    }
+
+    /// Collapse all groups in the tree (except root)
+    pub fn collapse_all(&mut self) {
+        let ids = collect_child_group_ids(&self.config);
+        for id in ids {
+            self.expanded.insert(id, false);
+        }
+        self.mark_tree_dirty();
     }
 
     /// Shut down all processes and abort all spawned tasks
@@ -797,6 +834,12 @@ impl App {
             }
             ToolbarAction::AcceptSearch => {
                 self.search.accept();
+            }
+            ToolbarAction::ExpandAll => {
+                self.expand_all();
+            }
+            ToolbarAction::CollapseAll => {
+                self.collapse_all();
             }
         }
     }

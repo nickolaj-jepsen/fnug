@@ -24,6 +24,8 @@ pub enum ToolbarAction {
     Search,
     ClearSearch,
     AcceptSearch,
+    ExpandAll,
+    CollapseAll,
 }
 
 #[derive(Debug)]

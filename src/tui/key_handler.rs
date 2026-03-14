@@ -193,6 +193,12 @@ impl App {
             KeyCode::Char('/') => {
                 self.search = super::app::SearchState::Editing(String::new());
             }
+            KeyCode::Char('E') => {
+                self.expand_all();
+            }
+            KeyCode::Char('W') => {
+                self.collapse_all();
+            }
             KeyCode::Char('L') => {
                 self.show_logs = !self.show_logs;
                 self.log_scroll = 0;
