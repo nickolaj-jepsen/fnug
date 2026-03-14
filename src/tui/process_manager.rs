@@ -244,6 +244,9 @@ impl App {
     pub fn run_selected(&mut self, terminal_area: Rect) {
         let selected_ids: Vec<String> = self.selected.iter().cloned().collect();
 
+        // Track batch for auto-focus on failure
+        self.batch_run_ids = Some(selected_ids.iter().cloned().collect());
+
         info!("Running {} selected commands", selected_ids.len());
         for id in &selected_ids {
             self.start_command(id, terminal_area, false);

@@ -219,6 +219,8 @@ pub struct App {
     git_selection_handle: Option<JoinHandle<()>>,
     /// Generation counter for staleness detection of git selection results
     git_selection_generation: u64,
+    /// Command IDs from the current batch run (for auto-focus on failure)
+    pub(super) batch_run_ids: Option<HashSet<String>>,
 }
 
 /// Collect all group IDs in the tree (including root).
@@ -295,6 +297,7 @@ impl App {
             last_terminal_area: Rect::default(),
             git_selection_handle: None,
             git_selection_generation: 0,
+            batch_run_ids: None,
         };
         app.rebuild_visible_nodes();
         app
@@ -438,6 +441,7 @@ impl App {
                     self.fail_dependents(&cmd_id);
                 }
                 self.mark_tree_dirty();
+                self.check_batch_complete();
             }
             AppEvent::ProcessError(cmd_id, msg) => {
                 error!("Process error for '{cmd_id}': {msg}");
@@ -517,6 +521,65 @@ impl App {
             self.error_messages.insert(cmd_id.clone(), msg);
             // Recursively fail any commands that depend on this one
             self.fail_dependents(&cmd_id);
+        }
+    }
+
+    /// Check if a batch run is complete and auto-focus first failure
+    fn check_batch_complete(&mut self) {
+        let Some(ref batch_ids) = self.batch_run_ids else {
+            return;
+        };
+
+        // Check if all batch commands have finished (not running, not waiting)
+        let all_done = batch_ids.iter().all(|id| {
+            !self.pending_deps.contains_key(id)
+                && self
+                    .processes
+                    .get(id)
+                    .is_none_or(|p| !matches!(p.status, CommandStatus::Running))
+        });
+
+        if !all_done {
+            return;
+        }
+
+        // Collect failed IDs
+        let failed_ids: Vec<String> = batch_ids
+            .iter()
+            .filter(|id| {
+                self.error_messages.contains_key(*id)
+                    || self.processes.get(*id).is_some_and(|p| {
+                        matches!(
+                            p.status,
+                            CommandStatus::Failure(_) | CommandStatus::Error(_)
+                        )
+                    })
+            })
+            .cloned()
+            .collect();
+
+        // Clear batch tracking
+        self.batch_run_ids = None;
+
+        if failed_ids.is_empty() {
+            return;
+        }
+
+        // Don't move cursor if it's already on a failed command
+        if let Some(node) = self.visible_nodes.get(self.cursor)
+            && failed_ids.contains(&node.id)
+        {
+            return;
+        }
+
+        // Move cursor to first failed command in the visible tree
+        if let Some(pos) = self
+            .visible_nodes
+            .iter()
+            .position(|n| failed_ids.contains(&n.id))
+        {
+            self.cursor = pos;
+            self.active_terminal_id = Some(self.visible_nodes[pos].id.clone());
         }
     }
 
