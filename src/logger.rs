@@ -116,3 +116,132 @@ pub fn level_color(level: Level) -> ratatui::style::Color {
         Level::Debug | Level::Trace => ratatui::style::Color::DarkGray,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn test_level_color_mapping() {
+        assert_eq!(level_color(Level::Error), crate::theme::FAILURE);
+        assert_eq!(level_color(Level::Warn), Color::Yellow);
+        assert_eq!(level_color(Level::Info), Color::Blue);
+        assert_eq!(level_color(Level::Debug), Color::DarkGray);
+        assert_eq!(level_color(Level::Trace), Color::DarkGray);
+    }
+
+    #[test]
+    fn test_enabled_filters_by_level() {
+        let logger = FnugLogger {
+            buffer: LogBuffer::new(),
+            file: None,
+            filter: log::LevelFilter::Warn,
+            start: Instant::now(),
+        };
+
+        let error_meta = Metadata::builder()
+            .level(Level::Error)
+            .target("test")
+            .build();
+        let warn_meta = Metadata::builder()
+            .level(Level::Warn)
+            .target("test")
+            .build();
+        let info_meta = Metadata::builder()
+            .level(Level::Info)
+            .target("test")
+            .build();
+        let debug_meta = Metadata::builder()
+            .level(Level::Debug)
+            .target("test")
+            .build();
+
+        assert!(logger.enabled(&error_meta));
+        assert!(logger.enabled(&warn_meta));
+        assert!(!logger.enabled(&info_meta));
+        assert!(!logger.enabled(&debug_meta));
+    }
+
+    #[test]
+    fn test_log_writes_to_buffer() {
+        let buffer = LogBuffer::new();
+        let logger = FnugLogger {
+            buffer: buffer.clone(),
+            file: None,
+            filter: log::LevelFilter::Debug,
+            start: Instant::now(),
+        };
+
+        let record = Record::builder()
+            .args(format_args!("test message"))
+            .level(Level::Info)
+            .target("test_target")
+            .build();
+
+        logger.log(&record);
+
+        assert_eq!(buffer.len(), 1);
+        let entries = buffer.entries();
+        assert_eq!(entries[0].message, "test message");
+        assert_eq!(entries[0].target, "test_target");
+        assert_eq!(entries[0].level, Level::Info);
+    }
+
+    #[test]
+    fn test_log_respects_filter() {
+        let buffer = LogBuffer::new();
+        let logger = FnugLogger {
+            buffer: buffer.clone(),
+            file: None,
+            filter: log::LevelFilter::Warn,
+            start: Instant::now(),
+        };
+
+        let debug_record = Record::builder()
+            .args(format_args!("debug msg"))
+            .level(Level::Debug)
+            .target("test")
+            .build();
+
+        let warn_record = Record::builder()
+            .args(format_args!("warn msg"))
+            .level(Level::Warn)
+            .target("test")
+            .build();
+
+        logger.log(&debug_record);
+        logger.log(&warn_record);
+
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.entries()[0].message, "warn msg");
+    }
+
+    #[test]
+    fn test_log_writes_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.log");
+        let file = std::fs::File::create(&file_path).unwrap();
+
+        let logger = FnugLogger {
+            buffer: LogBuffer::new(),
+            file: Some(Mutex::new(file)),
+            filter: log::LevelFilter::Debug,
+            start: Instant::now(),
+        };
+
+        let record = Record::builder()
+            .args(format_args!("file log message"))
+            .level(Level::Info)
+            .target("test_target")
+            .build();
+
+        logger.log(&record);
+        logger.flush();
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("file log message"));
+        assert!(content.contains("INFO"));
+        assert!(content.contains("test_target"));
+    }
+}

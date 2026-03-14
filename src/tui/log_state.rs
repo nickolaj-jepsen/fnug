@@ -66,3 +66,63 @@ impl Default for LogBuffer {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(level: Level, msg: &str) -> LogEntry {
+        LogEntry {
+            level,
+            target: "test".to_string(),
+            message: msg.to_string(),
+            timestamp: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn test_push_and_retrieve() {
+        let buf = LogBuffer::new();
+        assert!(buf.is_empty());
+
+        buf.push(make_entry(Level::Info, "hello"));
+        buf.push(make_entry(Level::Warn, "world"));
+
+        assert_eq!(buf.len(), 2);
+        let entries = buf.entries();
+        assert_eq!(entries[0].message, "hello");
+        assert_eq!(entries[1].message, "world");
+        assert_eq!(entries[0].level, Level::Info);
+        assert_eq!(entries[1].level, Level::Warn);
+    }
+
+    #[test]
+    fn test_ring_buffer_overflow() {
+        let buf = LogBuffer::new();
+        for i in 0..1500 {
+            buf.push(make_entry(Level::Debug, &format!("msg-{i}")));
+        }
+
+        assert_eq!(buf.len(), MAX_LOG_ENTRIES);
+        let entries = buf.entries();
+        // Oldest 500 entries should have been dropped
+        assert_eq!(entries[0].message, "msg-500");
+        assert_eq!(entries[999].message, "msg-1499");
+    }
+
+    #[test]
+    fn test_thread_safety() {
+        let buf = LogBuffer::new();
+        std::thread::scope(|s| {
+            for t in 0..4 {
+                let buf = &buf;
+                s.spawn(move || {
+                    for i in 0..100 {
+                        buf.push(make_entry(Level::Info, &format!("t{t}-{i}")));
+                    }
+                });
+            }
+        });
+        assert_eq!(buf.len(), 400);
+    }
+}
