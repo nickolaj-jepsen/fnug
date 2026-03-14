@@ -13,6 +13,10 @@ pub enum SelectorError {
     /// Indicates a general git operation error
     #[error("Git operation failed: {0}")]
     Git(#[from] git2::Error),
+
+    /// A spawned thread panicked during execution
+    #[error("Thread panicked during git scan")]
+    ThreadPanic,
 }
 
 pub trait RunnableSelector {

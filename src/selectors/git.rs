@@ -124,10 +124,10 @@ impl RunnableSelector for GitSelector {
 
             let mut results = HashMap::new();
             for handle in handles {
-                let (path, changes) = handle.join().unwrap()?;
+                let (path, changes) = handle.join().map_err(|_| SelectorError::ThreadPanic)??;
                 results.insert(path, changes);
             }
-            Ok::<_, git2::Error>(results)
+            Ok::<_, SelectorError>(results)
         })?;
 
         // 5. Match each command's patterns against its repo's cached changes
