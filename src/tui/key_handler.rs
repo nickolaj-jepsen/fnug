@@ -110,6 +110,29 @@ impl App {
             }
         }
 
+        // Terminal scrolling (Shift+Arrow/Home/End)
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            match key.code {
+                KeyCode::Up => {
+                    self.scroll_terminal(1);
+                    return;
+                }
+                KeyCode::Down => {
+                    self.scroll_terminal_down(1);
+                    return;
+                }
+                KeyCode::Home => {
+                    self.scroll_terminal_to_top();
+                    return;
+                }
+                KeyCode::End => {
+                    self.scroll_terminal_to_bottom();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Tree navigation
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -198,6 +221,12 @@ impl App {
             }
             KeyCode::Char('W') => {
                 self.collapse_all();
+            }
+            KeyCode::Char('{') => {
+                self.scroll_terminal_to_top();
+            }
+            KeyCode::Char('}') => {
+                self.scroll_terminal_to_bottom();
             }
             KeyCode::Char('L') => {
                 self.show_logs = !self.show_logs;

@@ -561,12 +561,59 @@ impl App {
         }
     }
 
-    /// Whether the currently active terminal is interactive (using alternate screen)
-    #[must_use]
-    pub fn active_command_is_interactive(&self) -> bool {
+    /// Get a reference to the active terminal's process, if any.
+    fn active_process(&self) -> Option<&ProcessInstance> {
         self.active_terminal_id
             .as_ref()
             .and_then(|id| self.processes.get(id))
+    }
+
+    /// Scroll the active terminal up by `lines`
+    pub fn scroll_terminal(&self, lines: usize) {
+        if let Some(proc) = self.active_process() {
+            let parser = proc.terminal.parser().lock();
+            let new_pos =
+                (parser.screen().scrollback() + lines).min(parser.screen().scrollback_len());
+            drop(parser);
+            if let Err(e) = proc.terminal.set_scroll(new_pos) {
+                log::debug!("Failed to scroll terminal: {e}");
+            }
+        }
+    }
+
+    /// Scroll the active terminal down by `lines`
+    pub fn scroll_terminal_down(&self, lines: usize) {
+        if let Some(proc) = self.active_process() {
+            let current = proc.terminal.parser().lock().screen().scrollback();
+            if let Err(e) = proc.terminal.set_scroll(current.saturating_sub(lines)) {
+                log::debug!("Failed to scroll terminal: {e}");
+            }
+        }
+    }
+
+    /// Scroll the active terminal to the top of scrollback
+    pub fn scroll_terminal_to_top(&self) {
+        if let Some(proc) = self.active_process() {
+            let len = proc.terminal.parser().lock().screen().scrollback_len();
+            if let Err(e) = proc.terminal.set_scroll(len) {
+                log::debug!("Failed to scroll to top: {e}");
+            }
+        }
+    }
+
+    /// Scroll the active terminal to the bottom
+    pub fn scroll_terminal_to_bottom(&self) {
+        if let Some(proc) = self.active_process()
+            && let Err(e) = proc.terminal.set_scroll(0)
+        {
+            log::debug!("Failed to scroll to bottom: {e}");
+        }
+    }
+
+    /// Whether the currently active terminal is interactive (using alternate screen)
+    #[must_use]
+    pub fn active_command_is_interactive(&self) -> bool {
+        self.active_process()
             .is_some_and(|proc| proc.terminal.parser().lock().screen().alternate_screen())
     }
 
