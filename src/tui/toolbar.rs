@@ -26,6 +26,7 @@ pub enum ToolbarAction {
     AcceptSearch,
     ExpandAll,
     CollapseAll,
+    ShowHelp,
 }
 
 #[derive(Debug)]
@@ -174,6 +175,7 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
 
             let log_label = if app.show_logs { "Hide logs" } else { "Logs" };
             shortcuts.push(Shortcut::new("L", log_label, ToolbarAction::ToggleLogs));
+            shortcuts.push(Shortcut::new("?", "Help", ToolbarAction::ShowHelp));
             shortcuts.push(Shortcut::new("Q", "Quit", ToolbarAction::Quit));
         }
     }

@@ -15,6 +15,17 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent, terminal_area: Rect) {
         self.last_terminal_area = terminal_area;
 
+        // Help overlay dismissal
+        if self.show_help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?' | 'q') => {
+                    self.show_help = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Context menu navigation
         if self.context_menu.is_some() {
             match key.code {
@@ -215,6 +226,9 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.search = super::app::SearchState::Editing(String::new());
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
             }
             KeyCode::Char('E') => {
                 self.expand_all();

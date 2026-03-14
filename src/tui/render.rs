@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget};
 
 use super::app::{App, CommandStatus};
 
@@ -49,6 +49,9 @@ impl App {
             self.render_terminal(frame, terminal_area);
             if let Some(ref menu) = self.context_menu {
                 frame.render_widget(menu, frame.area());
+            }
+            if self.show_help {
+                Self::render_help_overlay(frame);
             }
             return (Rect::default(), terminal_area);
         }
@@ -130,6 +133,11 @@ impl App {
         // Render context menu overlay last (on top of everything)
         if let Some(ref menu) = self.context_menu {
             frame.render_widget(menu, frame.area());
+        }
+
+        // Render help overlay on top of everything
+        if self.show_help {
+            Self::render_help_overlay(frame);
         }
 
         (tree_area, terminal_area)
@@ -268,5 +276,94 @@ impl App {
         if count > visible_height {
             render_scrollbar(frame, content_area, max_scroll, max_scroll - scroll);
         }
+    }
+
+    fn render_help_overlay(frame: &mut Frame) {
+        use super::overlay::{OVERLAY_BG, dim_background, draw_bordered_panel};
+
+        let area = frame.area();
+        let buf = frame.buffer_mut();
+
+        dim_background(buf, area);
+
+        let width = 50u16.min(area.width.saturating_sub(4));
+        let height = 28u16.min(area.height.saturating_sub(2));
+        let popup = Rect::new(
+            (area.width.saturating_sub(width)) / 2,
+            (area.height.saturating_sub(height)) / 2,
+            width,
+            height,
+        );
+
+        draw_bordered_panel(buf, popup);
+
+        // Title
+        let title = " Keybindings ";
+        let title_style = Style::reset()
+            .fg(theme::ACCENT)
+            .bg(OVERLAY_BG)
+            .add_modifier(Modifier::BOLD);
+        #[expect(clippy::cast_possible_truncation, reason = "title length fits in u16")]
+        let title_x = popup.x + (popup.width.saturating_sub(title.len() as u16)) / 2;
+        for (i, ch) in title.chars().enumerate() {
+            #[expect(clippy::cast_possible_truncation, reason = "title offset fits in u16")]
+            let col = title_x + i as u16;
+            if col < popup.right() - 1 {
+                buf[(col, popup.y)].set_style(title_style).set_char(ch);
+            }
+        }
+
+        // Content
+        let inner = Rect::new(popup.x + 1, popup.y + 1, width - 2, height - 2);
+        let bg = OVERLAY_BG;
+
+        let key_style = Style::reset()
+            .fg(theme::ACCENT)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
+        let desc_style = Style::reset().fg(Color::White).bg(bg);
+        let section_style = Style::reset()
+            .fg(theme::ACCENT)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+
+        let help_line = |key: &str, desc: &str| -> Line<'static> {
+            Line::from(vec![
+                Span::styled(format!("  {key:<16}"), key_style),
+                Span::styled(desc.to_string(), desc_style),
+            ])
+        };
+
+        let lines: Vec<Line<'static>> = vec![
+            Line::from(Span::styled(" Navigation", section_style)),
+            help_line("j / Down", "Move cursor down"),
+            help_line("k / Up", "Move cursor up"),
+            help_line("h / Left", "Collapse group / deselect"),
+            help_line("l / Right", "Expand group / select"),
+            help_line("Space", "Toggle select"),
+            help_line("E", "Expand all groups"),
+            help_line("W", "Collapse all groups"),
+            Line::from(""),
+            Line::from(Span::styled(" Commands", section_style)),
+            help_line("Enter", "Run all selected"),
+            help_line("r", "Run current command/group"),
+            help_line("s", "Stop current command"),
+            help_line("c", "Copy output to clipboard"),
+            help_line("g", "Git auto-select"),
+            Line::from(""),
+            Line::from(Span::styled(" Terminal", section_style)),
+            help_line("Shift+Up/Down", "Scroll terminal output"),
+            help_line("{ / }", "Jump to top/bottom"),
+            help_line("Tab", "Focus interactive terminal"),
+            help_line("Ctrl+R", "Toggle fullscreen"),
+            Line::from(""),
+            Line::from(Span::styled(" Other", section_style)),
+            help_line("/", "Search / filter"),
+            help_line("L", "Toggle log panel"),
+            help_line("? / Esc", "Close this help"),
+            help_line("q / Ctrl+C", "Quit"),
+        ];
+
+        Paragraph::new(lines).render(inner, buf);
     }
 }

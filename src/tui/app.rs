@@ -172,7 +172,7 @@ impl Default for ToolbarCache {
 /// Main application state for the TUI
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "4 independent boolean flags (fullscreen, should_quit, tree_dirty, show_logs) are reasonable for TUI state"
+    reason = "5 independent boolean flags (fullscreen, should_quit, tree_dirty, show_logs, show_help) are reasonable for TUI state"
 )]
 pub struct App {
     pub config: CommandGroup,
@@ -221,6 +221,8 @@ pub struct App {
     git_selection_generation: u64,
     /// Command IDs from the current batch run (for auto-focus on failure)
     pub(super) batch_run_ids: Option<HashSet<String>>,
+    /// Whether the help overlay is shown
+    pub show_help: bool,
 }
 
 /// Collect all group IDs in the tree (including root).
@@ -298,6 +300,7 @@ impl App {
             git_selection_handle: None,
             git_selection_generation: 0,
             batch_run_ids: None,
+            show_help: false,
         };
         app.rebuild_visible_nodes();
         app
@@ -950,6 +953,9 @@ impl App {
             }
             ToolbarAction::CollapseAll => {
                 self.collapse_all();
+            }
+            ToolbarAction::ShowHelp => {
+                self.show_help = !self.show_help;
             }
         }
     }
