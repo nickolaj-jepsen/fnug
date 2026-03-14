@@ -53,11 +53,7 @@ pub(crate) fn expand_dependencies<'a>(
 
 /// Execute a single command, capturing stdout and stderr.
 pub(crate) fn execute_command(cmd: &Command, cwd: &Path) -> CommandResult {
-    let cmd_cwd = if cmd.cwd.as_os_str().is_empty() {
-        cwd
-    } else {
-        &cmd.cwd
-    };
+    let cmd_cwd = cmd.effective_cwd(cwd);
 
     let start = Instant::now();
     let output = ProcessCommand::new("sh")
@@ -173,11 +169,7 @@ fn execute_muted(cmd: &Command, cwd: &Path, sty: &Style) -> bool {
 
 /// Execute a command with inherited stdio (output streams directly to terminal).
 fn execute_streaming(cmd: &Command, cwd: &Path, sty: &Style) -> bool {
-    let cmd_cwd = if cmd.cwd.as_os_str().is_empty() {
-        cwd
-    } else {
-        &cmd.cwd
-    };
+    let cmd_cwd = cmd.effective_cwd(cwd);
 
     let start = Instant::now();
     let status = ProcessCommand::new("sh")
