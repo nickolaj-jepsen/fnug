@@ -86,7 +86,18 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         None => None,
     };
 
-    tui::run(config, cwd, cli.log_file, cli.log_level, check_result).await
+    let check_failed = check_result.is_some();
+    let tui_code = tui::run(config, cwd, cli.log_file, cli.log_level, check_result).await?;
+    Ok(handoff_exit_code(check_failed, tui_code))
+}
+
+fn handoff_exit_code(check_failed: bool, tui_code: ExitCode) -> ExitCode {
+    // Keep the check's failure after the TUI closes, so `fnug check && git push` stops.
+    if check_failed {
+        ExitCode::FAILURE
+    } else {
+        tui_code
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +149,22 @@ mod tests {
         assert_eq!(cli.config.as_deref(), Some("x.yaml"));
         assert_eq!(cli.log_file.as_deref(), Some("fnug.log"));
         assert_eq!(cli.log_level, Some(LevelFilter::Debug));
+    }
+
+    #[test]
+    fn handoff_keeps_check_failure() {
+        assert_eq!(
+            handoff_exit_code(true, ExitCode::SUCCESS),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            handoff_exit_code(false, ExitCode::SUCCESS),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            handoff_exit_code(false, ExitCode::FAILURE),
+            ExitCode::FAILURE
+        );
     }
 
     // Hooks installed by 0.1.0-alpha.11..13 put the flag after the subcommand.
