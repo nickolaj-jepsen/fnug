@@ -108,7 +108,7 @@ pub enum ForeignPolicy {
     Chain,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOptions {
     /// Pass `--no-workspace`, for a repository inside another fnug workspace.
     pub no_workspace: bool,
@@ -255,6 +255,26 @@ pub fn status(target: &HookTarget) -> HookStatus {
     match classify(&content) {
         Script::Shell => HookStatus::NotInstalled,
         Script::Foreign(_) => HookStatus::Foreign,
+    }
+}
+
+/// Like [`status`], but a block in the current format that differs from the one installing with
+/// `opts` writes, say because the config moved, is [`HookStatus::Outdated`].
+#[must_use]
+pub fn status_with(target: &HookTarget, opts: &InstallOptions) -> HookStatus {
+    let status = status(target);
+    if status != HookStatus::Installed {
+        return status;
+    }
+    let content = std::fs::read_to_string(&target.hook_path).unwrap_or_default();
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let current = find_block(&lines)
+        .map(|range| lines[range].concat())
+        .unwrap_or_default();
+    if current == block_for(target, opts, current.contains(CHAINED_NAME)) {
+        HookStatus::Installed
+    } else {
+        HookStatus::Outdated
     }
 }
 
@@ -432,18 +452,21 @@ pub fn plan_remove(target: &HookTarget) -> Result<HookPlan, HookError> {
 /// Steps, what they amount to, and a note for the user.
 type Planned = (Vec<Step>, InstallOutcome, Option<String>);
 
+/// fnug's block for `target`'s hook, as installing with `opts` writes it.
+fn block_for(target: &HookTarget, opts: &InstallOptions, chain: bool) -> String {
+    let local = target.location == HookLocation::Local;
+    render_block(&BlockSpec {
+        args: &hook_args(opts.no_workspace),
+        config_rel: &target.config_rel,
+        fallback_exe: opts.fallback_exe.as_deref().filter(|_| local),
+        required: local,
+        chain,
+    })
+}
+
 fn install_steps(target: &HookTarget, opts: &InstallOptions) -> Result<Planned, HookError> {
     let args = hook_args(opts.no_workspace);
-    let local = target.location == HookLocation::Local;
-    let block = |chain| {
-        render_block(&BlockSpec {
-            args: &args,
-            config_rel: &target.config_rel,
-            fallback_exe: opts.fallback_exe.as_deref().filter(|_| local),
-            required: local,
-            chain,
-        })
-    };
+    let block = |chain| block_for(target, opts, chain);
     match &target.location {
         HookLocation::Husky { user_hook } => {
             return Err(HookError::Husky {

@@ -10,7 +10,9 @@ use inquire::{Confirm, MultiSelect};
 use thiserror::Error;
 
 use crate::LoadedConfig;
-use hooks::{ForeignPolicy, HookError, HookPlan, HookStatus, HookTarget, InstallOutcome};
+use hooks::{
+    ForeignPolicy, HookError, HookPlan, HookStatus, HookTarget, InstallOptions, InstallOutcome,
+};
 use mcp::{Editor, FileChange};
 
 #[derive(Error, Debug)]
@@ -53,9 +55,10 @@ impl fmt::Display for Feature {
 struct RepoHook {
     name: String,
     target: HookTarget,
+    /// Against `opts`, so a hook that would change is outdated.
     status: HookStatus,
-    /// Whether the hook should pass `--no-workspace`, for a repository inside the workspace.
-    no_workspace: bool,
+    /// How to install it; the foreign policy is decided when preparing.
+    opts: InstallOptions,
 }
 
 impl RepoHook {
@@ -207,10 +210,9 @@ impl Action {
         let mut notes = Vec::new();
         let change = match self {
             Self::InstallHook { hook } => {
-                let opts = hooks::InstallOptions {
-                    no_workspace: hook.no_workspace,
+                let opts = InstallOptions {
                     foreign,
-                    fallback_exe: std::env::current_exe().ok(),
+                    ..hook.opts.clone()
                 };
                 let (plan, outcome) = hooks::plan_install(&hook.target, &opts)?;
                 if let InstallOutcome::Chained { original } = outcome {
@@ -278,12 +280,19 @@ impl Prepared {
 /// Find the hooks and editor configs, printing why any of them can't be set up.
 fn detect(cwd: &Path, config_dir: &Path, config: Option<&LoadedConfig>) -> Detected {
     let repo_hook = |name: String, dir: &Path, no_workspace| match hooks::resolve(dir) {
-        Ok(target) => Some(RepoHook {
-            name,
-            status: hooks::status(&target),
-            target,
-            no_workspace,
-        }),
+        Ok(target) => {
+            let opts = InstallOptions {
+                no_workspace,
+                foreign: ForeignPolicy::Refuse,
+                fallback_exe: std::env::current_exe().ok(),
+            };
+            Some(RepoHook {
+                name,
+                status: hooks::status_with(&target, &opts),
+                target,
+                opts,
+            })
+        }
         Err(e) => {
             println!(
                 "warning: can't set up a git hook for {}: {e}",
@@ -453,7 +462,11 @@ mod tests {
                 config_rel: PathBuf::new(),
             },
             status,
-            no_workspace: !name.is_empty(),
+            opts: InstallOptions {
+                no_workspace: !name.is_empty(),
+                foreign: ForeignPolicy::Refuse,
+                fallback_exe: None,
+            },
         }
     }
 
