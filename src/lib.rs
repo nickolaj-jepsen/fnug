@@ -79,7 +79,7 @@ pub fn load_config(
         cwd.display()
     );
     let parsed = Config::from_file(&config_path)?;
-    validate_version(&parsed.fnug_version);
+    check_version(parsed.fnug_version.as_deref());
     let (mut root, workspace) = parsed.into_root();
 
     // Discover and merge workspace sub-configs before converting
@@ -125,14 +125,56 @@ fn find_workspace_root(config_path: &std::path::Path) -> Result<Option<PathBuf>,
     Ok(None)
 }
 
-/// Warn if the config's `fnug_version` doesn't match the binary version
-fn validate_version(config_version: &str) {
-    let binary_version = env!("CARGO_PKG_VERSION");
-    if config_version != binary_version {
-        warn!(
-            "Config fnug_version '{config_version}' differs from binary version '{binary_version}'"
-        );
+/// Warn if the config's `fnug_version` doesn't fit this binary (see [`version_warning`]).
+fn check_version(config_version: Option<&str>) {
+    if let Some(message) =
+        config_version.and_then(|v| version_warning(v, env!("CARGO_PKG_VERSION")))
+    {
+        warn!("{message}");
     }
+}
+
+/// Why a config written for fnug `config` may not work with fnug `binary`, if it may not.
+///
+/// Only the numeric `major.minor.patch` cores are compared. It warns when the config needs a
+/// newer binary, or was written for an older release series (a different minor on 0.x, a
+/// different major from 1.0), and when `config` can't be parsed.
+fn version_warning(config: &str, binary: &str) -> Option<String> {
+    let Some(wanted) = version_core(config) else {
+        return Some(format!(
+            "Config fnug_version '{config}': cannot parse it, expected a version like 0.1.0"
+        ));
+    };
+    let current = version_core(binary)?;
+    let series =
+        |(major, minor, _): (u64, u64, u64)| if major == 0 { (0, minor) } else { (major, 0) };
+    if wanted > current {
+        Some(format!(
+            "Config requires fnug >= {config}, but this is fnug {binary}"
+        ))
+    } else if series(wanted) != series(current) {
+        Some(format!(
+            "Config was written for fnug {config}; fnug {binary} may have breaking changes since"
+        ))
+    } else {
+        None
+    }
+}
+
+/// The leading `major.minor.patch` numbers of `version`, ignoring any pre-release or build
+/// suffix (`0.1.0-alpha.13` and Python's `0.1.0a13` are both `(0, 1, 0)`). Missing minor and
+/// patch numbers count as 0.
+fn version_core(version: &str) -> Option<(u64, u64, u64)> {
+    let version = version.trim();
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let end = version
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(version.len());
+    let mut parts = version[..end].split('.').map(|p| p.parse::<u64>().ok());
+    let major = parts.next()??;
+    let minor = parts.next().unwrap_or(Some(0))?;
+    let patch = parts.next().unwrap_or(Some(0))?;
+    Some((major, minor, patch))
 }
 
 /// Validate the config tree for duplicate IDs, empty groups, and invalid values
@@ -330,5 +372,32 @@ mod tests {
             vec![make_cmd("cmd2")],
         );
         assert!(validate_tree(&config).is_ok());
+    }
+
+    #[test]
+    fn version_core_compare() {
+        let cases = [
+            ("0.1.0", "0.1.0-alpha.13", None),
+            ("0.1.0a13", "0.1.0-alpha.13", None),
+            ("0.1.0", "0.1.3", None),
+            ("1.0.0", "1.4.2", None),
+            ("v0.1", "0.1.0", None),
+            ("0.2.0", "0.1.0-alpha.13", Some("requires fnug >= 0.2.0")),
+            ("0.1.5", "0.1.0", Some("requires fnug >= 0.1.5")),
+            ("0.0.9", "0.1.0-alpha.13", Some("written for fnug 0.0.9")),
+            ("1.2.0", "2.0.0", Some("written for fnug 1.2.0")),
+            ("garbage", "0.1.0", Some("cannot parse")),
+            ("", "0.1.0", Some("cannot parse")),
+        ];
+        for (config, binary, expected) in cases {
+            let warning = version_warning(config, binary);
+            match expected {
+                None => assert_eq!(warning, None, "{config} vs {binary}"),
+                Some(part) => {
+                    let warning = warning.unwrap_or_else(|| panic!("{config} vs {binary}"));
+                    assert!(warning.contains(part), "{config} vs {binary}: {warning}");
+                }
+            }
+        }
     }
 }
