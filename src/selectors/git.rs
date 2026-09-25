@@ -66,12 +66,14 @@ impl Change {
     }
 }
 
-/// Open the repo whose work tree contains `path`, with its canonical work tree root.
-/// Fails if no repo contains `path` or the repo is bare.
+/// Open the repo whose work tree contains `path`, with its canonical work tree root. `path`
+/// may be missing, such as a deleted directory: discovery starts from its nearest existing
+/// ancestor. Fails if no repo contains `path` or the repo is bare.
 fn discover(path: &Path) -> Result<RepoEntry, String> {
+    let start = path.ancestors().find(|p| p.is_dir()).unwrap_or(path);
     // Not `Repository::discover`: it reopens the gitdir, so a `.git` file without
     // `core.worktree` (as `git init --separate-git-dir` writes) gets the wrong work tree.
-    let repo = Repository::open_ext(path, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path])
+    let repo = Repository::open_ext(start, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path])
         .map_err(|e| e.message().to_string())?;
     let Some(workdir) = repo.workdir() else {
         return Err(format!(

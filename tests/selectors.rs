@@ -650,3 +650,72 @@ commands:
     std::fs::write(root.join("shared/x.rs"), "").unwrap();
     assert_eq!(selected(&config), ["lint"]);
 }
+
+const LEGACY_CONFIG: &str = r"
+name: root
+commands:
+  - name: always
+    cmd: echo ALWAYS-RAN
+    auto:
+      always: true
+  - name: legacy
+    cmd: echo LEGACY-RAN
+    auto:
+      git: true
+      path: [./legacy, ./legacy/gone.txt]
+";
+
+/// A repo with a committed `legacy/` directory, which is then deleted from disk and, if
+/// `staged`, from the index (like `git rm -r legacy`).
+fn repo_with_deleted_legacy_dir(staged: bool) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    std::fs::create_dir(root.join("legacy")).unwrap();
+    std::fs::write(root.join("legacy/gone.txt"), "one\n").unwrap();
+    let config = write_config(&root, LEGACY_CONFIG);
+    commit_all(&repo);
+    std::fs::remove_dir_all(root.join("legacy")).unwrap();
+    if staged {
+        let mut index = repo.index().unwrap();
+        index.remove_dir(Path::new("legacy"), 0).unwrap();
+        index.write().unwrap();
+    }
+    (tmp, config)
+}
+
+#[test]
+fn deleted_auto_path_dir_selects() {
+    for staged in [false, true] {
+        let (_tmp, config) = repo_with_deleted_legacy_dir(staged);
+        let output = select_with(&config, &SelectOptions::default());
+        assert_eq!(
+            output.ids().collect::<Vec<_>>(),
+            ["always", "legacy"],
+            "staged: {staged}, issues: {:?}",
+            output.issues
+        );
+        let legacy = output.get("legacy").unwrap();
+        assert_eq!(legacy.by, SelectedBy::Git);
+        assert!(legacy.files.is_empty());
+        assert!(output.issues.is_empty(), "{:?}", output.issues);
+    }
+}
+
+#[test]
+fn check_runs_command_whose_auto_path_was_deleted() {
+    let (tmp, _config) = repo_with_deleted_legacy_dir(true);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(tmp.path())
+        .args(["--no-workspace", "check", "--no-tui"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("ALWAYS-RAN"), "{stdout}");
+    assert!(stdout.contains("LEGACY-RAN"), "{stdout}");
+}
