@@ -93,6 +93,21 @@ jobs:
           args: format --check
           src: python/
 
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: astral-sh/setup-uv@v7
+      # The oldest Python that pyproject.toml supports.
+      - run: uv venv --python 3.10
+      - run: uv pip install maturin pytest pyyaml
+      # --no-project: plain `uv run` would lock and rebuild the project on every call.
+      - run: uv run --no-project maturin develop --uv
+      - run: uv run --no-project pytest python/tests
+
   nix:
     runs-on: ubuntu-latest
     steps:
