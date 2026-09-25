@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use log::{debug, info};
 use regex_cache::LazyRegex;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -35,15 +36,17 @@ pub enum ConfigError {
     },
     #[error("Unknown working directory: {0}")]
     UnknownWorkingDirectory(String),
-    #[error("Unable to parse YAML config file {path}: {source}")]
+    #[error("Unable to parse YAML config file {path}: {source}{}", fmt_hint(hint.as_deref()))]
     Yaml {
         source: serde_yaml::Error,
         path: PathBuf,
+        hint: Option<String>,
     },
-    #[error("Unable to parse JSON config file {path}: {source}")]
+    #[error("Unable to parse JSON config file {path}: {source}{}", fmt_hint(hint.as_deref()))]
     Json {
         source: serde_json::Error,
         path: PathBuf,
+        hint: Option<String>,
     },
     #[error("Invalid regex pattern `{pattern}`: {source}")]
     Regex {
@@ -56,6 +59,54 @@ pub enum ConfigError {
     Validation(String),
     #[error("Workspace discovery error: {0}")]
     Workspace(String),
+}
+
+fn fmt_hint(hint: Option<&str>) -> String {
+    hint.map(|h| format!("\n  hint: {h}")).unwrap_or_default()
+}
+
+/// Suggest a fix for serde's `unknown field `X`, expected …` message, if it is one.
+fn unknown_field_hint(msg: &str) -> Option<String> {
+    let rest = msg.split_once("unknown field `")?.1;
+    let (field, rest) = rest.split_once('`')?;
+    if field == "<<" {
+        return Some(
+            "YAML merge keys (`<<`) are not supported; put the anchor on the whole value \
+             instead (e.g. `auto: *defaults`)"
+                .to_string(),
+        );
+    }
+    let expected = rest.split_once("expected ")?.1;
+    let wanted = normalize_key(field);
+    expected
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|candidate| {
+            let distance = strsim::damerau_levenshtein(&wanted, &normalize_key(candidate));
+            (distance, candidate)
+        })
+        .filter(|&(distance, _)| distance <= 2 && distance < field.len())
+        .min_by_key(|&(distance, _)| distance)
+        .map(|(_, candidate)| format!("did you mean `{candidate}`?"))
+}
+
+/// Lowercase `snake_case` form of a key, so `dependsOn` and `depends-on` compare equal to `depends_on`.
+fn normalize_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len() + 4);
+    for (i, c) in key.chars().enumerate() {
+        if c == '-' {
+            out.push('_');
+        } else if c.is_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Parse a list of regex pattern strings into compiled regexes.
@@ -77,6 +128,7 @@ pub fn parse_regexes(regex: Vec<String>) -> Result<Vec<LazyRegex>, ConfigError> 
 
 /// Configuration for automatic command execution
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigAuto {
     pub watch: Option<bool>,
     pub git: Option<bool>,
@@ -104,6 +156,7 @@ impl TryFrom<ConfigAuto> for Auto {
 
 /// Configuration for a single command
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigCommand {
     pub id: Option<String>,
     pub name: String,
@@ -134,21 +187,49 @@ impl TryFrom<ConfigCommand> for Command {
 
 /// Configuration for workspace discovery options
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceOptions {
     pub paths: Option<Vec<String>>,
     pub max_depth: Option<usize>,
 }
 
 /// Workspace configuration: either a boolean or explicit options
-#[derive(Debug, Clone, Deserialize, Serialize)]
+// Deserialize is hand-written: `untagged` would replace field errors with "did not match any variant".
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum WorkspaceConfig {
     Enabled(bool),
     Options(WorkspaceOptions),
 }
 
+impl<'de> Deserialize<'de> for WorkspaceConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct WorkspaceVisitor;
+
+        impl<'de> Visitor<'de> for WorkspaceVisitor {
+            type Value = WorkspaceConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a boolean or a map with `paths` and/or `max_depth`")
+            }
+
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(WorkspaceConfig::Enabled(v))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                WorkspaceOptions::deserialize(de::value::MapAccessDeserializer::new(map))
+                    .map(WorkspaceConfig::Options)
+            }
+        }
+
+        deserializer.deserialize_any(WorkspaceVisitor)
+    }
+}
+
 /// Configuration for a group of commands
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigCommandGroup {
     pub id: Option<String>,
     pub name: String,
@@ -190,7 +271,11 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
 /// Root configuration structure for Fnug: the root group's fields plus file-level settings.
 // Not `#[serde(flatten)]` over `ConfigCommandGroup`: flatten hides unknown keys and error locations.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    /// JSON Schema reference for editors; ignored by fnug.
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     pub fnug_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceConfig>,
@@ -240,11 +325,13 @@ impl Config {
         })?;
         let config: Config = if file.extension().is_some_and(|ext| ext == "json") {
             serde_json::from_str(&contents).map_err(|e| ConfigError::Json {
+                hint: unknown_field_hint(&e.to_string()),
                 source: e,
                 path: file.to_path_buf(),
             })?
         } else {
             serde_yaml::from_str(&contents).map_err(|e| ConfigError::Yaml {
+                hint: unknown_field_hint(&e.to_string()),
                 source: e,
                 path: file.to_path_buf(),
             })?

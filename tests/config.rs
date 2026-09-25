@@ -19,6 +19,15 @@ fn load(content: &str) -> (tempfile::TempDir, CommandGroup) {
     (dir, config)
 }
 
+fn load_err(content: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), content);
+    match load_config(Some(&path), true) {
+        Ok(_) => panic!("config loaded:\n{content}"),
+        Err(e) => e.to_string(),
+    }
+}
+
 fn command<'a>(config: &'a CommandGroup, name: &str) -> &'a Command {
     config
         .all_commands()
@@ -89,4 +98,224 @@ children:
     let err = load_config(Some(&path), true).unwrap_err().to_string();
     assert!(err.contains("children[1].commands[0]"), "{err}");
     assert!(err.contains("line"), "{err}");
+}
+
+#[test]
+fn unknown_command_key_rejected_with_location() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+commands:
+  - name: setup
+    cmd: 'true'
+  - name: lint
+    cmd: 'true'
+    depends-on: [setup]
+",
+    );
+    assert!(err.contains("commands[1]"), "{err}");
+    assert!(err.contains("line 8"), "{err}");
+    assert!(err.contains("did you mean `depends_on`?"), "{err}");
+}
+
+#[test]
+fn unknown_root_key_rejected() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+childern:
+  - name: child
+",
+    );
+    assert!(err.contains("unknown field `childern`"), "{err}");
+    assert!(err.contains("did you mean `children`?"), "{err}");
+}
+
+#[test]
+fn unknown_auto_key_hint() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+commands:
+  - name: lint
+    cmd: 'false'
+    auto:
+      gti: true
+",
+    );
+    assert!(err.contains("commands[0].auto"), "{err}");
+    assert!(err.contains("did you mean `git`?"), "{err}");
+}
+
+#[test]
+fn camel_case_key_hint() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+    dependsOn: [lint]
+",
+    );
+    assert!(err.contains("did you mean `depends_on`?"), "{err}");
+}
+
+#[test]
+fn unrelated_unknown_key_has_no_hint() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+colour: blue
+",
+    );
+    assert!(err.contains("unknown field `colour`"), "{err}");
+    assert!(!err.contains("did you mean"), "{err}");
+}
+
+#[test]
+fn yaml_merge_key_explained() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+commands:
+  - name: fmt
+    cmd: 'true'
+    auto: &defaults
+      git: true
+  - name: lint
+    cmd: 'true'
+    auto:
+      <<: *defaults
+",
+    );
+    assert!(err.contains("merge keys"), "{err}");
+}
+
+#[test]
+fn inline_yaml_alias_still_works() {
+    let (_dir, config) = load(
+        r"fnug_version: 0.1.0
+name: root
+commands:
+  - name: fmt
+    cmd: 'true'
+    auto: &defaults
+      always: true
+  - name: lint
+    cmd: 'true'
+    auto: *defaults
+",
+    );
+    assert_eq!(command(&config, "lint").auto.always, Some(true));
+}
+
+#[test]
+fn workspace_options_typo_rejected() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+workspace:
+  path: [packages/*]
+",
+    );
+    assert!(err.contains("workspace"), "{err}");
+    assert!(err.contains("did you mean `paths`?"), "{err}");
+}
+
+#[test]
+fn workspace_paths_type_error_names_field() {
+    let err = load_err(
+        r"fnug_version: 0.1.0
+name: root
+workspace:
+  paths: packages/*
+",
+    );
+    assert!(err.contains("workspace.paths"), "{err}");
+    assert!(!err.contains("untagged"), "{err}");
+}
+
+#[test]
+fn workspace_bool_and_options_still_parse() {
+    for workspace in ["true", "false", "{max_depth: 2}", "{paths: [a/*]}"] {
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let path = write_config(
+            dir.path(),
+            &format!("fnug_version: 0.1.0\nname: root\nworkspace: {workspace}\n"),
+        );
+        load_config(Some(&path), false).unwrap();
+    }
+}
+
+#[test]
+fn json_schema_key_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".fnug.json");
+    std::fs::write(
+        &path,
+        r#"{
+  "$schema": "https://example.com/fnug.schema.json",
+  "fnug_version": "0.1.0",
+  "name": "root",
+  "commands": [{"name": "a", "cmd": "true"}]
+}"#,
+    )
+    .unwrap();
+    load_config(path.to_str(), true).unwrap();
+}
+
+#[test]
+fn json_unknown_key_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".fnug.json");
+    std::fs::write(
+        &path,
+        r#"{"fnug_version": "0.1.0", "name": "root", "comands": []}"#,
+    )
+    .unwrap();
+    let err = load_config(path.to_str(), true).unwrap_err().to_string();
+    assert!(err.contains("did you mean `commands`?"), "{err}");
+}
+
+/// Full configs (with a top-level `name`) from the README's yaml blocks.
+fn readme_configs() -> Vec<String> {
+    let readme = include_str!("../README.md");
+    let mut blocks = Vec::new();
+    let mut current: Option<String> = None;
+    for line in readme.lines() {
+        match (&mut current, line) {
+            (None, "```yaml") => current = Some(String::new()),
+            (Some(block), "```") => {
+                if block.lines().any(|l| l.starts_with("name:")) {
+                    blocks.push(std::mem::take(block));
+                }
+                current = None;
+            }
+            (Some(block), _) => {
+                block.push_str(line);
+                block.push('\n');
+            }
+            (None, _) => {}
+        }
+    }
+    blocks
+}
+
+#[test]
+fn readme_and_dogfood_configs_parse() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in [".fnug.yaml", "docs/.fnug.yaml"] {
+        fnug::config_file::Config::from_file(&root.join(file))
+            .unwrap_or_else(|e| panic!("{file}: {e}"));
+    }
+    let blocks = readme_configs();
+    assert!(blocks.len() >= 5, "found {} README configs", blocks.len());
+    for block in blocks {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &block);
+        fnug::config_file::Config::from_file(Path::new(&path))
+            .unwrap_or_else(|e| panic!("{e}\n{block}"));
+    }
 }

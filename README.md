@@ -96,6 +96,8 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from the current directory upward.
 
+Unknown keys are errors, so a typo like `depends-on` or `gti` fails loudly with its line number and a suggestion instead of being ignored. YAML anchors and aliases work (`auto: *defaults`), but merge keys (`<<: *defaults`) are not supported.
+
 ### Minimal example
 
 ```yaml
@@ -252,6 +254,7 @@ See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
 | `cwd`          | string            | Working directory (inherited by children)                         |
 | `env`          | map               | Environment variables (inherited by children)                     |
 | `auto`         | object            | Default auto rules (inherited by children)                        |
+| `$schema`      | string            | JSON Schema URL for editors (mainly for `.fnug.json`); ignored    |
 
 #### Command fields
 
@@ -320,3 +323,7 @@ See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
 - **Drag** the separator between tree and terminal to resize
 - **Scroll wheel** in the terminal panel to scroll output
 - **Right-click** a command for a context menu with run/stop/clear options
+
+## Migrating from 0.1.0-alpha.13
+
+- Unknown config keys are errors. Fix any key the error names (it suggests the closest valid key), and replace YAML merge keys (`<<: *anchor`) with a plain alias (`auto: *anchor`).
