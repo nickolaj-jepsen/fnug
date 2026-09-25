@@ -99,9 +99,10 @@ impl App {
     pub fn start_command(&mut self, cmd_id: &str, terminal_area: Rect, set_active: bool) {
         self.last_terminal_area = terminal_area;
 
-        let Some(cmd) = self.find_command(cmd_id) else {
+        let Some(mut cmd) = self.find_command(cmd_id) else {
             return;
         };
+        cmd.cwd = cmd.effective_cwd(&self.cwd).to_path_buf();
         self.error_messages.remove(cmd_id);
 
         // Check dependencies
@@ -297,13 +298,14 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use ratatui::layout::Rect;
 
     use crate::commands::command::Command;
     use crate::commands::group::CommandGroup;
-    use crate::pty::test_util::pty_available;
+    use crate::pty::test_util::{pty_available, wait_until};
     use crate::tui::app::{App, AppEvent, CommandStatus};
     use crate::tui::log_state::LogBuffer;
     use crate::tui::tree_widget::NodeKind;
@@ -431,6 +433,54 @@ mod tests {
         app.handle_app_event(exited("a", 0));
         assert!(!app.processes.contains_key("b"));
         assert!(!app.processes.contains_key("c"));
+        app.shutdown();
+    }
+
+    fn single_command_app(dir: &Path, cmd: &str, cwd: PathBuf) -> App {
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![Command {
+                id: "a".into(),
+                name: "a".into(),
+                cmd: cmd.into(),
+                cwd,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        App::new(config, dir.to_path_buf(), LogBuffer::new())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_cwd_is_reported_not_run() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        let mut app = single_command_app(dir.path(), "true", gone);
+
+        app.start_command("a", AREA, true);
+        assert!(!app.processes.contains_key("a"));
+        let msg = app.error_messages.get("a").expect("no error shown");
+        assert!(msg.contains("does not exist"), "{msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_cwd_runs_in_app_cwd() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = single_command_app(dir.path(), "touch marker", PathBuf::new());
+
+        app.start_command("a", AREA, true);
+        assert_eq!(app.error_messages.get("a"), None);
+        assert!(wait_until(Duration::from_secs(5), || dir
+            .path()
+            .join("marker")
+            .exists()));
         app.shutdown();
     }
 }

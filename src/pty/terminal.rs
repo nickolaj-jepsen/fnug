@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::spawn;
@@ -25,6 +26,8 @@ pub enum ProcessError {
     PtyError(String),
     #[error("Process error: {0}")]
     Process(String),
+    #[error("Working directory {} does not exist", .0.display())]
+    MissingCwd(PathBuf),
 }
 
 /// PTY dimensions in columns and rows
@@ -56,6 +59,9 @@ type SpawnedPty = (Box<dyn Child + Send + Sync>, Box<dyn MasterPty + Send>);
 
 fn spawn_pty(command: &Command, size: TerminalSize) -> Result<SpawnedPty, ProcessError> {
     debug!("Running PTY for command: {command:?}");
+    if !command.cwd.is_dir() {
+        return Err(ProcessError::MissingCwd(command.cwd.clone()));
+    }
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -467,7 +473,7 @@ mod tests {
 
     use parking_lot::Mutex;
 
-    use super::{Terminal, TerminalSize, TerminalUpdate, spawn_output_writer};
+    use super::{ProcessError, Terminal, TerminalSize, TerminalUpdate, spawn_output_writer};
     use crate::commands::command::Command;
     use crate::pty::test_util::{pty_available, wait_until};
 
@@ -570,5 +576,34 @@ mod tests {
 
         let exited = wait_until(Duration::from_secs(5), || term.0.has_exited());
         assert!(exited, "command still running after kill");
+    }
+
+    #[test]
+    fn missing_cwd_is_error() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().canonicalize().unwrap().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        let command = Command {
+            id: "t".into(),
+            name: "t".into(),
+            cmd: "true".into(),
+            cwd: gone.clone(),
+            ..Default::default()
+        };
+
+        let result = Terminal::new(
+            &command,
+            TerminalSize::new(80, 24),
+            Terminal::default_scrollback_size(),
+        );
+        match result {
+            Err(ProcessError::MissingCwd(path)) => assert_eq!(path, gone),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("spawned with a missing working directory"),
+        }
     }
 }
