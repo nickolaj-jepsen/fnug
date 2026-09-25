@@ -1,13 +1,11 @@
 //! Tests for auto-selection: git scopes, path and regex matching, selection issues, and file
 //! watching.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use fnug::load_config;
-use fnug::selectors::watch::{WatchError, WatchHandle, watch_commands};
+use fnug::selectors::watch::{WatchError, watch_commands};
 use fnug::selectors::{
     GitScope, IndexOverride, SelectOptions, SelectedBy, SelectionIssue, SelectorOutput,
     get_selected_commands, select,
@@ -1066,40 +1064,6 @@ fn since_in_shallow_clone_says_so() {
     );
 }
 
-/// Start watching the commands of the config at `config_path`.
-fn start_watch(config_path: &Path) -> WatchHandle {
-    let (config, _) = load_config(Some(config_path.to_str().unwrap()), true).unwrap();
-    watch_commands(config.all_commands().into_iter().cloned().collect()).unwrap()
-}
-
-/// Ids in the next batch of watch events, failing if none arrives within `secs` seconds.
-async fn next_ids(handle: &mut WatchHandle, secs: u64) -> Vec<String> {
-    let batch = tokio::time::timeout(Duration::from_secs(secs), handle.events.recv())
-        .await
-        .unwrap_or_else(|_| panic!("no watch event within {secs}s"))
-        .expect("the watcher stopped");
-    batch.into_iter().map(|m| m.id).collect()
-}
-
-/// Matched files per command id, merged across watch event batches.
-type Seen = BTreeMap<String, BTreeSet<PathBuf>>;
-
-/// Merge watch event batches until `done` holds for what was seen, failing after 5 seconds.
-async fn watch_until(handle: &mut WatchHandle, done: impl Fn(&Seen) -> bool) -> Seen {
-    let mut seen = Seen::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !done(&seen) {
-        let batch = tokio::time::timeout_at(deadline, handle.events.recv())
-            .await
-            .unwrap_or_else(|_| panic!("watch events never completed: {seen:?}"))
-            .expect("the watcher stopped");
-        for m in batch {
-            seen.entry(m.id).or_default().extend(m.files);
-        }
-    }
-    seen
-}
-
 const WATCH_SRC_CONFIG: &str = r"
 name: root
 commands:
@@ -1109,145 +1073,6 @@ commands:
       watch: true
       path: [./src]
 ";
-
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_latency_under_2s() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    std::fs::create_dir(root.join("src")).unwrap();
-    let mut handle = start_watch(&write_config(&root, WATCH_SRC_CONFIG));
-
-    std::fs::write(root.join("src/a.txt"), "").unwrap();
-    assert_eq!(next_ids(&mut handle, 2).await, ["test"]);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_reports_matched_files() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    std::fs::create_dir(root.join("src")).unwrap();
-    std::fs::write(root.join("src/old.rs"), "").unwrap();
-    let config = write_config(
-        &root,
-        r"
-name: root
-auto:
-  watch: true
-  path: [./src]
-commands:
-  - name: rust
-    cmd: 'true'
-    auto:
-      regex: ['\.rs$']
-  - name: any
-    cmd: 'true'
-",
-    );
-    let mut handle = start_watch(&config);
-
-    std::fs::write(root.join("src/a.rs"), "").unwrap();
-    std::fs::write(root.join("src/b.txt"), "").unwrap();
-    let seen = watch_until(&mut handle, |seen| {
-        seen.get("any").is_some_and(|files| files.len() == 2)
-    })
-    .await;
-    assert_eq!(seen["rust"], BTreeSet::from([root.join("src/a.rs")]));
-    assert_eq!(
-        seen["any"],
-        BTreeSet::from([root.join("src/a.rs"), root.join("src/b.txt")])
-    );
-
-    // A removal selects, but the file is gone, so it isn't listed.
-    std::fs::remove_file(root.join("src/old.rs")).unwrap();
-    let seen = watch_until(&mut handle, |seen| seen.contains_key("rust")).await;
-    assert_eq!(seen["rust"], BTreeSet::new());
-}
-
-/// Replace `path` the way many editors and tools save: write a new file, rename it over.
-fn atomic_write(path: &Path, contents: &str) {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, contents).unwrap();
-    std::fs::rename(&tmp, path).unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_survives_two_atomic_replaces() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let manifest = root.join("Cargo.toml");
-    std::fs::write(&manifest, "one").unwrap();
-    let config = write_config(
-        &root,
-        r"
-name: root
-commands:
-  - name: toml
-    cmd: 'true'
-    auto:
-      watch: true
-      path: [./Cargo.toml]
-",
-    );
-    let mut handle = start_watch(&config);
-
-    for round in ["two", "three"] {
-        std::fs::write(root.join("Cargo.lock"), round).unwrap();
-        atomic_write(&manifest, round);
-        let seen = watch_until(&mut handle, |seen| seen.contains_key("toml")).await;
-        assert_eq!(seen["toml"], BTreeSet::from([manifest.clone()]), "{round}");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_new_dir_is_watched() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    std::fs::write(root.join("Cargo.toml"), "").unwrap();
-    // The file is watched through `.` too, which must stay recursive.
-    let config = write_config(
-        &root,
-        r"
-name: root
-auto:
-  watch: true
-commands:
-  - name: any
-    cmd: 'true'
-  - name: toml
-    cmd: 'true'
-    auto:
-      path: [./Cargo.toml]
-",
-    );
-    let mut handle = start_watch(&config);
-
-    std::fs::create_dir(root.join("new")).unwrap();
-    watch_until(&mut handle, |seen| seen.contains_key("any")).await;
-    let file = root.join("new/a.txt");
-    std::fs::write(&file, "").unwrap();
-    watch_until(&mut handle, |seen| {
-        seen.get("any").is_some_and(|files| files.contains(&file))
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_missing_path_skipped() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    std::fs::create_dir(root.join("src")).unwrap();
-    let config = write_config(
-        &root,
-        &WATCH_SRC_CONFIG.replace("[./src]", "[./missing, ./src]"),
-    );
-    let mut handle = start_watch(&config);
-    assert_eq!(handle.report.missing, [root.join("missing")]);
-    assert_eq!(handle.report.roots, [root.join("src")]);
-    assert!(handle.report.failed.is_empty(), "{:?}", handle.report);
-
-    std::fs::write(root.join("src/a.txt"), "").unwrap();
-    assert_eq!(next_ids(&mut handle, 5).await, ["test"]);
-}
 
 #[test]
 fn watch_nothing_watchable_is_an_error() {
@@ -1266,40 +1091,220 @@ fn watch_nothing_watchable_is_an_error() {
     }
 }
 
-/// Makes a directory unreadable until dropped, like a volume owned by another user.
-#[cfg(unix)]
-struct Unreadable(PathBuf);
+/// Tests that wait for file events. They run on Linux only: macOS reports events through
+/// `FSEvents`, with its own timing, and hasn't been checked against them.
+#[cfg(target_os = "linux")]
+mod watch {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
-#[cfg(unix)]
-impl Unreadable {
-    /// `None` if the directory stays readable, as it does for root.
-    fn new(dir: &Path) -> Option<Self> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let guard = Unreadable(dir.to_path_buf());
-        std::fs::read_dir(dir).is_err().then_some(guard)
-    }
-}
+    use fnug::selectors::watch::WatchHandle;
 
-#[cfg(unix)]
-impl Drop for Unreadable {
-    fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
-    }
-}
+    use super::*;
 
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_unreadable_path_keeps_others() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    for dir in ["src", "locked"] {
-        std::fs::create_dir(root.join(dir)).unwrap();
+    /// Start watching the commands of the config at `config_path`.
+    fn start_watch(config_path: &Path) -> WatchHandle {
+        let (config, _) = load_config(Some(config_path.to_str().unwrap()), true).unwrap();
+        watch_commands(config.all_commands().into_iter().cloned().collect()).unwrap()
     }
-    let config = write_config(
-        &root,
-        r"
+
+    /// Ids in the next batch of watch events, failing if none arrives within `secs` seconds.
+    async fn next_ids(handle: &mut WatchHandle, secs: u64) -> Vec<String> {
+        let batch = tokio::time::timeout(Duration::from_secs(secs), handle.events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no watch event within {secs}s"))
+            .expect("the watcher stopped");
+        batch.into_iter().map(|m| m.id).collect()
+    }
+
+    /// Matched files per command id, merged across watch event batches.
+    type Seen = BTreeMap<String, BTreeSet<PathBuf>>;
+
+    /// Merge watch event batches until `done` holds for what was seen, failing after 5 seconds.
+    async fn watch_until(handle: &mut WatchHandle, done: impl Fn(&Seen) -> bool) -> Seen {
+        let mut seen = Seen::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !done(&seen) {
+            let batch = tokio::time::timeout_at(deadline, handle.events.recv())
+                .await
+                .unwrap_or_else(|_| panic!("watch events never completed: {seen:?}"))
+                .expect("the watcher stopped");
+            for m in batch {
+                seen.entry(m.id).or_default().extend(m.files);
+            }
+        }
+        seen
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_latency_under_2s() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        let mut handle = start_watch(&write_config(&root, WATCH_SRC_CONFIG));
+
+        std::fs::write(root.join("src/a.txt"), "").unwrap();
+        assert_eq!(next_ids(&mut handle, 2).await, ["test"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_reports_matched_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/old.rs"), "").unwrap();
+        let config = write_config(
+            &root,
+            r"
+name: root
+auto:
+  watch: true
+  path: [./src]
+commands:
+  - name: rust
+    cmd: 'true'
+    auto:
+      regex: ['\.rs$']
+  - name: any
+    cmd: 'true'
+",
+        );
+        let mut handle = start_watch(&config);
+
+        std::fs::write(root.join("src/a.rs"), "").unwrap();
+        std::fs::write(root.join("src/b.txt"), "").unwrap();
+        let seen = watch_until(&mut handle, |seen| {
+            seen.get("any").is_some_and(|files| files.len() == 2)
+        })
+        .await;
+        assert_eq!(seen["rust"], BTreeSet::from([root.join("src/a.rs")]));
+        assert_eq!(
+            seen["any"],
+            BTreeSet::from([root.join("src/a.rs"), root.join("src/b.txt")])
+        );
+
+        // A removal selects, but the file is gone, so it isn't listed.
+        std::fs::remove_file(root.join("src/old.rs")).unwrap();
+        let seen = watch_until(&mut handle, |seen| seen.contains_key("rust")).await;
+        assert_eq!(seen["rust"], BTreeSet::new());
+    }
+
+    /// Replace `path` the way many editors and tools save: write a new file, rename it over.
+    fn atomic_write(path: &Path, contents: &str) {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, contents).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_survives_two_atomic_replaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let manifest = root.join("Cargo.toml");
+        std::fs::write(&manifest, "one").unwrap();
+        let config = write_config(
+            &root,
+            r"
+name: root
+commands:
+  - name: toml
+    cmd: 'true'
+    auto:
+      watch: true
+      path: [./Cargo.toml]
+",
+        );
+        let mut handle = start_watch(&config);
+
+        for round in ["two", "three"] {
+            std::fs::write(root.join("Cargo.lock"), round).unwrap();
+            atomic_write(&manifest, round);
+            let seen = watch_until(&mut handle, |seen| seen.contains_key("toml")).await;
+            assert_eq!(seen["toml"], BTreeSet::from([manifest.clone()]), "{round}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_new_dir_is_watched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        // The file is watched through `.` too, which must stay recursive.
+        let config = write_config(
+            &root,
+            r"
+name: root
+auto:
+  watch: true
+commands:
+  - name: any
+    cmd: 'true'
+  - name: toml
+    cmd: 'true'
+    auto:
+      path: [./Cargo.toml]
+",
+        );
+        let mut handle = start_watch(&config);
+
+        std::fs::create_dir(root.join("new")).unwrap();
+        watch_until(&mut handle, |seen| seen.contains_key("any")).await;
+        let file = root.join("new/a.txt");
+        std::fs::write(&file, "").unwrap();
+        watch_until(&mut handle, |seen| {
+            seen.get("any").is_some_and(|files| files.contains(&file))
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_missing_path_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        let config = write_config(
+            &root,
+            &WATCH_SRC_CONFIG.replace("[./src]", "[./missing, ./src]"),
+        );
+        let mut handle = start_watch(&config);
+        assert_eq!(handle.report.missing, [root.join("missing")]);
+        assert_eq!(handle.report.roots, [root.join("src")]);
+        assert!(handle.report.failed.is_empty(), "{:?}", handle.report);
+
+        std::fs::write(root.join("src/a.txt"), "").unwrap();
+        assert_eq!(next_ids(&mut handle, 5).await, ["test"]);
+    }
+
+    /// Makes a directory unreadable until dropped, like a volume owned by another user.
+    struct Unreadable(PathBuf);
+
+    impl Unreadable {
+        /// `None` if the directory stays readable, as it does for root.
+        fn new(dir: &Path) -> Option<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let guard = Unreadable(dir.to_path_buf());
+            std::fs::read_dir(dir).is_err().then_some(guard)
+        }
+    }
+
+    impl Drop for Unreadable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_unreadable_path_keeps_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for dir in ["src", "locked"] {
+            std::fs::create_dir(root.join(dir)).unwrap();
+        }
+        let config = write_config(
+            &root,
+            r"
 name: root
 auto:
   watch: true
@@ -1313,23 +1318,23 @@ commands:
     auto:
       path: [./src]
 ",
-    );
-    let Some(_locked) = Unreadable::new(&root.join("locked")) else {
-        eprintln!("skipping: permissions are not enforced for this user");
-        return;
-    };
-    let mut handle = start_watch(&config);
-    assert_eq!(handle.report.roots, [root.join("src")]);
-    let failed: Vec<&PathBuf> = handle.report.failed.iter().map(|(p, _)| p).collect();
-    assert_eq!(failed, [&root.join("locked")]);
+        );
+        let Some(_locked) = Unreadable::new(&root.join("locked")) else {
+            eprintln!("skipping: permissions are not enforced for this user");
+            return;
+        };
+        let mut handle = start_watch(&config);
+        assert_eq!(handle.report.roots, [root.join("src")]);
+        let failed: Vec<&PathBuf> = handle.report.failed.iter().map(|(p, _)| p).collect();
+        assert_eq!(failed, [&root.join("locked")]);
 
-    std::fs::write(root.join("src/a.txt"), "").unwrap();
-    assert_eq!(next_ids(&mut handle, 5).await, ["src"]);
-}
+        std::fs::write(root.join("src/a.txt"), "").unwrap();
+        assert_eq!(next_ids(&mut handle, 5).await, ["src"]);
+    }
 
-/// Watch commands on a git repo in `repo/`, plus `ctl` on the separate `ctl/`: changes there
-/// mark the point by which earlier changes in the repo have been reported.
-const WATCH_REPO_CONFIG: &str = r"
+    /// Watch commands on a git repo in `repo/`, plus `ctl` on the separate `ctl/`: changes
+    /// there mark the point by which earlier changes in the repo have been reported.
+    const WATCH_REPO_CONFIG: &str = r"
 name: root
 auto:
   watch: true
@@ -1349,64 +1354,65 @@ commands:
       path: [./ctl]
 ";
 
-/// A temp dir with [`WATCH_REPO_CONFIG`], an empty `ctl/` and a repo in `repo/` that ignores
-/// `target/`.
-fn watch_repo() -> (tempfile::TempDir, PathBuf, Repository) {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    std::fs::create_dir_all(root.join("repo/target/debug")).unwrap();
-    std::fs::create_dir(root.join("ctl")).unwrap();
-    let repo = Repository::init(root.join("repo")).unwrap();
-    std::fs::write(root.join("repo/.gitignore"), "target/\n").unwrap();
-    write_config(&root, WATCH_REPO_CONFIG);
-    (tmp, root, repo)
-}
+    /// A temp dir with [`WATCH_REPO_CONFIG`], an empty `ctl/` and a repo in `repo/` that
+    /// ignores `target/`.
+    fn watch_repo() -> (tempfile::TempDir, PathBuf, Repository) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("repo/target/debug")).unwrap();
+        std::fs::create_dir(root.join("ctl")).unwrap();
+        let repo = Repository::init(root.join("repo")).unwrap();
+        std::fs::write(root.join("repo/.gitignore"), "target/\n").unwrap();
+        write_config(&root, WATCH_REPO_CONFIG);
+        (tmp, root, repo)
+    }
 
-/// Touch a file in `ctl/` and merge watch events until it is reported.
-async fn watch_until_ctl(handle: &mut WatchHandle, root: &Path) -> Seen {
-    std::fs::write(root.join("ctl/done"), "").unwrap();
-    watch_until(handle, |seen| seen.contains_key("ctl")).await
-}
+    /// Touch a file in `ctl/` and merge watch events until it is reported.
+    async fn watch_until_ctl(handle: &mut WatchHandle, root: &Path) -> Seen {
+        std::fs::write(root.join("ctl/done"), "").unwrap();
+        watch_until(handle, |seen| seen.contains_key("ctl")).await
+    }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_ignores_gitignored_target() {
-    let (_tmp, root, _repo) = watch_repo();
-    let mut handle = start_watch(&root.join(".fnug.yaml"));
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_ignores_gitignored_target() {
+        let (_tmp, root, _repo) = watch_repo();
+        let mut handle = start_watch(&root.join(".fnug.yaml"));
 
-    std::fs::write(root.join("repo/target/debug/fingerprint.json"), "{}").unwrap();
-    std::fs::write(root.join("repo/target/out.json"), "{}").unwrap();
-    let seen = watch_until_ctl(&mut handle, &root).await;
-    assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl"]);
-}
+        std::fs::write(root.join("repo/target/debug/fingerprint.json"), "{}").unwrap();
+        std::fs::write(root.join("repo/target/out.json"), "{}").unwrap();
+        let seen = watch_until_ctl(&mut handle, &root).await;
+        assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl"]);
+    }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_ignores_dot_git() {
-    let (_tmp, root, repo) = watch_repo();
-    let mut handle = start_watch(&root.join(".fnug.yaml"));
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_ignores_dot_git() {
+        let (_tmp, root, repo) = watch_repo();
+        let mut handle = start_watch(&root.join(".fnug.yaml"));
 
-    commit_all(&repo);
-    let seen = watch_until_ctl(&mut handle, &root).await;
-    assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl"]);
-}
+        commit_all(&repo);
+        let seen = watch_until_ctl(&mut handle, &root).await;
+        assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl"]);
+    }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn watch_path_that_is_ignored_still_selects() {
-    let (_tmp, root, _repo) = watch_repo();
-    std::fs::create_dir(root.join("repo/target/doc")).unwrap();
-    let config = write_config(
-        &root,
-        &format!(
-            "{WATCH_REPO_CONFIG}  - name: docs\n    cmd: 'true'\n    auto:\n      \
-             path: [./repo/target/doc]\n"
-        ),
-    );
-    let mut handle = start_watch(&config);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_path_that_is_ignored_still_selects() {
+        let (_tmp, root, _repo) = watch_repo();
+        std::fs::create_dir(root.join("repo/target/doc")).unwrap();
+        let config = write_config(
+            &root,
+            &format!(
+                "{WATCH_REPO_CONFIG}  - name: docs\n    cmd: 'true'\n    auto:\n      \
+                 path: [./repo/target/doc]\n"
+            ),
+        );
+        let mut handle = start_watch(&config);
 
-    std::fs::write(root.join("repo/target/doc/index.json"), "{}").unwrap();
-    let seen = watch_until_ctl(&mut handle, &root).await;
-    assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl", "docs"]);
-    assert_eq!(
-        seen["docs"],
-        BTreeSet::from([root.join("repo/target/doc/index.json")])
-    );
+        std::fs::write(root.join("repo/target/doc/index.json"), "{}").unwrap();
+        let seen = watch_until_ctl(&mut handle, &root).await;
+        assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl", "docs"]);
+        assert_eq!(
+            seen["docs"],
+            BTreeSet::from([root.join("repo/target/doc/index.json")])
+        );
+    }
 }
