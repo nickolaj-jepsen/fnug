@@ -16,7 +16,7 @@ use ratatui::backend::CrosstermBackend;
 use fnug::check::CheckResult;
 use fnug::commands::group::CommandGroup;
 use fnug::logger::LoggerHandle;
-use fnug::selectors::watch::watch_commands;
+use fnug::selectors::watch::{WatchError, WatchReport, watch_commands};
 use fnug::tui::app::{App, AppEvent};
 
 /// Start a file watcher that forwards watch events to the app event channel.
@@ -33,12 +33,19 @@ fn start_file_watcher(
         // large directory trees is slow and would block the TUI event loop).
         let result = tokio::task::spawn_blocking(move || watch_commands(all_commands)).await;
 
-        let (mut watcher_rx, _watcher) = match result {
+        let mut handle = match result {
             Ok(Ok(handle)) => {
-                info!("File watcher started");
+                log_watch_report(&handle.report);
                 handle
             }
+            Ok(Err(WatchError::NoWatchableCommands)) => {
+                debug!("File watcher not started: no command uses auto.watch");
+                return;
+            }
             Ok(Err(e)) => {
+                if let WatchError::NothingWatched(report) = &e {
+                    log_watch_report(report);
+                }
                 warn!("File watcher not started: {e}");
                 return;
             }
@@ -48,8 +55,8 @@ fn start_file_watcher(
             }
         };
 
-        // Forward watch events to app. _watcher is kept alive by this scope.
-        while let Some(commands) = watcher_rx.recv().await {
+        // Forward watch events to app. The handle keeps watching while this scope lives.
+        while let Some(commands) = handle.events.recv().await {
             if event_tx
                 .send(AppEvent::WatcherTriggered(commands))
                 .await
@@ -59,6 +66,28 @@ fn start_file_watcher(
             }
         }
     })
+}
+
+fn log_watch_report(report: &WatchReport) {
+    for path in &report.missing {
+        warn!("Not watching {}: it does not exist", path.display());
+    }
+    for (path, error) in &report.failed {
+        warn!("Could not fully watch {}: {error}", path.display());
+    }
+    if report.limit_reached {
+        warn!(
+            "Ran out of file watches, so some directories are not watched; \
+             on Linux, raise fs.inotify.max_user_watches"
+        );
+    }
+    if !report.roots.is_empty() {
+        info!(
+            "File watcher started: {} paths, {} directories",
+            report.roots.len(),
+            report.watched_dirs
+        );
+    }
 }
 
 /// Log line for a panic on `thread`, or `None` for the main thread, which runs the UI.

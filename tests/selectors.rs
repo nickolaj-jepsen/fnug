@@ -5,9 +5,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use fnug::commands::command::Command;
 use fnug::load_config;
-use fnug::selectors::watch::watch_commands;
+use fnug::selectors::watch::{WatchError, WatchHandle, watch_commands};
 use fnug::selectors::{
     GitScope, IndexOverride, SelectOptions, SelectedBy, SelectionIssue, SelectorOutput,
     get_selected_commands, select,
@@ -1066,10 +1065,19 @@ fn since_in_shallow_clone_says_so() {
     );
 }
 
-/// The commands of the config at `config_path`, for the watcher.
-fn watched_commands(config_path: &Path) -> Vec<Command> {
+/// Start watching the commands of the config at `config_path`.
+fn start_watch(config_path: &Path) -> WatchHandle {
     let (config, _) = load_config(Some(config_path.to_str().unwrap()), true).unwrap();
-    config.all_commands().into_iter().cloned().collect()
+    watch_commands(config.all_commands().into_iter().cloned().collect()).unwrap()
+}
+
+/// Ids in the next batch of watch events, failing if none arrives within `secs` seconds.
+async fn next_ids(handle: &mut WatchHandle, secs: u64) -> Vec<String> {
+    let batch = tokio::time::timeout(Duration::from_secs(secs), handle.events.recv())
+        .await
+        .unwrap_or_else(|_| panic!("no watch event within {secs}s"))
+        .expect("the watcher stopped");
+    batch.into_iter().map(|c| c.id).collect()
 }
 
 const WATCH_SRC_CONFIG: &str = r"
@@ -1087,14 +1095,104 @@ async fn watch_latency_under_2s() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     std::fs::create_dir(root.join("src")).unwrap();
-    let config = write_config(&root, WATCH_SRC_CONFIG);
-    let (mut events, _watcher) = watch_commands(watched_commands(&config)).unwrap();
+    let mut handle = start_watch(&write_config(&root, WATCH_SRC_CONFIG));
 
     std::fs::write(root.join("src/a.txt"), "").unwrap();
-    let batch = tokio::time::timeout(Duration::from_secs(2), events.recv())
-        .await
-        .expect("no watch event within 2s")
-        .unwrap();
-    let ids: Vec<&str> = batch.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(ids, ["test"]);
+    assert_eq!(next_ids(&mut handle, 2).await, ["test"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_missing_path_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    let config = write_config(
+        &root,
+        &WATCH_SRC_CONFIG.replace("[./src]", "[./missing, ./src]"),
+    );
+    let mut handle = start_watch(&config);
+    assert_eq!(handle.report.missing, [root.join("missing")]);
+    assert_eq!(handle.report.roots, [root.join("src")]);
+    assert!(handle.report.failed.is_empty(), "{:?}", handle.report);
+
+    std::fs::write(root.join("src/a.txt"), "").unwrap();
+    assert_eq!(next_ids(&mut handle, 5).await, ["test"]);
+}
+
+#[test]
+fn watch_nothing_watchable_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let config = write_config(&root, WATCH_SRC_CONFIG);
+    let (loaded, _) = load_config(Some(config.to_str().unwrap()), true).unwrap();
+
+    let result = watch_commands(loaded.all_commands().into_iter().cloned().collect());
+    match result {
+        Err(WatchError::NothingWatched(report)) => {
+            assert_eq!(report.missing, [root.join("src")]);
+        }
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("watching a missing path succeeded"),
+    }
+}
+
+/// Makes a directory unreadable until dropped, like a volume owned by another user.
+#[cfg(unix)]
+struct Unreadable(PathBuf);
+
+#[cfg(unix)]
+impl Unreadable {
+    /// `None` if the directory stays readable, as it does for root.
+    fn new(dir: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let guard = Unreadable(dir.to_path_buf());
+        std::fs::read_dir(dir).is_err().then_some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_unreadable_path_keeps_others() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for dir in ["src", "locked"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+    }
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  watch: true
+commands:
+  - name: locked
+    cmd: 'true'
+    auto:
+      path: [./locked]
+  - name: src
+    cmd: 'true'
+    auto:
+      path: [./src]
+",
+    );
+    let Some(_locked) = Unreadable::new(&root.join("locked")) else {
+        eprintln!("skipping: permissions are not enforced for this user");
+        return;
+    };
+    let mut handle = start_watch(&config);
+    assert_eq!(handle.report.roots, [root.join("src")]);
+    let failed: Vec<&PathBuf> = handle.report.failed.iter().map(|(p, _)| p).collect();
+    assert_eq!(failed, [&root.join("locked")]);
+
+    std::fs::write(root.join("src/a.txt"), "").unwrap();
+    assert_eq!(next_ids(&mut handle, 5).await, ["src"]);
 }
