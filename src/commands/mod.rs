@@ -10,4 +10,5 @@
 pub mod auto;
 pub mod command;
 pub mod group;
+pub mod ids;
 pub mod inherit;

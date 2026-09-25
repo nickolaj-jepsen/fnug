@@ -89,7 +89,7 @@ children:
     let result = load_config(Some(&path), false);
     assert!(result.is_err());
     match result.unwrap_err() {
-        ConfigError::DuplicateId(id) => assert_eq!(id, "dup"),
+        ConfigError::DuplicateId { id, .. } => assert_eq!(id, "dup"),
         other => panic!("Expected DuplicateId, got: {other:?}"),
     }
 }
@@ -758,7 +758,7 @@ commands:
     let result = load_config(Some(&path), false);
     assert!(result.is_err());
     match result.unwrap_err() {
-        ConfigError::DuplicateId(id) => assert_eq!(id, "dup-id"),
+        ConfigError::DuplicateId { id, .. } => assert_eq!(id, "dup-id"),
         other => panic!("Expected DuplicateId, got: {other:?}"),
     }
 }

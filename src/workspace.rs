@@ -192,6 +192,7 @@ fn load_sub_config(config_path: &Path, root_dir: &Path) -> Result<ConfigCommandG
         let relative = sub_dir.strip_prefix(root_dir).unwrap_or(sub_dir);
         group.cwd = Some(relative.to_path_buf());
     }
+    group.source = Some(config_path.to_path_buf());
 
     Ok(group)
 }
