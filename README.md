@@ -72,12 +72,13 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 ### Subcommands
 
-| Command      | Description                                                     |
-| ------------ | --------------------------------------------------------------- |
-| `fnug`       | Launch the TUI                                                  |
-| `fnug check` | Run selected commands headlessly (exit code reflects pass/fail) |
-| `fnug setup` | Interactive wizard: git pre-commit hook and editor MCP config   |
-| `fnug mcp`   | Run an MCP server over stdio                                    |
+| Command       | Description                                                     |
+| ------------- | --------------------------------------------------------------- |
+| `fnug`        | Launch the TUI                                                  |
+| `fnug check`  | Run selected commands headlessly (exit code reflects pass/fail) |
+| `fnug setup`  | Interactive wizard: git pre-commit hook and editor MCP config   |
+| `fnug mcp`    | Run an MCP server over stdio                                    |
+| `fnug schema` | Print the config file's JSON Schema                             |
 
 ### Flags
 
@@ -239,6 +240,16 @@ When run from a subdirectory that contains a `.fnug.yaml`, fnug automatically re
 ### Advanced example
 
 See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
+
+### Editor support
+
+fnug publishes a JSON Schema for config files, so editors can complete keys and flag mistakes. With the YAML language server (VS Code's YAML extension, Neovim's `yamlls`), add this as the first line of `.fnug.yaml`:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/nickolaj-jepsen/fnug/main/schema/fnug.schema.json
+```
+
+In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints the schema for the installed version.
 
 ### Configuration reference
 
