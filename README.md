@@ -398,8 +398,10 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `watch`  | bool              | Select when watched files match `path`/`regex`                          |
 | `always` | bool              | Always selected regardless of changes                                   |
 | `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`); they may not exist yet |
-| `regex`  | list of strings   | Regex patterns to match against file paths (e.g. `"\\.rs$"`)           |
+| `regex`  | list of strings   | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)      |
 | `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
+
+A changed file selects a command when it is under one of its `path` entries and matches one of its `regex` patterns (any file, if there are none). The patterns see the file's path relative to the command's `cwd`, such as `src/main.rs`, or `../shared/lib.rs` for a file outside it. Anchor with `^` to match from the `cwd` (`^tests/`), or write `(^|/)tests/` to match a directory at any depth.
 
 ## Keyboard Shortcuts
 
@@ -453,3 +455,4 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 - Library API: `setup::run` takes the `LoadedConfig` instead of its root group, and the `LoadOptions` it was loaded with.
 - Library API: `setup::mcp::McpError` has a `Parse` variant instead of `Json`, and `NotAnObject` names the file.
 - Library API: `logger::init` takes a `LoggerConfig` and returns a `LoggerHandle`, or an error instead of panicking when a logger is already installed. `logger::connect_event_sender` is replaced by `LoggerHandle::set_notifier`, and `logger::level_color` moved to `tui::log_state`. `LogBuffer` and `LogEntry` are defined in `logger` and still re-exported from `tui::log_state`.
+- `auto.regex` is matched against the changed file's path relative to the command's `cwd` (`src/main.rs`) instead of its absolute path, in both git and watch selection. Suffix patterns such as `\.rs$` work as before. Rewrite patterns that relied on the absolute path, such as `/tests/`, as `^tests/` or `(^|/)tests/`.

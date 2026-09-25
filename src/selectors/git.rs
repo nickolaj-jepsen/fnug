@@ -7,6 +7,7 @@ use git2::{Repository, RepositoryOpenFlags, StatusOptions};
 use log::debug;
 
 use crate::commands::command::Command;
+use crate::selectors::matching::command_matches;
 use crate::selectors::{SelectOptions, SelectionIssue};
 
 /// What git selection found for the commands passed to [`select`].
@@ -115,19 +116,6 @@ fn scan(entry: &RepoEntry) -> Result<Vec<Change>, git2::Error> {
         entry.workdir.display()
     );
     Ok(changes)
-}
-
-/// Whether a changed `file` under `prefix` (one of the command's `auto.path`s) selects `cmd`.
-fn command_matches(cmd: &Command, prefix: &Path, file: &Path) -> bool {
-    if !file.starts_with(prefix) {
-        return false;
-    }
-    let regexes = cmd.auto.regexes();
-    if regexes.is_empty() {
-        return true;
-    }
-    let subject = file.to_string_lossy();
-    regexes.iter().any(|pattern| pattern.is_match(&subject))
 }
 
 /// Discover the repo of every `auto.path` of the git-enabled `commands`, once per path.

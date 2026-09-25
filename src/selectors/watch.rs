@@ -1,4 +1,5 @@
 use crate::commands::command::Command;
+use crate::selectors::matching::command_matches;
 use log::{debug, error, info};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
@@ -27,16 +28,10 @@ fn commands_for_paths<'a>(
     paths
         .iter()
         .flat_map(|path| {
-            path_map
-                .iter()
-                .filter(move |(key, _)| path.starts_with(key))
-                .flat_map(move |(_, cmds)| {
-                    let path_str = path.to_string_lossy();
-                    cmds.iter().filter(move |cmd| {
-                        let regexes = cmd.auto.regexes();
-                        regexes.is_empty() || regexes.iter().any(|re| re.is_match(&path_str))
-                    })
-                })
+            path_map.iter().flat_map(move |(key, cmds)| {
+                cmds.iter()
+                    .filter(move |cmd| command_matches(cmd, key, path))
+            })
         })
         .filter(|cmd| seen.insert(cmd.id.clone()))
         .collect()
@@ -153,17 +148,24 @@ mod tests {
     use super::*;
     use crate::commands::auto::Auto;
 
+    /// Like a loaded config: absolute cwd and paths, as notify reports absolute event paths.
+    const ROOT: &str = "/project";
+
+    fn abs(path: &str) -> PathBuf {
+        Path::new(ROOT).join(path)
+    }
+
     fn create_test_command(name: &str, paths: Vec<&str>, patterns: Vec<&str>) -> Command {
         Command {
             id: name.to_string(),
             name: name.to_string(),
             cmd: "test".to_string(),
-            cwd: PathBuf::new(),
+            cwd: PathBuf::from(ROOT),
 
             auto: Auto::create(
                 Some(true),
                 None,
-                paths.into_iter().map(PathBuf::from).collect(),
+                paths.into_iter().map(abs).collect(),
                 patterns.into_iter().map(String::from).collect(),
                 None,
                 None,
@@ -188,7 +190,7 @@ mod tests {
         let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
         let path_map = create_path_map(vec![cmd]);
 
-        let changed_paths = vec![PathBuf::from("src/main.rs")];
+        let changed_paths = vec![abs("src/main.rs")];
         let matching_commands = commands_for_paths(&changed_paths, &path_map);
 
         assert_eq!(matching_commands.len(), 1);
@@ -200,7 +202,7 @@ mod tests {
         let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
         let path_map = create_path_map(vec![cmd]);
 
-        let changed_paths = vec![PathBuf::from("src/main.txt")];
+        let changed_paths = vec![abs("src/main.txt"), abs("other/main.rs")];
         let matching_commands = commands_for_paths(&changed_paths, &path_map);
 
         assert_eq!(matching_commands.len(), 0);
@@ -212,7 +214,7 @@ mod tests {
         let cmd2 = create_test_command("test2", vec!["src"], vec![r".*\.rs$"]);
         let path_map = create_path_map(vec![cmd1, cmd2]);
 
-        let changed_paths = vec![PathBuf::from("src/main.rs")];
+        let changed_paths = vec![abs("src/main.rs")];
         let matching_commands = commands_for_paths(&changed_paths, &path_map);
 
         assert_eq!(matching_commands.len(), 2);
@@ -224,9 +226,9 @@ mod tests {
         let path_map = create_path_map(vec![cmd]);
 
         let changed_paths = vec![
-            PathBuf::from("src/main.rs"),
-            PathBuf::from("src/Cargo.toml"),
-            PathBuf::from("src/README.md"),
+            abs("src/main.rs"),
+            abs("src/Cargo.toml"),
+            abs("src/README.md"),
         ];
         let matching_commands = commands_for_paths(&changed_paths, &path_map);
 
@@ -240,10 +242,23 @@ mod tests {
         let cmd = create_test_command("test1", vec!["docs"], vec![]);
         let path_map = create_path_map(vec![cmd]);
 
-        let changed_paths = vec![PathBuf::from("docs/demo.tape")];
+        let changed_paths = vec![abs("docs/demo.tape")];
         let matching_commands = commands_for_paths(&changed_paths, &path_map);
 
         assert_eq!(matching_commands.len(), 1);
         assert_eq!(matching_commands[0].name, "test1");
+    }
+
+    #[test]
+    fn test_commands_for_paths_regex_relative_to_cwd() {
+        let anchored = create_test_command("anchored", vec!["."], vec![r"^src/.*\.rs$"]);
+        let parent_name = create_test_command("parent", vec!["."], vec!["project"]);
+        let path_map = create_path_map(vec![anchored, parent_name]);
+
+        let changed_paths = vec![abs("src/main.rs"), abs("nested/src/lib.rs")];
+        let matching_commands = commands_for_paths(&changed_paths, &path_map);
+
+        assert_eq!(matching_commands.len(), 1);
+        assert_eq!(matching_commands[0].name, "anchored");
     }
 }
