@@ -98,9 +98,10 @@ pub enum HookStatus {
     Foreign,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ForeignPolicy {
     /// Fail with [`HookError::ForeignHook`].
+    #[default]
     Refuse,
     /// Rename the hook to `pre-commit.local`, dropping a legacy fnug block from it, and replace
     /// it with an sh hook that runs fnug and then the original. Removing fnug's hook puts the
@@ -108,10 +109,14 @@ pub enum ForeignPolicy {
     Chain,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstallOptions {
     /// Pass `--no-workspace`, for a repository inside another fnug workspace.
     pub no_workspace: bool,
+    /// Pass this as `-c`. It is relative to the config's directory, which the hook runs from.
+    pub config_file: Option<PathBuf>,
+    /// Pass this as `--root`. It is relative to the config's directory.
+    pub root_dir: Option<PathBuf>,
     /// What to do with an existing hook that isn't a shell script.
     pub foreign: ForeignPolicy,
     /// fnug binary to run when `fnug` isn't on `PATH`, e.g. [`std::env::current_exe`]. Only
@@ -140,6 +145,18 @@ pub fn hook_args(no_workspace: bool) -> Vec<&'static str> {
         args.push("--no-workspace");
     }
     args.extend(["check", "--fail-fast", "--mute-success"]);
+    args
+}
+
+/// The hook's arguments to `fnug` for `opts`, as shell words.
+fn command_args(opts: &InstallOptions) -> Vec<String> {
+    let mut args = Vec::new();
+    for (flag, value) in [("-c", &opts.config_file), ("--root", &opts.root_dir)] {
+        if let Some(value) = value {
+            args.extend([flag.to_string(), sh_quote(&value.to_string_lossy())]);
+        }
+    }
+    args.extend(hook_args(opts.no_workspace).into_iter().map(str::to_string));
     args
 }
 
@@ -317,8 +334,7 @@ pub fn install_with(
 pub fn install(config_dir: &Path, no_workspace: bool) -> Result<(), HookError> {
     let opts = InstallOptions {
         no_workspace,
-        foreign: ForeignPolicy::Refuse,
-        fallback_exe: None,
+        ..InstallOptions::default()
     };
     install_with(&resolve(config_dir)?, &opts).map(drop)
 }
@@ -456,7 +472,7 @@ type Planned = (Vec<Step>, InstallOutcome, Option<String>);
 fn block_for(target: &HookTarget, opts: &InstallOptions, chain: bool) -> String {
     let local = target.location == HookLocation::Local;
     render_block(&BlockSpec {
-        args: &hook_args(opts.no_workspace),
+        args: &command_args(opts),
         config_rel: &target.config_rel,
         fallback_exe: opts.fallback_exe.as_deref().filter(|_| local),
         required: local,
@@ -465,7 +481,7 @@ fn block_for(target: &HookTarget, opts: &InstallOptions, chain: bool) -> String 
 }
 
 fn install_steps(target: &HookTarget, opts: &InstallOptions) -> Result<Planned, HookError> {
-    let args = hook_args(opts.no_workspace);
+    let args = command_args(opts);
     let block = |chain| block_for(target, opts, chain);
     match &target.location {
         HookLocation::Husky { user_hook } => {
@@ -632,7 +648,7 @@ fn remove_steps(target: &HookTarget) -> Result<Vec<Step>, HookError> {
 }
 
 struct BlockSpec<'a> {
-    args: &'a [&'a str],
+    args: &'a [String],
     /// The config's directory relative to the work tree top, where git runs hooks. Relative,
     /// because linked worktrees share one hook.
     config_rel: &'a Path,
@@ -928,7 +944,10 @@ mod tests {
 
     #[test]
     fn render_block_is_fenced_and_versioned() {
-        let args = hook_args(true);
+        let args = command_args(&InstallOptions {
+            no_workspace: true,
+            ..InstallOptions::default()
+        });
         let shared = render_block(&BlockSpec {
             args: &args,
             config_rel: Path::new(""),
