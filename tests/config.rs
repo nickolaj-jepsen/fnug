@@ -4,7 +4,7 @@ use std::path::Path;
 
 use fnug::commands::command::Command;
 use fnug::commands::group::CommandGroup;
-use fnug::load_config;
+use fnug::{LoadOptions, load_config};
 
 fn write_config(dir: &Path, content: &str) -> String {
     let path = dir.join(".fnug.yaml");
@@ -515,6 +515,77 @@ children:
     assert!(err.contains("backendx"), "{err}");
     assert!(err.contains("No such file"), "{err}");
     assert!(err.contains("root > backend"), "{err}");
+}
+
+#[test]
+fn start_dir_search_finds_ancestor_config() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), "name: root\n");
+    let nested = dir.path().join("a/b");
+    std::fs::create_dir_all(&nested).unwrap();
+    let loaded = fnug::load(&LoadOptions {
+        start_dir: Some(nested),
+        no_workspace: true,
+        ..LoadOptions::default()
+    })
+    .unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    assert_eq!(loaded.config_path, root.join(".fnug.yaml"));
+    assert_eq!(loaded.cwd, root);
+    assert_eq!(loaded.sources, [root.join(".fnug.yaml")]);
+}
+
+#[test]
+fn start_dir_without_config_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = fnug::load(&LoadOptions {
+        start_dir: Some(dir.path().to_path_buf()),
+        no_workspace: true,
+        ..LoadOptions::default()
+    });
+    // A config above the tempdir (e.g. in $TMPDIR's parents) would be found instead.
+    if let Err(err) = err {
+        assert!(
+            matches!(err, fnug::config_file::ConfigError::ConfigNotFound(_)),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn relative_config_resolves_against_start_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("ci.yaml"), "name: ci\n").unwrap();
+    let loaded = fnug::load(&LoadOptions {
+        config: Some("sub/ci.yaml".into()),
+        start_dir: Some(dir.path().to_path_buf()),
+        no_workspace: true,
+    })
+    .unwrap();
+    assert_eq!(loaded.root.name, "ci");
+    assert_eq!(loaded.cwd, sub.canonicalize().unwrap());
+}
+
+#[test]
+fn workspace_sources_list_every_config() {
+    let dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(dir.path()).unwrap();
+    write_config(dir.path(), "name: root\nworkspace: true\n");
+    let pkg = dir.path().join("pkg");
+    std::fs::create_dir(&pkg).unwrap();
+    write_config(&pkg, "name: pkg\ncommands:\n  - name: a\n    cmd: 'true'\n");
+    let loaded = fnug::load(&LoadOptions {
+        config: Some(dir.path().join(".fnug.yaml")),
+        ..LoadOptions::default()
+    })
+    .unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    assert_eq!(
+        loaded.sources,
+        [root.join(".fnug.yaml"), root.join("pkg/.fnug.yaml")]
+    );
 }
 
 #[test]

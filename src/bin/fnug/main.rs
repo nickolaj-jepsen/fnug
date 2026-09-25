@@ -3,12 +3,13 @@ mod mcp;
 mod setup;
 mod tui;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use log::LevelFilter;
 
-use fnug::load_config;
+use fnug::{LoadOptions, LoadedConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "fnug", about = "TUI command runner based on git changes")]
@@ -70,17 +71,24 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    let load_opts = LoadOptions {
+        config: cli.config.as_deref().map(PathBuf::from),
+        no_workspace: cli.no_workspace,
+        ..LoadOptions::default()
+    };
+
     // Setup can work without a config file
     if let Some(Commands::Setup(ref args)) = cli.command {
-        let config_result = load_config(cli.config.as_deref(), cli.no_workspace);
-        let (config, cwd) = match config_result {
-            Ok((config, cwd)) => (Some(config), cwd),
+        let (config, cwd) = match fnug::load(&load_opts) {
+            Ok(loaded) => (Some(loaded.root), loaded.cwd),
             Err(_) => (None, std::env::current_dir()?),
         };
         return setup::run(args, &cwd, config.as_ref());
     }
 
-    let (config, cwd) = load_config(cli.config.as_deref(), cli.no_workspace)?;
+    let LoadedConfig {
+        root: config, cwd, ..
+    } = fnug::load(&load_opts)?;
 
     // Dispatch subcommands
     let check_result = match cli.command {
