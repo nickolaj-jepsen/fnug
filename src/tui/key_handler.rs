@@ -45,6 +45,11 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::Esc && self.fullscreen && self.focus == Focus::Tree {
+            self.fullscreen = false;
+            return;
+        }
+
         // If terminal is focused, forward keys to PTY (including Ctrl+C, Ctrl+R)
         if matches!(self.focus, Focus::Terminal) {
             if key.code == KeyCode::Esc {
@@ -146,7 +151,7 @@ impl App {
 
         // Tree navigation
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
+            KeyCode::Char('q') => {
                 self.should_quit = true;
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -258,5 +263,65 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
+
+    use crate::commands::command::Command;
+    use crate::commands::group::CommandGroup;
+    use crate::tui::app::App;
+    use crate::tui::log_state::LogBuffer;
+
+    fn test_app() -> App {
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![Command {
+                id: "a".into(),
+                name: "a".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        App::new(config, PathBuf::new(), LogBuffer::new())
+    }
+
+    fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        app.handle_key(KeyEvent::new(code, modifiers), Rect::new(0, 0, 80, 24));
+    }
+
+    #[test]
+    fn esc_in_fullscreen_exits_fullscreen_not_quit() {
+        let mut app = test_app();
+        app.fullscreen = true;
+
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(!app.fullscreen);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn esc_in_tree_does_not_quit() {
+        let mut app = test_app();
+
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.should_quit);
+
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_tree() {
+        let mut app = test_app();
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.should_quit);
     }
 }
