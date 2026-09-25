@@ -1503,3 +1503,96 @@ fn workspace_package_env_expands_against_process_only() {
     assert_eq!(env["SEEN"], "[]");
     assert_eq!(env["P"], std::env::var("PATH").unwrap());
 }
+
+// ─── --root ───
+
+const ROOTED_CONFIG: &str = r"
+name: root
+workspace:
+  paths: [packages/*]
+children:
+  - name: sub
+    cwd: sub
+    auto:
+      path: [src]
+    commands:
+      - name: pwd
+        cmd: pwd
+        auto:
+          always: true
+";
+
+/// A config in its own tempdir, and a separate root dir with `sub/` and a package.
+fn rooted() -> (tempfile::TempDir, tempfile::TempDir) {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_config(config_dir.path(), ROOTED_CONFIG);
+    let root = workspace("name: unused\n", &[("packages/p", &one_command("p"))]);
+    std::fs::create_dir(root.path().join("sub")).unwrap();
+    (config_dir, root)
+}
+
+#[test]
+fn root_dir_override_anchors_cwd() {
+    let (config_dir, root) = rooted();
+    let loaded = fnug::load(&LoadOptions {
+        config: Some(config_dir.path().join(".fnug.yaml")),
+        root_dir: Some(root.path().to_path_buf()),
+        ..LoadOptions::default()
+    })
+    .unwrap();
+    let base = root.path().canonicalize().unwrap();
+    assert_eq!(loaded.cwd, base);
+    assert_eq!(
+        loaded.config_path,
+        config_dir.path().canonicalize().unwrap().join(".fnug.yaml")
+    );
+    let pwd = command(&loaded.root, "pwd");
+    assert_eq!(pwd.cwd, base.join("sub"));
+    assert_eq!(pwd.auto.paths(), [base.join("sub/src")]);
+    assert_eq!(command(&loaded.root, "p-cmd").cwd, base.join("packages/p"));
+}
+
+#[test]
+fn root_dir_is_where_the_search_starts() {
+    let (_config_dir, root) = rooted();
+    let loaded = fnug::load(&LoadOptions {
+        root_dir: Some(root.path().to_path_buf()),
+        start_dir: Some(std::env::temp_dir()),
+        ..LoadOptions::default()
+    })
+    .unwrap();
+    assert_eq!(loaded.root.name, "unused");
+    assert_eq!(loaded.cwd, root.path().canonicalize().unwrap());
+}
+
+#[test]
+fn root_dir_missing_is_an_error() {
+    let (config_dir, root) = rooted();
+    let err = fnug::load(&LoadOptions {
+        config: Some(config_dir.path().join(".fnug.yaml")),
+        root_dir: Some(root.path().join("nope")),
+        ..LoadOptions::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("nope"), "{err}");
+}
+
+#[test]
+fn root_flag_runs_commands_in_root_dir() {
+    let (config_dir, root) = rooted();
+    let config = config_dir.path().join(".fnug.yaml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(config_dir.path())
+        .arg("-c")
+        .arg(&config)
+        .arg("--root")
+        .arg(root.path())
+        .args(["check", "--no-tui"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sub = root.path().canonicalize().unwrap().join("sub");
+    assert!(stdout.contains(&*sub.to_string_lossy()), "{stdout}");
+}
