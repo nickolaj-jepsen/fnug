@@ -4,7 +4,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use fnug::setup::hooks::{
     self, ForeignPolicy, HookError, HookLocation, HookStatus, InstallOptions, InstallOutcome,
@@ -317,7 +317,7 @@ impl Shim {
         let log = dir.path().join("log");
         write_executable(
             &bin.join("fnug"),
-            "#!/bin/sh\n{ printf 'pwd=%s\\n' \"$PWD\"; printf 'arg=%s\\n' \"$@\"; } >> \"$FNUG_SHIM_LOG\"\nexit \"${FNUG_SHIM_EXIT:-0}\"\n",
+            "#!/bin/sh\n{ printf 'pwd=%s\\n' \"$PWD\"; printf 'index=%s\\n' \"${GIT_INDEX_FILE-}\"; printf 'arg=%s\\n' \"$@\"; } >> \"$FNUG_SHIM_LOG\"\nexit \"${FNUG_SHIM_EXIT:-0}\"\n",
         );
         Self {
             _dir: dir,
@@ -337,28 +337,47 @@ impl Shim {
     }
 
     fn run_with_path(&self, hook: &Path, workdir: &Path, fnug_exit: i32, path: &str) -> i32 {
+        self.run_hook(hook, workdir, fnug_exit, path, &[]).0
+    }
+
+    /// Exit code and stderr of `hook`.
+    fn run_hook(
+        &self,
+        hook: &Path,
+        workdir: &Path,
+        fnug_exit: i32,
+        path: &str,
+        env: &[(&str, &str)],
+    ) -> (i32, String) {
         let _ = std::fs::remove_file(&self.log);
-        let output = Command::new("sh")
+        let output = Command::new(which_sh())
             .arg(hook)
             .current_dir(workdir)
             .env("PATH", path)
             .env("FNUG_SHIM_LOG", &self.log)
             .env("FNUG_SHIM_EXIT", fnug_exit.to_string())
+            .envs(env.iter().copied())
             .output()
             .unwrap();
-        output.status.code().expect("hook killed by a signal")
+        let code = output.status.code().expect("hook killed by a signal");
+        (code, String::from_utf8_lossy(&output.stderr).into_owned())
     }
 
     fn ran(&self) -> bool {
         self.log.exists()
     }
 
-    fn args(&self) -> Vec<String> {
+    fn logged(&self, key: &str) -> Vec<String> {
+        let prefix = format!("{key}=");
         read(&self.log)
             .lines()
-            .filter_map(|l| l.strip_prefix("arg="))
+            .filter_map(|l| l.strip_prefix(&prefix))
             .map(str::to_string)
             .collect()
+    }
+
+    fn args(&self) -> Vec<String> {
+        self.logged("arg")
     }
 }
 
@@ -366,6 +385,7 @@ fn options(foreign: ForeignPolicy) -> InstallOptions {
     InstallOptions {
         no_workspace: false,
         foreign,
+        fallback_exe: None,
     }
 }
 
@@ -465,12 +485,16 @@ fn python_hook_refused_then_chained() {
     assert!(!local.exists());
 }
 
-fn which_sh() -> PathBuf {
-    let output = Command::new("sh")
-        .args(["-c", "command -v sh"])
-        .output()
-        .unwrap();
-    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+/// Absolute path of `sh`, which `Command` can't find when a test changes `PATH`.
+fn which_sh() -> &'static Path {
+    static SH: OnceLock<PathBuf> = OnceLock::new();
+    SH.get_or_init(|| {
+        let output = Command::new("sh")
+            .args(["-c", "command -v sh"])
+            .output()
+            .unwrap();
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    })
 }
 
 #[test]
@@ -597,4 +621,101 @@ fn newer_hook_format_is_outdated() {
     std::fs::write(&hook, old).unwrap();
     assert_eq!(hooks::status(&target), HookStatus::Outdated);
     assert!(hooks::is_installed(&root));
+}
+
+// ─── finding fnug and the config ───
+
+/// A `PATH` without fnug. The hook needs only shell builtins to report that.
+const NO_FNUG_PATH: &str = "/nonexistent";
+
+#[test]
+fn subdir_config_hook_cds() {
+    for app in ["app", "it's here"] {
+        let (_tmp, root, hook) = repo();
+        let shim = Shim::new();
+        let config_dir = root.join(app);
+        std::fs::create_dir(&config_dir).unwrap();
+        write_executable(&hook, "#!/bin/sh\npwd > hook-pwd\n");
+        let target = hooks::resolve(&config_dir).unwrap();
+
+        hooks::install_with(&target, &options(ForeignPolicy::Refuse)).unwrap();
+
+        let path = format!("{}:{}", shim.bin.display(), std::env::var("PATH").unwrap());
+        let env = [("GIT_INDEX_FILE", ".git/index")];
+        assert_eq!(shim.run_hook(&hook, &root, 0, &path, &env).0, 0);
+        assert_eq!(shim.logged("pwd"), [config_dir.display().to_string()]);
+        assert_eq!(
+            shim.logged("index"),
+            [root.join(".git/index").display().to_string()],
+            "a relative index path must survive the cd"
+        );
+        assert_eq!(
+            read(&root.join("hook-pwd")).trim(),
+            root.display().to_string(),
+            "the user's lines still run from the top"
+        );
+    }
+}
+
+#[test]
+fn config_at_the_top_runs_there() {
+    let (_tmp, root, hook) = repo();
+    let shim = Shim::new();
+    hooks::install(&root, false).unwrap();
+    assert!(!read(&hook).contains("cd --"));
+    assert_eq!(shim.run(&hook, &root, 0), 0);
+    assert_eq!(shim.logged("pwd"), [root.display().to_string()]);
+}
+
+#[test]
+fn missing_fnug_local_blocks_shared_skips() {
+    // Local: the commit is blocked with a hint
+    let (_tmp, root, hook) = repo();
+    let shim = Shim::new();
+    let target = hooks::resolve(&root).unwrap();
+    hooks::install_with(&target, &options(ForeignPolicy::Refuse)).unwrap();
+    let (code, stderr) = shim.run_hook(&hook, &root, 0, NO_FNUG_PATH, &[]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("fnug not found") && stderr.contains("--no-verify"),
+        "{stderr}"
+    );
+
+    // Local with a fallback binary: used when fnug isn't on PATH
+    let with_fallback = InstallOptions {
+        fallback_exe: Some(shim.bin.join("fnug")),
+        ..options(ForeignPolicy::Refuse)
+    };
+    hooks::install_with(&target, &with_fallback).unwrap();
+    assert_eq!(shim.run_with_path(&hook, &root, 5, NO_FNUG_PATH), 5);
+    assert!(shim.ran());
+
+    // Shared: skipped with a warning, and the rest of the hook still runs
+    let (_tmp, root, _) = repo();
+    let repo = Repository::open(&root).unwrap();
+    set_hooks_path(&repo, ".githooks");
+    let hook = root.join(".githooks/pre-commit");
+    write_executable(&hook, "#!/bin/sh\necho ran > user-line\n");
+    let target = hooks::resolve(&root).unwrap();
+    hooks::install_with(&target, &with_fallback).unwrap();
+    assert!(
+        !read(&hook).contains(&shim.bin.display().to_string()),
+        "no machine-specific path in a shared hook"
+    );
+    let (code, stderr) = shim.run_hook(&hook, &root, 0, NO_FNUG_PATH, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("fnug not found"), "{stderr}");
+    assert!(root.join("user-line").exists());
+
+    // Also when the hook runs with `sh -e`, as a `#!/bin/sh -e` shebang does
+    std::fs::remove_file(root.join("user-line")).unwrap();
+    let status = Command::new(which_sh())
+        .arg("-e")
+        .arg(&hook)
+        .current_dir(&root)
+        .env("PATH", NO_FNUG_PATH)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(root.join("user-line").exists());
 }

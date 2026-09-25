@@ -112,6 +112,9 @@ pub struct InstallOptions {
     pub no_workspace: bool,
     /// What to do with an existing hook that isn't a shell script.
     pub foreign: ForeignPolicy,
+    /// fnug binary to run when `fnug` isn't on `PATH`, e.g. [`std::env::current_exe`]. Only
+    /// [`HookLocation::Local`] hooks get it: a shared hook must not hold a machine's path.
+    pub fallback_exe: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +296,7 @@ pub fn install(config_dir: &Path, no_workspace: bool) -> Result<(), HookError> {
     let opts = InstallOptions {
         no_workspace,
         foreign: ForeignPolicy::Refuse,
+        fallback_exe: None,
     };
     install_with(&resolve(config_dir)?, &opts).map(drop)
 }
@@ -342,7 +346,16 @@ fn plan_install(
     opts: &InstallOptions,
 ) -> Result<(Vec<Step>, InstallOutcome), HookError> {
     let args = hook_args(opts.no_workspace);
-    let block = |chain| render_block(&BlockSpec { args: &args, chain });
+    let local = target.location == HookLocation::Local;
+    let block = |chain| {
+        render_block(&BlockSpec {
+            args: &args,
+            config_rel: &target.config_rel,
+            fallback_exe: opts.fallback_exe.as_deref().filter(|_| local),
+            required: local,
+            chain,
+        })
+    };
     match &target.location {
         HookLocation::Husky { user_hook } => {
             return Err(HookError::Husky {
@@ -407,7 +420,7 @@ fn plan_install(
         ForeignPolicy::Refuse => Err(HookError::ForeignHook {
             path: path.clone(),
             interpreter,
-            snippet: format!("fnug {}", args.join(" ")),
+            snippet: in_config_dir(&target.config_rel, &format!("fnug {}", args.join(" "))),
         }),
         ForeignPolicy::Chain => {
             let original = path.with_file_name(CHAINED_NAME);
@@ -482,17 +495,60 @@ fn plan_remove(target: &HookTarget) -> Result<Vec<Step>, HookError> {
 
 struct BlockSpec<'a> {
     args: &'a [&'a str],
+    /// The config's directory relative to the work tree top, where git runs hooks. Relative,
+    /// because linked worktrees share one hook.
+    config_rel: &'a Path,
+    /// Run this when `fnug` isn't on `PATH`.
+    fallback_exe: Option<&'a Path>,
+    /// Fail the commit when fnug is missing, instead of warning and going on. Only a hook no one
+    /// else runs should block commits of people who don't have fnug.
+    required: bool,
     /// Run `pre-commit.local` after fnug passes.
     chain: bool,
 }
 
 /// fnug's fenced block, ending in a newline.
 fn render_block(spec: &BlockSpec) -> String {
+    let find = match spec.fallback_exe {
+        Some(exe) => format!(
+            "fnug_bin=$(command -v fnug) || fnug_bin={}",
+            sh_quote(&exe.to_string_lossy())
+        ),
+        // The `||` keeps a hook run with `sh -e` going when fnug is missing
+        None => "fnug_bin=$(command -v fnug) || fnug_bin=".to_string(),
+    };
+    let run = format!("\"$fnug_bin\" {}", spec.args.join(" "));
     let mut lines = vec![
         BEGIN.to_string(),
         format!("{VERSION_PREFIX}{HOOK_FORMAT_VERSION}"),
-        format!("fnug {} || exit $?", spec.args.join(" ")),
+        find,
+        "if [ -x \"$fnug_bin\" ]; then".to_string(),
     ];
+    if spec.config_rel.as_os_str().is_empty() {
+        lines.push(format!("  {run} || exit $?"));
+    } else {
+        lines.extend([
+            "  (".to_string(),
+            "    # git passes a GIT_INDEX_FILE relative to the top; keep it valid after the cd"
+                .to_string(),
+            "    case ${GIT_INDEX_FILE-} in ''|/*) ;; *) GIT_INDEX_FILE=$PWD/$GIT_INDEX_FILE; export GIT_INDEX_FILE ;; esac".to_string(),
+            format!(
+                "    cd -- {} && exec {run}",
+                sh_quote(&spec.config_rel.to_string_lossy())
+            ),
+            "  ) || exit $?".to_string(),
+        ]);
+    }
+    lines.push("else".to_string());
+    if spec.required {
+        lines.push("  echo \"fnug not found. Install fnug, or run 'fnug setup' to remove this hook; 'git commit --no-verify' skips it once.\" >&2".to_string());
+        lines.push("  exit 1".to_string());
+    } else {
+        lines.push(
+            "  echo \"fnug not found, so its pre-commit checks were skipped\" >&2".to_string(),
+        );
+    }
+    lines.push("fi".to_string());
     if spec.chain {
         lines.push(format!(
             "fnug_chained=\"$(dirname -- \"$0\")/{CHAINED_NAME}\""
@@ -503,6 +559,23 @@ fn render_block(spec: &BlockSpec) -> String {
     }
     lines.push(END.to_string());
     lines.join("\n") + "\n"
+}
+
+/// `command`, run from `config_rel` when that isn't the top.
+fn in_config_dir(config_rel: &Path, command: &str) -> String {
+    if config_rel.as_os_str().is_empty() {
+        command.to_string()
+    } else {
+        format!(
+            "cd -- {} && {command}",
+            sh_quote(&config_rel.to_string_lossy())
+        )
+    }
+}
+
+/// `value` as a single-quoted shell word.
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// What runs a hook file, going by its shebang.
@@ -689,16 +762,48 @@ mod tests {
     }
 
     #[test]
-    fn render_block_runs_fnug_and_exits_on_failure() {
-        let block = render_block(&BlockSpec {
-            args: &hook_args(true),
+    fn sh_quote_escapes_single_quotes() {
+        assert_eq!(sh_quote("app"), "'app'");
+        assert_eq!(sh_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn render_block_is_fenced_and_versioned() {
+        let args = hook_args(true);
+        let shared = render_block(&BlockSpec {
+            args: &args,
+            config_rel: Path::new(""),
+            fallback_exe: None,
+            required: false,
             chain: false,
         });
-        assert_eq!(
-            block,
-            format!(
-                "{BEGIN}\n# fnug-hook-version: {HOOK_FORMAT_VERSION}\nfnug --no-workspace check --fail-fast --mute-success || exit $?\n{END}\n"
-            )
+        let lines: Vec<&str> = shared.lines().collect();
+        assert_eq!(lines[0], BEGIN);
+        assert_eq!(lines[1], format!("{VERSION_PREFIX}{HOOK_FORMAT_VERSION}"));
+        assert_eq!(lines.last(), Some(&END));
+        assert!(
+            shared.contains(
+                "  \"$fnug_bin\" --no-workspace check --fail-fast --mute-success || exit $?\n"
+            ),
+            "{shared}"
         );
+        assert!(!shared.contains("exit 1"), "{shared}");
+
+        let local = render_block(&BlockSpec {
+            args: &args,
+            config_rel: Path::new("app"),
+            fallback_exe: Some(Path::new("/opt/it's/fnug")),
+            required: true,
+            chain: false,
+        });
+        assert!(
+            local.contains(r"|| fnug_bin='/opt/it'\''s/fnug'"),
+            "{local}"
+        );
+        assert!(
+            local.contains("cd -- 'app' && exec \"$fnug_bin\""),
+            "{local}"
+        );
+        assert!(local.contains("  exit 1\n"), "{local}");
     }
 }
