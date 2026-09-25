@@ -37,8 +37,16 @@ impl Editor {
     /// The top-level JSON key that holds server entries.
     fn servers_key(self) -> &'static str {
         match self {
-            Self::ClaudeCode => "mcpServers",
-            Self::VsCode | Self::Cursor => "servers",
+            Self::ClaudeCode | Self::Cursor => "mcpServers",
+            Self::VsCode => "servers",
+        }
+    }
+
+    /// Key that fnug 0.1.0-alpha.11 to alpha.13 wrongly wrote this editor's entry under.
+    fn legacy_servers_key(self) -> Option<&'static str> {
+        match self {
+            Self::Cursor => Some("servers"),
+            Self::ClaudeCode | Self::VsCode => None,
         }
     }
 
@@ -69,6 +77,9 @@ impl Editor {
         let mut json = read_json(&path)?.unwrap_or_else(|| serde_json::json!({}));
 
         let root = json.as_object_mut().ok_or(McpError::NotAnObject)?;
+        if let Some(legacy) = self.legacy_servers_key() {
+            remove_fnug_entry(root, legacy);
+        }
         let servers = root
             .entry(self.servers_key())
             .or_insert_with(|| serde_json::json!({}));
@@ -90,14 +101,9 @@ impl Editor {
         };
 
         let root = json.as_object_mut().ok_or(McpError::NotAnObject)?;
-        if let Some(servers) = root
-            .get_mut(self.servers_key())
-            .and_then(|s| s.as_object_mut())
-        {
-            servers.remove("fnug");
-            if servers.is_empty() {
-                root.remove(self.servers_key());
-            }
+        remove_fnug_entry(root, self.servers_key());
+        if let Some(legacy) = self.legacy_servers_key() {
+            remove_fnug_entry(root, legacy);
         }
 
         // Delete file if no meaningful content remains (only empty arrays/objects).
@@ -134,6 +140,16 @@ fn fnug_server_entry() -> serde_json::Value {
         "command": "fnug",
         "args": ["mcp"]
     })
+}
+
+/// Remove `root[key].fnug`, and `root[key]` too if that leaves it empty.
+fn remove_fnug_entry(root: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    if let Some(servers) = root.get_mut(key).and_then(|s| s.as_object_mut())
+        && servers.remove("fnug").is_some()
+        && servers.is_empty()
+    {
+        root.remove(key);
+    }
 }
 
 fn is_empty_collection(v: &serde_json::Value) -> bool {
