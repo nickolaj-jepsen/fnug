@@ -24,6 +24,12 @@ pub enum ConfigError {
     ConfigNotFound(PathBuf),
     #[error("Config file not found: {0}")]
     ConfigFileMissing(PathBuf),
+    #[error("Root directory {path} not found: {source}")]
+    RootDirMissing {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("Unable to read config file {path}: {source}")]
     Io {
         path: PathBuf,
