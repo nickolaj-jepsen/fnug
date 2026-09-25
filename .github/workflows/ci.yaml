@@ -45,6 +45,14 @@ jobs:
           rustflags: ""
       - run: cargo +1.88 check --locked --all-targets
 
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
   vt100-version:
     runs-on: ubuntu-latest
     steps:
