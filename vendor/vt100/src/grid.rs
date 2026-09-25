@@ -114,6 +114,18 @@ impl Grid {
         self.pos
     }
 
+    /// The cursor position as a cursor position report gives it: 1-based,
+    /// relative to the scroll region in origin mode, and on the last column
+    /// while a wrap is pending.
+    pub fn cursor_report_position(&self) -> (u16, u16) {
+        let row = if self.origin_mode {
+            self.pos.row.saturating_sub(self.scroll_top)
+        } else {
+            self.pos.row
+        };
+        (row + 1, self.pos.col.min(self.size.cols - 1) + 1)
+    }
+
     pub fn set_pos(&mut self, mut pos: Pos) {
         if self.origin_mode {
             pos.row = pos.row.saturating_add(self.scroll_top);

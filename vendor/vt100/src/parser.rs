@@ -52,6 +52,25 @@ impl Parser {
         self.screen.scrollback_len()
     }
 
+    /// Returns and clears the bytes the terminal owes the program in answer
+    /// to its queries: device status and cursor position reports
+    /// (`CSI 5 n`, `CSI 6 n`, `CSI ? 6 n`) and primary and secondary device
+    /// attributes (`CSI c`, `CSI > c`), in the order they were asked.
+    ///
+    /// The host should write these bytes to the program's input. Up to 4096
+    /// bytes are kept between calls; replies that don't fit are dropped
+    /// whole.
+    #[must_use]
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        self.screen.take_replies()
+    }
+
+    /// Returns whether there are replies waiting for `take_replies`.
+    #[must_use]
+    pub fn has_pending_replies(&self) -> bool {
+        self.screen.has_pending_replies()
+    }
+
     /// Returns a reference to a `Screen` object containing the terminal
     /// state.
     #[must_use]
