@@ -48,6 +48,7 @@ inquire = "0.7"
 futures = "0.3"
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
 schemars = "1"
+jsonc-parser = { version = "0.33", features = ["cst"] }
 
 [profile.release]
 debug = "line-tables-only"

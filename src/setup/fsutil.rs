@@ -47,6 +47,21 @@ pub fn write_atomic(path: &Path, contents: &str, mode: Option<u32>) -> io::Resul
     written
 }
 
+/// The first executable file named `name` in the directories on `PATH`.
+#[must_use]
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    find_in(name, &std::env::var_os("PATH")?)
+}
+
+fn find_in(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+}
+
 /// A new file next to the target, named so it is recognisable if something goes wrong.
 fn create_temp(dir: &Path, name: &str) -> io::Result<(PathBuf, fs::File)> {
     let mut attempt = 0;
@@ -94,6 +109,21 @@ mod tests {
         assert_eq!(mode(&path), 0o750);
         write_atomic(&path, "newer", Some(0o755)).unwrap();
         assert_eq!(mode(&path), 0o755);
+    }
+
+    #[test]
+    fn find_in_skips_missing_and_non_executable_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, exec) = (dir.path().join("plain"), dir.path().join("exec"));
+        fs::create_dir(&plain).unwrap();
+        fs::create_dir(&exec).unwrap();
+        fs::write(plain.join("tool"), "").unwrap();
+        fs::write(exec.join("tool"), "").unwrap();
+        fs::set_permissions(exec.join("tool"), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([dir.path().join("missing"), plain, exec.clone()]).unwrap();
+
+        assert_eq!(find_in("tool", &path), Some(exec.join("tool")));
+        assert_eq!(find_in("other", &path), None);
     }
 
     #[test]
