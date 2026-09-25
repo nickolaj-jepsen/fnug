@@ -490,6 +490,30 @@ mod tests {
     }
 
     #[test]
+    fn reaped_handle_never_signals_live_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .current_dir(dir.path())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        // A handle marked reaped while its pid is alive is exactly what a reused pid looks like
+        let handle = ProcessHandle::new(child.id());
+        handle.reap_with(|| ());
+
+        assert!(!handle.stop(StopSignal::Kill, Duration::ZERO).unwrap());
+        assert!(!handle.signal(StopSignal::Interrupt).unwrap());
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "reused pid was signalled"
+        );
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
     fn single_scope_signals_only_the_pid() {
         let dir = tempfile::tempdir().unwrap();
         // Stays in the test's process group, so a killpg on its pid would find no group
