@@ -125,16 +125,35 @@ fn index_file_for(entry: &RepoEntry, opts: &SelectOptions) -> Option<PathBuf> {
     (over.git_dir.canonicalize().ok()? == own).then(|| over.index_file.clone())
 }
 
+/// Why a repo could not be scanned.
+enum ScanError {
+    Git(git2::Error),
+    /// The since-base scope's base can't be resolved, or shares no history with `HEAD`.
+    BaseRefNotFound {
+        base: String,
+        message: String,
+    },
+    /// The since-base scope needs a `HEAD` commit.
+    UnbornHead,
+}
+
+impl From<git2::Error> for ScanError {
+    fn from(e: git2::Error) -> Self {
+        ScanError::Git(e)
+    }
+}
+
 /// Collect the changed files under a repo's pathspecs within `scope`, reading `index_file`
 /// instead of the repo's index if given.
 fn scan(
     entry: &RepoEntry,
     scope: &GitScope,
     index_file: Option<&Path>,
-) -> Result<Vec<Change>, git2::Error> {
+) -> Result<Vec<Change>, ScanError> {
     let changes = match scope {
         GitScope::WorkingTree => scan_working_tree(entry)?,
         GitScope::Staged => scan_staged(entry, index_file)?,
+        GitScope::Since(base) => scan_since(entry, base)?,
     };
     debug!(
         "Found {} changed files in {}",
@@ -196,6 +215,39 @@ fn scan_staged(entry: &RepoEntry, index_file: Option<&Path>) -> Result<Vec<Chang
         Some(&index),
         Some(&mut diff_options(entry)),
     )?;
+    Ok(diff_changes(entry, &diff))
+}
+
+fn scan_since(entry: &RepoEntry, base: &str) -> Result<Vec<Change>, ScanError> {
+    let repo = &entry.repo;
+    let head = match repo.head() {
+        Ok(head) => head.peel_to_commit()?,
+        Err(e) if matches!(e.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
+            return Err(ScanError::UnbornHead);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let not_found = |message: String| ScanError::BaseRefNotFound {
+        base: base.to_string(),
+        message,
+    };
+    let base_commit = repo
+        .revparse_single(base)
+        .and_then(|object| object.peel_to_commit())
+        .map_err(|e| not_found(e.message().to_string()))?;
+    let merge_base = repo.merge_base(head.id(), base_commit.id()).map_err(|e| {
+        not_found(if e.code() != ErrorCode::NotFound {
+            e.message().to_string()
+        } else if repo.is_shallow() {
+            "no common history with HEAD in this shallow clone".to_string()
+        } else {
+            "no common history with HEAD".to_string()
+        })
+    })?;
+    let tree = repo.find_commit(merge_base)?.tree()?;
+    let mut opts = diff_options(entry);
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))?;
     Ok(diff_changes(entry, &diff))
 }
 
@@ -282,7 +334,7 @@ fn discover_repos<'a>(
     (repos, path_repo)
 }
 
-/// Scan `repos` in parallel. A repo that fails becomes a `ScanFailed` issue and `None`.
+/// Scan `repos` in parallel. A repo that fails becomes an issue and `None`.
 fn scan_repos(
     repos: Vec<RepoEntry>,
     opts: &SelectOptions,
@@ -293,10 +345,9 @@ fn scan_repos(
         let handles: Vec<_> = repos
             .into_iter()
             .map(|entry| {
-                let index_file = match opts.scope {
-                    GitScope::Staged => index_file_for(&entry, opts),
-                    GitScope::WorkingTree => None,
-                };
+                let index_file = (opts.scope == GitScope::Staged)
+                    .then(|| index_file_for(&entry, opts))
+                    .flatten();
                 s.spawn(move || scan(&entry, &opts.scope, index_file.as_deref()))
             })
             .collect();
@@ -309,12 +360,26 @@ fn scan_repos(
         .into_iter()
         .zip(workdirs)
         .map(|(result, repo)| {
-            let message = match result {
+            let issue = match result {
                 Ok(Ok(changes)) => return Some(changes),
-                Ok(Err(e)) => e.message().to_string(),
-                Err(_) => "the scan panicked".to_string(),
+                Ok(Err(ScanError::Git(e))) => SelectionIssue::ScanFailed {
+                    repo,
+                    message: e.message().to_string(),
+                },
+                Ok(Err(ScanError::BaseRefNotFound { base, message })) => {
+                    SelectionIssue::BaseRefNotFound {
+                        repo,
+                        base,
+                        message,
+                    }
+                }
+                Ok(Err(ScanError::UnbornHead)) => SelectionIssue::UnbornHead { repo },
+                Err(_) => SelectionIssue::ScanFailed {
+                    repo,
+                    message: "the scan panicked".to_string(),
+                },
             };
-            issues.push(SelectionIssue::ScanFailed { repo, message });
+            issues.push(issue);
             None
         })
         .collect()

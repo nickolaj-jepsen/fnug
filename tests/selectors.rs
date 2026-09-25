@@ -1,5 +1,6 @@
 //! Tests for auto-selection: git scopes, path and regex matching, and selection issues.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use fnug::load_config;
@@ -22,6 +23,7 @@ commands:
 fn commit_all(repo: &Repository) {
     let mut index = repo.index().unwrap();
     index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
+    index.update_all(["*"], None).unwrap();
     index.write().unwrap();
     let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
     let sig = Signature::now("fnug", "fnug@example.com").unwrap();
@@ -895,4 +897,167 @@ fn staged_index_override() {
         },
     );
     assert_eq!(output.ids().collect::<Vec<_>>(), ["added"]);
+}
+
+fn since(base: &str) -> SelectOptions {
+    SelectOptions {
+        scope: GitScope::Since(base.to_string()),
+        index_override: None,
+    }
+}
+
+fn head_commit(repo: &Repository) -> git2::Commit<'_> {
+    repo.head().unwrap().peel_to_commit().unwrap()
+}
+
+#[test]
+fn since_includes_committed_and_uncommitted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let dirs = [
+        "committed",
+        "from",
+        "to",
+        "deleted",
+        "staged",
+        "unstaged",
+        "untracked",
+        "clean",
+    ];
+    let mut config = String::from("name: root\nauto:\n  git: true\ncommands:\n");
+    for dir in dirs {
+        std::fs::create_dir(root.join(dir)).unwrap();
+        std::fs::write(root.join(dir).join("keep.txt"), "one\n").unwrap();
+        writeln!(config, "  - name: {dir}\n    cmd: 'true'\n    cwd: {dir}").unwrap();
+    }
+    std::fs::write(root.join("from/old.txt"), "moved\n").unwrap();
+    std::fs::write(root.join("deleted/gone.txt"), "one\n").unwrap();
+    let config = write_config(&root, &config);
+    commit_all(&repo);
+    repo.branch("base", &head_commit(&repo), false).unwrap();
+
+    std::fs::write(root.join("committed/keep.txt"), "two\n").unwrap();
+    std::fs::rename(root.join("from/old.txt"), root.join("to/new.txt")).unwrap();
+    std::fs::remove_file(root.join("deleted/gone.txt")).unwrap();
+    commit_all(&repo);
+    std::fs::write(root.join("staged/new.txt"), "new\n").unwrap();
+    stage(&repo, &["staged/new.txt"]);
+    std::fs::write(root.join("unstaged/keep.txt"), "two\n").unwrap();
+    std::fs::write(root.join("untracked/new.txt"), "new\n").unwrap();
+
+    let output = select_with(&config, &since("base"));
+    assert_eq!(
+        output.ids().collect::<Vec<_>>(),
+        [
+            "committed",
+            "from",
+            "to",
+            "deleted",
+            "staged",
+            "unstaged",
+            "untracked"
+        ]
+    );
+    assert!(output.get("from").unwrap().files.is_empty());
+    assert_eq!(output.get("to").unwrap().files, [root.join("to/new.txt")]);
+    assert!(output.issues.is_empty(), "{:?}", output.issues);
+
+    // The working tree scope sees only the uncommitted part.
+    assert_eq!(selected(&config), ["staged", "unstaged", "untracked"]);
+}
+
+#[test]
+fn since_unknown_ref_is_fatal_issue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(&root, GIT_CONFIG);
+    commit_all(&repo);
+    std::fs::write(root.join("new.txt"), "").unwrap();
+
+    let output = select_with(&config, &since("origin/nope"));
+    assert!(output.commands.is_empty());
+    assert!(output.has_fatal());
+    let [issue @ SelectionIssue::BaseRefNotFound { repo, base, .. }] = output.issues.as_slice()
+    else {
+        panic!("{:?}", output.issues);
+    };
+    assert_eq!(repo, &root);
+    assert_eq!(base, "origin/nope");
+    let message = issue.to_string();
+    assert!(message.contains("origin/nope"), "{message}");
+    assert!(message.contains("fetch-depth: 0"), "{message}");
+}
+
+#[test]
+fn since_unborn_head_is_fatal_issue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    Repository::init(&root).unwrap();
+    let config = write_config(&root, GIT_CONFIG);
+
+    let output = select_with(&config, &since("main"));
+    assert!(output.commands.is_empty());
+    assert!(
+        matches!(
+            output.issues.as_slice(),
+            [issue @ SelectionIssue::UnbornHead { repo }] if repo == &root && issue.is_fatal()
+        ),
+        "{:?}",
+        output.issues
+    );
+}
+
+#[test]
+fn since_unrelated_history_is_fatal_issue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(&root, GIT_CONFIG);
+    commit_all(&repo);
+    let sig = Signature::now("fnug", "fnug@example.com").unwrap();
+    let empty = repo
+        .find_tree(git2::Index::new().unwrap().write_tree_to(&repo).unwrap())
+        .unwrap();
+    repo.commit(Some("refs/heads/orphan"), &sig, &sig, "orphan", &empty, &[])
+        .unwrap();
+
+    let output = select_with(&config, &since("orphan"));
+    assert!(
+        matches!(
+            output.issues.as_slice(),
+            [SelectionIssue::BaseRefNotFound { message, .. }] if message.contains("no common history")
+        ),
+        "{:?}",
+        output.issues
+    );
+}
+
+#[test]
+fn since_in_shallow_clone_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(&root, GIT_CONFIG);
+    commit_all(&repo);
+    repo.branch("base", &head_commit(&repo), false).unwrap();
+    std::fs::write(root.join("a.txt"), "").unwrap();
+    commit_all(&repo);
+    // A depth-1 clone: HEAD's parent, the base, was never fetched.
+    std::fs::write(
+        root.join(".git/shallow"),
+        format!("{}\n", head_commit(&repo).id()),
+    )
+    .unwrap();
+
+    let output = select_with(&config, &since("base"));
+    assert!(
+        matches!(
+            output.issues.as_slice(),
+            [SelectionIssue::BaseRefNotFound { message, .. }] if message.contains("shallow")
+        ),
+        "{:?}",
+        output.issues
+    );
 }
