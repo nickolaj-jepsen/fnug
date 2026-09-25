@@ -60,7 +60,7 @@
               meta = {
                 description = "A nice lint runner";
                 inherit (cargoToml.package) homepage;
-                license = lib.licenses.mit;
+                license = lib.licenses.gpl3Only;
                 mainProgram = "fnug";
               };
             }
