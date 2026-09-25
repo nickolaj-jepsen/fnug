@@ -52,7 +52,7 @@ fn command_has_changes(
     path_to_repo: &HashMap<PathBuf, PathBuf>,
     repo_changes: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> bool {
-    cmd.auto.path.iter().any(|path| {
+    cmd.auto.paths().iter().any(|path| {
         let Some(repo_path) = path_to_repo.get(path) else {
             return false;
         };
@@ -64,11 +64,12 @@ fn command_has_changes(
             .map(|change| repo_path.join(change))
             .filter(|change| change.starts_with(path))
             .any(|change| {
-                if cmd.auto.regex.is_empty() {
+                let regexes = cmd.auto.regexes();
+                if regexes.is_empty() {
                     return true;
                 }
                 let s = change.to_string_lossy();
-                cmd.auto.regex.iter().any(|pattern| pattern.is_match(&s))
+                regexes.iter().any(|pattern| pattern.is_match(&s))
             });
         if has_match {
             debug!("Path {} has git changes", path.display());
@@ -96,7 +97,7 @@ impl RunnableSelector for GitSelector {
         let mut discover_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut path_to_repo: HashMap<PathBuf, PathBuf> = HashMap::new();
         for cmd in &git_commands {
-            for path in &cmd.auto.path {
+            for path in cmd.auto.paths() {
                 if !path_to_repo.contains_key(path) {
                     let repo_path = discover_repo(path, &mut discover_cache)?;
                     path_to_repo.insert(path.clone(), repo_path);
