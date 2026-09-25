@@ -310,7 +310,7 @@ enum CommandSelection {
     GitSelected,
     /// Run a single command by name or id.
     Single(String),
-    /// Run every configured command.
+    /// Run every configured command except those with `auto.check: false`.
     All,
 }
 
@@ -335,7 +335,10 @@ fn run_commands(
                 })?;
             vec![found]
         }
-        CommandSelection::All => all_commands.iter().collect(),
+        CommandSelection::All => all_commands
+            .iter()
+            .filter(|cmd| cmd.auto.check != Some(false))
+            .collect(),
         CommandSelection::GitSelected => {
             git_selected =
                 selectors::get_selected_commands(all_commands.clone()).map_err(mcp_err)?;
@@ -433,4 +436,36 @@ pub async fn run(config: CommandGroup, cwd: PathBuf) -> Result<(), Box<dyn std::
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_all_skips_check_false_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".fnug.yaml");
+        std::fs::write(
+            &path,
+            r"
+fnug_version: 0.1.0
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+  - name: demo
+    cmd: exit 1
+    auto:
+      check: false
+",
+        )
+        .unwrap();
+        let (config, cwd) = crate::load_config(path.to_str(), true).unwrap();
+
+        let result = run_commands(&config, &cwd, false, &CommandSelection::All).unwrap();
+        let names: Vec<&str> = result.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["lint"]);
+        assert_eq!(result.failed, 0);
+    }
 }
