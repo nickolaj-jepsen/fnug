@@ -73,7 +73,7 @@ fn log_watch_report(report: &WatchReport) {
         warn!("Not watching {}: it does not exist", path.display());
     }
     for (path, error) in &report.failed {
-        warn!("Could not fully watch {}: {error}", path.display());
+        warn!("Could not watch {}: {error}", path.display());
     }
     if report.limit_reached {
         warn!(
