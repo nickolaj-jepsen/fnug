@@ -115,3 +115,79 @@ fn shrink_alternate_screen_drops_top_rows() {
     parser.process(b"\x1b[?1049l");
     assert_eq!(parser.screen().scrollback_len(), 0);
 }
+
+#[test]
+fn scrollback_rows_are_trimmed() {
+    let mut parser = vt100::Parser::new(24, 200, 1000);
+    parser.process(numbered_lines(1..=100).as_bytes());
+
+    assert!(parser.screen().cell(0, 150).is_some());
+    parser.set_scrollback(50);
+    assert_eq!(parser.screen().cell(0, 0).unwrap().contents(), "l");
+    assert!(parser.screen().cell(0, 3).is_none());
+    assert!(parser.screen().cell(0, 150).is_none());
+}
+
+#[test]
+fn trim_keeps_wide_and_bg_cells() {
+    let mut parser = vt100::Parser::new(2, 20, 10);
+    parser.process("ab中\r\nx\x1b[41m\x1b[K\x1b[m\r\n\r\n".as_bytes());
+    parser.set_scrollback(2);
+
+    let screen = parser.screen();
+    assert_eq!(screen.cell(0, 2).unwrap().contents(), "中");
+    assert!(screen.cell(0, 3).unwrap().is_wide_continuation());
+    assert!(screen.cell(0, 4).is_none());
+    assert_eq!(screen.cell(1, 19).unwrap().bgcolor(), vt100::Color::Idx(1));
+}
+
+#[test]
+fn trimmed_empty_row_keeps_one_cell() {
+    let mut parser = vt100::Parser::new(2, 20, 10);
+    parser.process(b"\r\n\r\n");
+    parser.set_scrollback(1);
+
+    assert!(parser.screen().cell(0, 0).is_some());
+    assert!(parser.screen().cell(0, 1).is_none());
+}
+
+/// 100 short lines in scrollback under a screen of long lines.
+fn short_scrollback_long_screen() -> vt100::Parser {
+    let mut parser = vt100::Parser::new(24, 200, 1000);
+    parser.process(numbered_lines(1..=100).as_bytes());
+    for i in 1..=23 {
+        parser.process(format!("long{i} {}\r\n", "x".repeat(150)).as_bytes());
+    }
+    parser
+}
+
+#[test]
+fn trimmed_rows_formatted_no_panic() {
+    let mut parser = short_scrollback_long_screen();
+    let live = parser.screen().clone();
+    parser.set_scrollback(50);
+    let screen = parser.screen();
+
+    assert!(!screen.contents_formatted().is_empty());
+    assert!(!screen.contents_diff(&live).is_empty());
+    assert!(!live.contents_diff(screen).is_empty());
+    assert_eq!(screen.rows_formatted(0, 200).count(), 24);
+    assert_eq!(screen.rows_formatted(150, 50).count(), 24);
+    assert_eq!(screen.rows_diff(&live, 150, 50).count(), 24);
+    assert_eq!(live.rows_diff(screen, 150, 50).count(), 24);
+}
+
+#[test]
+fn trimmed_rows_diff_roundtrips() {
+    let mut parser = short_scrollback_long_screen();
+    let live = parser.screen().clone();
+    parser.set_scrollback(50);
+    let scrolled = parser.screen().clone();
+
+    for (from, to) in [(&live, &scrolled), (&scrolled, &live)] {
+        let mut replay = vt100::Parser::new(24, 200, 0);
+        replay.process(&from.contents_formatted());
+        replay.process(&to.contents_diff(from));
+        assert_eq!(replay.screen().contents(), to.contents());
+    }
+}
