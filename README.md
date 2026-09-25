@@ -97,6 +97,18 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 `-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. Warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable also lowers the stderr threshold. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
 
+### Setup
+
+`fnug setup` installs a git pre-commit hook that runs `fnug check`, and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it.
+
+The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead.
+
+fnug's lines sit between `# >>> fnug >>>` and `# <<< fnug <<<`, right after the shebang of any existing hook, and the rest of that hook runs after fnug passes. If fnug needs something your hook sets up first, such as `PATH`, move the block below it; updates leave it where it is. A hook that isn't a shell script, such as a Python one, can be chained instead: it moves to `pre-commit.local` and runs after fnug, and removing fnug's hook puts it back.
+
+The hook runs `fnug` from `PATH`, or else the binary that ran `fnug setup`, from the config's directory. If fnug isn't installed, the commit fails with a hint; a hook in a committed `core.hooksPath` only warns, so teammates without fnug can still commit.
+
+Setup edits the editor configs in place, keeping comments and formatting, and adds or removes only the `fnug` entry. The entry runs `fnug mcp`, so fnug has to be on the editor's `PATH`.
+
 ## Configuration
 
 Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from the current directory upward.
