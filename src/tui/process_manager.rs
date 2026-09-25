@@ -6,10 +6,11 @@ use std::time::Instant;
 use log::{debug, error, info, warn};
 use ratatui::layout::Rect;
 
+use crate::process::StopSignal;
 use crate::pty::terminal::{Terminal, TerminalOptions, TerminalSize};
 use crate::pty::{format_exit_message, format_start_message};
 
-use super::app::{App, AppEvent, CommandStatus, ProcessInstance};
+use super::app::{App, AppEvent, CommandStatus, ProcessInstance, STOP_GRACE};
 use super::tree_state::find_group_in_group;
 
 /// Copy text to the system clipboard using platform-native commands.
@@ -139,9 +140,9 @@ impl App {
 
         info!("Starting command '{}'", cmd.name);
 
-        // Kill existing process and abort its tasks
+        // Stop the previous run and abort its tasks
         if let Some(proc) = self.processes.remove(cmd_id) {
-            proc.kill_and_abort(cmd_id);
+            proc.stop_and_abort(cmd_id, StopSignal::Interrupt);
         }
 
         let cols = terminal_area.width.max(2);
@@ -193,9 +194,9 @@ impl App {
     pub fn stop_command(&mut self, cmd_id: &str) {
         info!("Stopping command '{cmd_id}'");
         if let Some(proc) = self.processes.get(cmd_id)
-            && let Err(e) = proc.terminal.kill()
+            && let Err(e) = proc.terminal.stop(StopSignal::Interrupt, STOP_GRACE)
         {
-            warn!("Failed to kill process '{cmd_id}': {e}");
+            warn!("Failed to stop process '{cmd_id}': {e}");
         }
         self.mark_tree_dirty();
     }
@@ -237,7 +238,7 @@ impl App {
     /// Clear a command's terminal, error and queued run, and kill the process if running
     pub fn clear_command(&mut self, cmd_id: &str) {
         if let Some(proc) = self.processes.remove(cmd_id) {
-            proc.kill_and_abort(cmd_id);
+            proc.stop_and_abort(cmd_id, StopSignal::Interrupt);
         }
         self.error_messages.remove(cmd_id);
         if self.pending_deps.remove(cmd_id).is_some() {

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use log::{debug, error};
 use ratatui::layout::Rect;
@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
+use crate::process::StopSignal;
 use crate::pty::terminal::Terminal;
 use crate::selectors::get_selected_commands;
 
@@ -39,11 +40,17 @@ pub struct ProcessInstance {
     pub finished_at: Option<Instant>,
 }
 
+/// How long a stopped (or restarted, or cleared) command gets before it is killed
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
+/// How long commands get to exit after `SIGHUP` when fnug quits
+pub const QUIT_GRACE: Duration = Duration::from_secs(1);
+
 impl ProcessInstance {
-    /// Kill the terminal process and abort all associated task handles.
-    pub fn kill_and_abort(self, id: &str) {
-        if let Err(e) = self.terminal.kill() {
-            log::warn!("Failed to kill process '{id}': {e}");
+    /// Stop the command's process group with `sig` (escalating after [`STOP_GRACE`]) and abort
+    /// the associated tasks. Sends nothing once the command has been reaped.
+    pub fn stop_and_abort(self, id: &str, sig: StopSignal) {
+        if let Err(e) = self.terminal.stop(sig, STOP_GRACE) {
+            log::warn!("Failed to stop process '{id}': {e}");
         }
         for handle in self.task_handles {
             handle.abort();
@@ -624,7 +631,12 @@ impl App {
             handle.abort();
         }
         for (id, proc) in self.processes.drain() {
-            proc.kill_and_abort(&id);
+            if let Err(e) = proc.terminal.stop(StopSignal::Hangup, QUIT_GRACE) {
+                log::warn!("Failed to stop process '{id}': {e}");
+            }
+            for handle in proc.task_handles {
+                handle.abort();
+            }
         }
     }
 
