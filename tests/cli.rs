@@ -66,6 +66,29 @@ fn bare_config_filename_is_resolved() {
 }
 
 #[test]
+fn parent_relative_config_keeps_workspace_members() {
+    let dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join(".fnug.yaml"),
+        "fnug_version: 0.1.0\nname: root\nworkspace: true\ncommands: []\n",
+    )
+    .unwrap();
+    let pkg = dir.path().join("pkg");
+    std::fs::create_dir(&pkg).unwrap();
+    std::fs::write(
+        pkg.join(".fnug.yaml"),
+        "fnug_version: 0.1.0\nname: pkg\ncommands:\n  - name: member\n    cmd: echo PKG-MEMBER-RAN\n    auto:\n      always: true\n",
+    )
+    .unwrap();
+
+    let output = fnug(&pkg, &["-c", "../.fnug.yaml", "check", "--no-tui"]);
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("PKG-MEMBER-RAN"), "{stdout}");
+}
+
+#[test]
 fn missing_config_file_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let output = fnug(dir.path(), &["-c", "missing.yaml", "check", "--no-tui"]);
