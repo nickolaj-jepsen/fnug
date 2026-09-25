@@ -673,15 +673,40 @@ impl App {
         self.mark_tree_dirty();
     }
 
-    /// Shut down all processes and abort all spawned tasks
-    pub fn shutdown(&mut self) {
+    /// Send `SIGHUP` to every command's process group and wait until each is reaped, then abort
+    /// all spawned tasks.
+    ///
+    /// Groups not reaped after [`QUIT_GRACE`], such as background processes ignoring `SIGHUP`
+    /// that still hold a PTY, get `SIGKILL`, so this returns shortly after it.
+    pub async fn shutdown(&mut self) {
+        /// How long killed processes get to exit and drain their last output
+        const KILL_WAIT: Duration = Duration::from_millis(500);
+
         if let Some(handle) = self.git_selection_handle.take() {
             handle.abort();
         }
-        for (id, proc) in self.processes.drain() {
+        let processes: Vec<_> = self.processes.drain().collect();
+        for (id, proc) in &processes {
             if let Err(e) = proc.terminal.stop(StopSignal::Hangup, QUIT_GRACE) {
                 log::warn!("Failed to stop process '{id}': {e}");
             }
+        }
+        let all_reaped =
+            || futures::future::join_all(processes.iter().map(|(_, p)| p.terminal.wait_reaped()));
+        // Wait for reaping, not the exit: a background process can outlive the command, and the
+        // escalation thread dies with fnug before it can kill it
+        if tokio::time::timeout(QUIT_GRACE, all_reaped())
+            .await
+            .is_err()
+        {
+            for (id, proc) in &processes {
+                if let Err(e) = proc.terminal.force_kill() {
+                    log::warn!("Failed to kill process '{id}': {e}");
+                }
+            }
+            let _ = tokio::time::timeout(KILL_WAIT, all_reaped()).await;
+        }
+        for (_, proc) in processes {
             for handle in proc.task_handles {
                 handle.abort();
             }

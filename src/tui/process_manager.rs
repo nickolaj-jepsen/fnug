@@ -396,7 +396,7 @@ mod tests {
 
         assert_eq!(node_status(&mut app, "test"), CommandStatus::Success);
         assert!(!app.error_messages.contains_key("test"));
-        app.shutdown();
+        app.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -421,7 +421,7 @@ mod tests {
         // A cleared command must not be started when its dependency finishes
         app.handle_app_event(exited(&app, "build", 0));
         assert!(!app.processes.contains_key("test"));
-        app.shutdown();
+        app.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -461,7 +461,7 @@ mod tests {
         app.handle_app_event(exited(&app, "a", 0));
         assert!(!app.processes.contains_key("b"));
         assert!(!app.processes.contains_key("c"));
-        app.shutdown();
+        app.shutdown().await;
     }
 
     fn single_command_app(dir: &Path, cmd: &str, cwd: PathBuf) -> App {
@@ -509,7 +509,7 @@ mod tests {
             .path()
             .join("marker")
             .exists()));
-        app.shutdown();
+        app.shutdown().await;
     }
 
     /// `a` creates `ready` and sleeps; `b` depends on `a`.
@@ -564,7 +564,7 @@ mod tests {
         assert!(!app.pending_deps.contains_key("b"), "b still waits on a");
         assert_eq!(app.error_messages.get("b"), None);
         assert!(!app.processes.contains_key("b"));
-        app.shutdown();
+        app.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -583,7 +583,7 @@ mod tests {
             app.processes["a"].terminal.is_running(),
             "stopped the dependency"
         );
-        app.shutdown();
+        app.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -603,6 +603,85 @@ mod tests {
         assert_eq!(node_status(&mut app, "a"), CommandStatus::Running);
         app.handle_app_event(exited(&app, "a", 0));
         assert_eq!(node_status(&mut app, "a"), CommandStatus::Success);
-        app.shutdown();
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_is_bounded() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = "trap '' HUP; touch ready; exec sleep 30";
+        let mut app = single_command_app(dir.path(), cmd, dir.path().to_path_buf());
+        app.start_command("a", AREA, true);
+        assert!(wait_until(Duration::from_secs(5), || dir
+            .path()
+            .join("ready")
+            .exists()));
+        let term = std::sync::Arc::clone(&app.processes["a"].terminal);
+
+        let shutdown = tokio::time::timeout(Duration::from_secs(3), app.shutdown()).await;
+        assert!(
+            shutdown.is_ok(),
+            "shutdown hung on a command ignoring SIGHUP"
+        );
+
+        let exit = term
+            .exit_info()
+            .expect("shutdown returned before the command exited");
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+    }
+
+    /// Leaves a HUP-ignoring `sleep 30` holding the PTY, with its pid in `pid_file`, then runs `tail`
+    fn pty_holder(pid_file: &str, tail: &str) -> String {
+        format!(
+            "sh -c 'trap \"\" HUP; echo $$ > {pid_file}; exec sleep 30' & \
+             while [ ! -s {pid_file} ]; do sleep 0.01; done; {tail}"
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_kills_hup_ignoring_pty_holders() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let command = |id: &str, cmd: String| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd,
+            cwd: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                command("finished", pty_holder("finished.pid", "true")),
+                command("running", pty_holder("running.pid", "exec sleep 30")),
+            ],
+            ..Default::default()
+        };
+        let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
+        app.start_command("finished", AREA, false);
+        app.start_command("running", AREA, false);
+        let finished = std::sync::Arc::clone(&app.processes["finished"].terminal);
+        let running = std::sync::Arc::clone(&app.processes["running"].terminal);
+        let has_pid =
+            |name: &str| std::fs::metadata(dir.path().join(name)).is_ok_and(|m| m.len() > 0);
+        assert!(wait_until(Duration::from_secs(5), || {
+            finished.exit_info().is_some() && has_pid("running.pid")
+        }));
+
+        let shutdown = tokio::time::timeout(Duration::from_secs(3), app.shutdown()).await;
+        assert!(shutdown.is_ok(), "shutdown hung on a PTY holder");
+
+        // The SIGKILL escalation thread would die with fnug, so shutdown itself must kill them
+        assert!(
+            finished.is_reaped(),
+            "holder of a finished command survived"
+        );
+        assert!(running.is_reaped(), "holder of a running command survived");
     }
 }
