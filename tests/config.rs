@@ -1,6 +1,7 @@
 //! Tests for config loading: parsing, validation and inheritance.
 
 use std::path::Path;
+use std::sync::{Mutex, Once};
 
 use fnug::commands::command::Command;
 use fnug::commands::group::CommandGroup;
@@ -1274,6 +1275,55 @@ commands:
         (b.auto.git, b.auto.watch, b.auto.always, b.auto.check)
     );
     assert_eq!(a.auto.regexes().len(), b.auto.regexes().len());
+}
+
+/// Every warning logged by this test binary so far.
+fn logged_warnings() -> &'static Mutex<Vec<String>> {
+    struct Capture;
+    impl log::Log for Capture {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                WARNINGS.lock().unwrap().push(record.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+    static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        log::set_logger(&Capture).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+    &WARNINGS
+}
+
+#[test]
+fn workspace_package_fnug_version_checked() {
+    let warnings = logged_warnings();
+    let dir = workspace(
+        GLOB_ROOT,
+        &[(
+            "packages/a",
+            "fnug_version: 99.0.0\nname: a\ncommands:\n  - name: x\n    cmd: 'true'\n",
+        )],
+    );
+    load_workspace(dir.path());
+    let pkg_path = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("packages/a/.fnug.yaml");
+    let warnings = warnings.lock().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("requires fnug >= 99.0.0")
+                && w.contains(&pkg_path.display().to_string())),
+        "{warnings:?}"
+    );
 }
 
 // ─── workspace root promotion ───
