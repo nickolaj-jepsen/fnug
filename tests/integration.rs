@@ -727,7 +727,7 @@ commands:
 }
 
 #[test]
-fn test_workspace_duplicate_ids_rejected() {
+fn test_workspace_package_ids_namespaced() {
     let dir = tempfile::tempdir().unwrap();
     let root_config = r#"
 fnug_version: "0.0.27"
@@ -755,12 +755,13 @@ commands:
     std::fs::write(dir.path().join("packages/foo/.fnug.yaml"), sub_config).unwrap();
 
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let result = load_config(Some(&path), false);
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        ConfigError::DuplicateId { id, .. } => assert_eq!(id, "dup-id"),
-        other => panic!("Expected DuplicateId, got: {other:?}"),
-    }
+    let (config, _) = load_config(Some(&path), false).unwrap();
+    let ids: Vec<&str> = config
+        .all_commands()
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(ids, ["dup-id", "sub/dup-id"]);
 }
 
 #[test]

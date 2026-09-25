@@ -327,6 +327,7 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
             commands,
             children,
             env: config.env.unwrap_or_default(),
+            source: config.source,
         })
     }
 }

@@ -13,6 +13,9 @@ pub struct CommandGroup {
     pub commands: Vec<Command>,
     pub children: Vec<CommandGroup>,
     pub env: HashMap<String, String>,
+    /// The config file this group is the root of. A child with a source is a workspace package,
+    /// which inherits nothing from its parent.
+    pub source: Option<PathBuf>,
 }
 
 impl CommandGroup {
