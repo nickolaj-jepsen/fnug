@@ -464,7 +464,12 @@ mod tests {
 
     use portable_pty::{PtySize, native_pty_system};
 
-    use super::{Terminal, TerminalSize};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use parking_lot::Mutex;
+
+    use super::{Terminal, TerminalSize, TerminalUpdate, spawn_output_writer};
     use crate::commands::command::Command;
 
     fn pty_available() -> bool {
@@ -533,6 +538,27 @@ mod tests {
             saw_output |= guard.screen().contents().contains('y');
             acquired += 1;
         }
+    }
+
+    #[test]
+    fn output_writer_releases_lock_between_batches() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let tx = spawn_output_writer(Arc::clone(&parser), Arc::clone(&dirty));
+
+        // Queue a full channel of output while the writer is blocked on the lock
+        let guard = parser.lock();
+        for _ in 0..1000 {
+            tx.send(TerminalUpdate::Process(b"y\r\n".repeat(2730)))
+                .unwrap();
+        }
+        drop(guard);
+
+        while !dirty.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        // An unbounded drain only publishes once the queue is empty
+        assert!(!tx.is_empty(), "writer drained everything before yielding");
     }
 
     #[tokio::test(flavor = "multi_thread")]
