@@ -151,8 +151,15 @@ impl Matcher {
                 let is_dir = *is_dir
                     .get_or_insert_with(|| path.symlink_metadata().ok().map(|meta| meta.is_dir()));
                 if !key.ignored
-                    && *ignored
-                        .get_or_insert_with(|| self.ignore.is_ignored(path, is_dir == Some(true)))
+                    && *ignored.get_or_insert_with(|| match is_dir {
+                        Some(is_dir) => self.ignore.is_ignored(path, is_dir),
+                        // Removed, so it may have been a directory that a rule like `target/`
+                        // ignores.
+                        None => {
+                            self.ignore.is_ignored(path, false)
+                                || self.ignore.is_ignored(path, true)
+                        }
+                    })
                 {
                     continue;
                 }
@@ -734,5 +741,16 @@ mod tests {
             );
         }
         assert_eq!(project.matched_ids(any(), &["main.rs"]), ["any"]);
+    }
+
+    #[test]
+    fn matches_skip_removed_ignored_dirs() {
+        let project = Project::new();
+        git2::Repository::init(&project.root).unwrap();
+        std::fs::write(project.root.join(".gitignore"), "target/\n").unwrap();
+        let any = || vec![project.command("any", vec!["."], vec![])];
+        // Like `cargo clean`: the parent directory's watch reports `target`, now gone.
+        assert!(project.matched_ids(any(), &["target"]).is_empty());
+        assert_eq!(project.matched_ids(any(), &["removed.rs"]), ["any"]);
     }
 }
