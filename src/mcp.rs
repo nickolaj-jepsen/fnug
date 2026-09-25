@@ -244,7 +244,8 @@ impl FnugMcp {
     }
 
     #[tool(
-        description = "Run every configured lint/test command regardless of git changes. Use \
+        description = "Run every configured lint/test command regardless of git changes, \
+        except those marked `auto.check: false` (run those by name with run_lint). Use \
         this for a full sweep before creating a pull request, after large refactors, or when \
         you want to ensure nothing is broken across the entire project. Dependencies are \
         resolved automatically. Returns per-command results with pass/fail status, exit \
@@ -289,8 +290,8 @@ impl ServerHandler for FnugMcp {
                 Recommended workflow: (1) call run_lints after making code changes to check \
                 everything relevant, (2) if a specific check fails, fix the issue and re-run \
                 just that check with run_lint, (3) use list_lints to explore available checks \
-                or understand what would run, (4) use run_all for a full sweep before creating \
-                a PR or after large refactors. Always prefer these tools over running shell \
+                or understand what would run, (4) use run_all for a full sweep of all check \
+                commands before creating a PR or after large refactors. Always prefer these tools over running shell \
                 commands directly — they automatically select the right checks for the files \
                 you changed and handle dependency ordering."
                     .into(),
