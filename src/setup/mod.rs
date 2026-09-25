@@ -42,11 +42,11 @@ impl Action {
         match self {
             Self::InstallHook { path, no_workspace } => {
                 hooks::install(path, *no_workspace)?;
-                println!("Installed pre-commit hook in {}", path.display());
+                println!("Installed pre-commit hook {}", hook_path(path).display());
             }
             Self::RemoveHook { path } => {
                 hooks::remove(path)?;
-                println!("Removed pre-commit hook from {}", path.display());
+                println!("Removed pre-commit hook {}", hook_path(path).display());
             }
             Self::InstallMcp { editor, cwd } => {
                 editor.install(cwd)?;
@@ -68,14 +68,14 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "  + Install pre-commit hook ({})",
-                    path.join(".git/hooks/pre-commit").display()
+                    hook_path(path).display()
                 )
             }
             Self::RemoveHook { path, .. } => {
                 write!(
                     f,
                     "  - Remove pre-commit hook ({})",
-                    path.join(".git/hooks/pre-commit").display()
+                    hook_path(path).display()
                 )
             }
             Self::InstallMcp { editor, cwd } => {
@@ -94,6 +94,10 @@ impl fmt::Display for Action {
             }
         }
     }
+}
+
+fn hook_path(config_dir: &Path) -> PathBuf {
+    hooks::resolve(config_dir).map_or_else(|_| config_dir.to_path_buf(), |t| t.hook_path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
