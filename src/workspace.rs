@@ -40,7 +40,7 @@ pub fn discover_and_merge(
 
     let children = root.children.get_or_insert_with(Vec::new);
     for path in &paths {
-        let sub = load_sub_config(path, root_dir)?;
+        let sub = load_sub_config(path)?;
         children.push(sub);
     }
 
@@ -173,7 +173,7 @@ fn discover_glob(root_dir: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, C
 }
 
 /// Load a sub-config file and prepare it as a `ConfigCommandGroup`.
-fn load_sub_config(config_path: &Path, root_dir: &Path) -> Result<ConfigCommandGroup, ConfigError> {
+fn load_sub_config(config_path: &Path) -> Result<ConfigCommandGroup, ConfigError> {
     let (mut group, workspace) = Config::from_file(config_path)?.into_root();
 
     if workspace.is_some() {
@@ -185,13 +185,18 @@ fn load_sub_config(config_path: &Path, root_dir: &Path) -> Result<ConfigCommandG
 
     let sub_dir = config_path
         .parent()
-        .ok_or_else(|| ConfigError::Workspace("Config path has no parent directory".into()))?;
+        .ok_or_else(|| ConfigError::Workspace("Config path has no parent directory".into()))?
+        .canonicalize()
+        .map_err(|source| ConfigError::Io {
+            path: config_path.to_path_buf(),
+            source,
+        })?;
 
-    // Set cwd to the sub-config's directory relative to root, if not already set
-    if group.cwd.is_none() {
-        let relative = sub_dir.strip_prefix(root_dir).unwrap_or(sub_dir);
-        group.cwd = Some(relative.to_path_buf());
-    }
+    // An absolute cwd, so the package resolves paths exactly as it does standalone.
+    group.cwd = Some(match group.cwd {
+        Some(cwd) => sub_dir.join(cwd),
+        None => sub_dir,
+    });
     group.source = Some(config_path.to_path_buf());
 
     Ok(group)
