@@ -191,3 +191,50 @@ fn trimmed_rows_diff_roundtrips() {
         assert_eq!(replay.screen().contents(), to.contents());
     }
 }
+
+#[test]
+fn all_contents_whole_buffer() {
+    let mut parser = vt100::Parser::new(5, 20, 100);
+    parser.process(numbered_lines(1..=20).as_bytes());
+    parser.process(b"FINAL");
+    parser.set_scrollback(3);
+
+    let contents = parser.screen().all_contents();
+    let lines: Vec<_> = contents.lines().collect();
+    assert_eq!(lines.len(), 21);
+    assert_eq!(lines[0], "l1");
+    assert_eq!(lines[20], "FINAL");
+    assert_eq!(parser.screen().scrollback(), 3);
+}
+
+#[test]
+fn all_contents_joins_wrap_across_boundary() {
+    let mut parser = vt100::Parser::new(3, 10, 100);
+    parser.process(b"0123456789abcdef\r\nx\r\n");
+
+    assert_eq!(parser.screen().scrollback_len(), 1);
+    assert_eq!(parser.screen().all_contents(), "0123456789abcdef\nx");
+}
+
+#[test]
+fn all_contents_keeps_wider_old_rows() {
+    let mut parser = vt100::Parser::new(3, 20, 100);
+    parser.process(b"abcdefghijklmnop\r\nl2\r\nl3\r\nl4");
+    parser.set_size(3, 5);
+
+    assert_eq!(
+        parser.screen().all_contents(),
+        "abcdefghijklmnop\nl2\nl3\nl4"
+    );
+}
+
+#[test]
+fn all_contents_alt_screen() {
+    let mut parser = vt100::Parser::new(3, 10, 100);
+    parser.process(numbered_lines(1..=9).as_bytes());
+    parser.process(b"l10\x1b[?1049h\x1b[Halt");
+
+    assert_eq!(parser.screen().all_contents(), "alt");
+    parser.process(b"\x1b[?1049l");
+    assert_eq!(parser.screen().all_contents().lines().count(), 10);
+}

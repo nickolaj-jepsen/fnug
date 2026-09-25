@@ -159,6 +159,21 @@ impl Screen {
         self.grid().write_contents(contents);
     }
 
+    /// Returns the text contents of the whole buffer: all of the scrollback
+    /// followed by the screen, whatever the current scrollback position.
+    ///
+    /// This will not include any formatting information, and will be in plain
+    /// text format. Wrapped rows are joined, including across the boundary
+    /// between scrollback and screen, and trailing empty rows are dropped.
+    /// The alternate screen has no scrollback, so while it is active this
+    /// returns only the screen.
+    #[must_use]
+    pub fn all_contents(&self) -> String {
+        let mut contents = String::new();
+        self.grid().write_all_contents(&mut contents);
+        contents
+    }
+
     /// Returns the text contents of the terminal by row, restricted to the
     /// given subset of columns.
     ///
