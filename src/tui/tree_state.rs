@@ -181,7 +181,7 @@ fn count_status(
                 CommandStatus::Success => counts.success += 1,
                 CommandStatus::Running | CommandStatus::WaitingForDeps => counts.running += 1,
                 CommandStatus::Failure(_) | CommandStatus::Error(_) => counts.failure += 1,
-                CommandStatus::Pending => {}
+                CommandStatus::Pending | CommandStatus::Stopped => {}
             }
         }
     }

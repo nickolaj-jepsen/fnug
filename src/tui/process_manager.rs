@@ -65,6 +65,7 @@ impl App {
     fn spawn_exit_watcher(
         term: &Arc<Terminal>,
         cmd_id: &str,
+        generation: u64,
         event_tx: &tokio::sync::mpsc::Sender<AppEvent>,
     ) -> tokio::task::JoinHandle<()> {
         let term = Arc::clone(term);
@@ -76,14 +77,23 @@ impl App {
                     if let Err(e) = term.echo(format_exit_message(&exit)) {
                         debug!("Failed to echo exit message: {e}");
                     }
-                    let code = exit.shell_code();
-                    if let Err(e) = tx.send(AppEvent::ProcessExited(id, code)).await {
+                    let event = AppEvent::ProcessExited {
+                        id,
+                        generation,
+                        exit,
+                    };
+                    if let Err(e) = tx.send(event).await {
                         debug!("Failed to send process exit event: {e}");
                     }
                 }
                 Err(e) => {
-                    let msg = format!("Process wait error: {e}");
-                    let _ = tx.send(AppEvent::ProcessError(id, msg)).await;
+                    let message = format!("Process wait error: {e}");
+                    let event = AppEvent::ProcessError {
+                        id,
+                        generation,
+                        message,
+                    };
+                    let _ = tx.send(event).await;
                 }
             }
         })
@@ -160,8 +170,11 @@ impl App {
                     warn!("Failed to echo start message: {e}");
                 }
 
+                self.next_generation += 1;
+                let generation = self.next_generation;
                 let term_ref = Arc::new(terminal);
-                let exit_handle = Self::spawn_exit_watcher(&term_ref, cmd_id, &self.event_tx);
+                let exit_handle =
+                    Self::spawn_exit_watcher(&term_ref, cmd_id, generation, &self.event_tx);
 
                 self.processes.insert(
                     cmd_id.to_string(),
@@ -171,6 +184,8 @@ impl App {
                         task_handles: vec![exit_handle],
                         started_at: Instant::now(),
                         finished_at: None,
+                        exit: None,
+                        generation,
                     },
                 );
 
@@ -190,10 +205,12 @@ impl App {
         self.mark_tree_dirty();
     }
 
-    /// Stop a command process
+    /// Stop a command process, or drop its queued run (and its dependents') if it hasn't started
     pub fn stop_command(&mut self, cmd_id: &str) {
         info!("Stopping command '{cmd_id}'");
-        if let Some(proc) = self.processes.get(cmd_id)
+        if self.pending_deps.remove(cmd_id).is_some() {
+            self.cancel_dependents(cmd_id);
+        } else if let Some(proc) = self.processes.get(cmd_id)
             && let Err(e) = proc.terminal.stop(StopSignal::Interrupt, STOP_GRACE)
         {
             warn!("Failed to stop process '{cmd_id}': {e}");
@@ -306,6 +323,7 @@ mod tests {
 
     use crate::commands::command::Command;
     use crate::commands::group::CommandGroup;
+    use crate::process::ExitInfo;
     use crate::pty::test_util::{pty_available, wait_until};
     use crate::tui::app::{App, AppEvent, CommandStatus};
     use crate::tui::log_state::LogBuffer;
@@ -335,8 +353,17 @@ mod tests {
         App::new(config, dir.to_path_buf(), LogBuffer::new())
     }
 
-    fn exited(id: &str, code: u32) -> AppEvent {
-        AppEvent::ProcessExited(id.into(), code)
+    /// Exit event for the current run of `id`
+    fn exited(app: &App, id: &str, code: i32) -> AppEvent {
+        AppEvent::ProcessExited {
+            id: id.into(),
+            generation: app.processes[id].generation,
+            exit: ExitInfo {
+                code: Some(code),
+                signal: None,
+                stop_requested: false,
+            },
+        }
     }
 
     fn node_status(app: &mut App, id: &str) -> CommandStatus {
@@ -357,15 +384,15 @@ mod tests {
         let mut app = dep_app(dir.path());
 
         app.start_command("test", AREA, true);
-        app.handle_app_event(exited("build", 1));
+        app.handle_app_event(exited(&app, "build", 1));
         assert_eq!(
             node_status(&mut app, "test"),
             CommandStatus::Error("Dependency 'build' failed".into())
         );
 
         app.start_command("test", AREA, true);
-        app.handle_app_event(exited("build", 0));
-        app.handle_app_event(exited("test", 0));
+        app.handle_app_event(exited(&app, "build", 0));
+        app.handle_app_event(exited(&app, "test", 0));
 
         assert_eq!(node_status(&mut app, "test"), CommandStatus::Success);
         assert!(!app.error_messages.contains_key("test"));
@@ -381,7 +408,7 @@ mod tests {
         let mut app = dep_app(dir.path());
 
         app.start_command("test", AREA, true);
-        app.handle_app_event(exited("build", 1));
+        app.handle_app_event(exited(&app, "build", 1));
         app.clear_command("test");
         assert!(!app.error_messages.contains_key("test"));
         assert_eq!(node_status(&mut app, "test"), CommandStatus::Pending);
@@ -392,7 +419,7 @@ mod tests {
         assert!(!app.pending_deps.contains_key("test"));
 
         // A cleared command must not be started when its dependency finishes
-        app.handle_app_event(exited("build", 0));
+        app.handle_app_event(exited(&app, "build", 0));
         assert!(!app.processes.contains_key("test"));
         app.shutdown();
     }
@@ -431,7 +458,7 @@ mod tests {
         assert!(!app.pending_deps.contains_key("c"), "c still waits on b");
         assert!(!app.error_messages.contains_key("c"));
 
-        app.handle_app_event(exited("a", 0));
+        app.handle_app_event(exited(&app, "a", 0));
         assert!(!app.processes.contains_key("b"));
         assert!(!app.processes.contains_key("c"));
         app.shutdown();
@@ -482,6 +509,100 @@ mod tests {
             .path()
             .join("marker")
             .exists()));
+        app.shutdown();
+    }
+
+    /// `a` creates `ready` and sleeps; `b` depends on `a`.
+    fn sleeper_app(dir: &Path) -> App {
+        let command = |id: &str, cmd: &str, depends_on: Vec<String>| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: cmd.into(),
+            cwd: dir.to_path_buf(),
+            depends_on,
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                // A builtin, not `touch`: bash drops a SIGINT that arrives while it waits on a child
+                command("a", ": > ready; exec sleep 30", vec![]),
+                command("b", "true", vec!["a".into()]),
+            ],
+            ..Default::default()
+        };
+        App::new(config, dir.to_path_buf(), LogBuffer::new())
+    }
+
+    async fn next_event(app: &mut App) -> AppEvent {
+        let event = tokio::time::timeout(Duration::from_secs(5), app.event_rx.recv()).await;
+        event.expect("no app event").expect("event channel closed")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_command_cancels_dependents() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sleeper_app(dir.path());
+
+        app.start_command("b", AREA, true);
+        assert!(app.pending_deps.contains_key("b"));
+        assert!(wait_until(Duration::from_secs(5), || dir
+            .path()
+            .join("ready")
+            .exists()));
+
+        app.stop_command("a");
+        let event = next_event(&mut app).await;
+        app.handle_app_event(event);
+
+        assert_eq!(node_status(&mut app, "a"), CommandStatus::Stopped);
+        assert!(app.processes["a"].exit.as_ref().unwrap().stop_requested);
+        assert!(!app.pending_deps.contains_key("b"), "b still waits on a");
+        assert_eq!(app.error_messages.get("b"), None);
+        assert!(!app.processes.contains_key("b"));
+        app.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_queued_command_drops_it() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sleeper_app(dir.path());
+
+        app.start_command("b", AREA, true);
+        app.stop_command("b");
+
+        assert!(!app.pending_deps.contains_key("b"));
+        assert!(
+            app.processes["a"].terminal.is_running(),
+            "stopped the dependency"
+        );
+        app.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_exit_event_ignored() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = single_command_app(dir.path(), "exec sleep 30", dir.path().to_path_buf());
+
+        app.start_command("a", AREA, true);
+        let stale = exited(&app, "a", 1);
+        app.start_command("a", AREA, true);
+        // Exit of the first run, already queued when the restart happened
+        app.handle_app_event(stale);
+
+        assert_eq!(node_status(&mut app, "a"), CommandStatus::Running);
+        app.handle_app_event(exited(&app, "a", 0));
+        assert_eq!(node_status(&mut app, "a"), CommandStatus::Success);
         app.shutdown();
     }
 }
