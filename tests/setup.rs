@@ -327,14 +327,18 @@ impl Shim {
         }
     }
 
-    /// Run `hook` from `workdir` like git does, with the shim first on `PATH`.
-    fn run(&self, hook: &Path, workdir: &Path, fnug_exit: i32) -> i32 {
-        let path = format!(
+    /// `PATH` with the shim first.
+    fn path(&self) -> String {
+        format!(
             "{}:{}",
             self.bin.display(),
             std::env::var("PATH").unwrap_or_default()
-        );
-        self.run_with_path(hook, workdir, fnug_exit, &path)
+        )
+    }
+
+    /// Run `hook` from `workdir` like git does, with the shim first on `PATH`.
+    fn run(&self, hook: &Path, workdir: &Path, fnug_exit: i32) -> i32 {
+        self.run_with_path(hook, workdir, fnug_exit, &self.path())
     }
 
     fn run_with_path(&self, hook: &Path, workdir: &Path, fnug_exit: i32, path: &str) -> i32 {
@@ -435,14 +439,19 @@ fn exec_style_hook_runs_fnug_first() {
     assert_eq!(shim.run(&hook, &root, 0), 0);
 }
 
+/// An interpreter called `name` that is really sh, so hooks for it run without it installed.
+fn fake_interpreter(root: &Path, name: &str) -> PathBuf {
+    let interpreter = root.join("bin").join(name);
+    std::fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(which_sh(), &interpreter).unwrap();
+    interpreter
+}
+
 #[test]
 fn python_hook_refused_then_chained() {
     let (_tmp, root, hook) = repo();
     let shim = Shim::new();
-    // An interpreter named python3 that is really sh, so the hook runs without Python installed
-    let interpreter = root.join("bin/python3");
-    std::fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(which_sh(), &interpreter).unwrap();
+    let interpreter = fake_interpreter(&root, "python3");
     let original = format!("#!{}\nexit 4\n", interpreter.display());
     write_executable(&hook, &original);
     let target = hooks::resolve(&root).unwrap();
@@ -484,6 +493,46 @@ fn python_hook_refused_then_chained() {
     hooks::remove(&root).unwrap();
     assert_eq!(read(&hook), original);
     assert!(!local.exists());
+}
+
+#[test]
+fn legacy_block_in_a_non_shell_hook_is_chained_not_spliced() {
+    for name in ["python3", "fish"] {
+        let (_tmp, root, hook) = repo();
+        let shim = Shim::new();
+        let interpreter = fake_interpreter(&root, name);
+        let stripped = format!("#!{}\necho user-hook-ran >&2\n", interpreter.display());
+        let original = format!("{stripped}\n# fnug\nfnug check --fail-fast --mute-success\n");
+        write_executable(&hook, &original);
+        let target = hooks::resolve(&root).unwrap();
+        assert_eq!(hooks::status(&target), HookStatus::Outdated);
+
+        let err = hooks::install_with(&target, &options(ForeignPolicy::Refuse)).unwrap_err();
+        assert!(matches!(err, HookError::ForeignHook { .. }), "{err}");
+        assert_eq!(
+            read(&hook),
+            original,
+            "refusing leaves the {name} hook alone"
+        );
+
+        hooks::install_with(&target, &options(ForeignPolicy::Chain)).unwrap();
+        let local = hook.with_file_name("pre-commit.local");
+        assert_eq!(read(&local), stripped, "only the legacy block is dropped");
+        assert!(read(&hook).starts_with("#!/bin/sh\n# >>> fnug >>>\n"));
+        assert_eq!(hooks::status(&target), HookStatus::Installed);
+
+        let (code, stderr) = shim.run_hook(&hook, &root, 0, &shim.path(), &[]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stderr.contains("user-hook-ran"), "{stderr}");
+        assert_eq!(shim.args(), hooks::hook_args(false), "fnug runs once");
+        let (code, stderr) = shim.run_hook(&hook, &root, 2, &shim.path(), &[]);
+        assert_eq!(code, 2, "fnug's failure blocks the commit");
+        assert!(!stderr.contains("user-hook-ran"), "{stderr}");
+
+        hooks::remove(&root).unwrap();
+        assert_eq!(read(&hook), stripped);
+        assert!(!local.exists());
+    }
 }
 
 /// Absolute path of `sh`, which `Command` can't find when a test changes `PATH`.
@@ -641,9 +690,8 @@ fn subdir_config_hook_cds() {
 
         hooks::install_with(&target, &options(ForeignPolicy::Refuse)).unwrap();
 
-        let path = format!("{}:{}", shim.bin.display(), std::env::var("PATH").unwrap());
         let env = [("GIT_INDEX_FILE", ".git/index")];
-        assert_eq!(shim.run_hook(&hook, &root, 0, &path, &env).0, 0);
+        assert_eq!(shim.run_hook(&hook, &root, 0, &shim.path(), &env).0, 0);
         assert_eq!(shim.logged("pwd"), [config_dir.display().to_string()]);
         assert_eq!(
             shim.logged("index"),
