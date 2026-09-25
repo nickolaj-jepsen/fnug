@@ -56,9 +56,9 @@ fn start_file_watcher(
         };
 
         // Forward watch events to app. The handle keeps watching while this scope lives.
-        while let Some(commands) = handle.events.recv().await {
+        while let Some(matches) = handle.events.recv().await {
             if event_tx
-                .send(AppEvent::WatcherTriggered(commands))
+                .send(AppEvent::WatcherTriggered(matches))
                 .await
                 .is_err()
             {

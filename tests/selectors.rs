@@ -1,6 +1,7 @@
 //! Tests for auto-selection: git scopes, path and regex matching, selection issues, and file
 //! watching.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1077,7 +1078,26 @@ async fn next_ids(handle: &mut WatchHandle, secs: u64) -> Vec<String> {
         .await
         .unwrap_or_else(|_| panic!("no watch event within {secs}s"))
         .expect("the watcher stopped");
-    batch.into_iter().map(|c| c.id).collect()
+    batch.into_iter().map(|m| m.id).collect()
+}
+
+/// Matched files per command id, merged across watch event batches.
+type Seen = BTreeMap<String, BTreeSet<PathBuf>>;
+
+/// Merge watch event batches until `done` holds for what was seen, failing after 5 seconds.
+async fn watch_until(handle: &mut WatchHandle, done: impl Fn(&Seen) -> bool) -> Seen {
+    let mut seen = Seen::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !done(&seen) {
+        let batch = tokio::time::timeout_at(deadline, handle.events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("watch events never completed: {seen:?}"))
+            .expect("the watcher stopped");
+        for m in batch {
+            seen.entry(m.id).or_default().extend(m.files);
+        }
+    }
+    seen
 }
 
 const WATCH_SRC_CONFIG: &str = r"
@@ -1099,6 +1119,48 @@ async fn watch_latency_under_2s() {
 
     std::fs::write(root.join("src/a.txt"), "").unwrap();
     assert_eq!(next_ids(&mut handle, 2).await, ["test"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_reports_matched_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("src/old.rs"), "").unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  watch: true
+  path: [./src]
+commands:
+  - name: rust
+    cmd: 'true'
+    auto:
+      regex: ['\.rs$']
+  - name: any
+    cmd: 'true'
+",
+    );
+    let mut handle = start_watch(&config);
+
+    std::fs::write(root.join("src/a.rs"), "").unwrap();
+    std::fs::write(root.join("src/b.txt"), "").unwrap();
+    let seen = watch_until(&mut handle, |seen| {
+        seen.get("any").is_some_and(|files| files.len() == 2)
+    })
+    .await;
+    assert_eq!(seen["rust"], BTreeSet::from([root.join("src/a.rs")]));
+    assert_eq!(
+        seen["any"],
+        BTreeSet::from([root.join("src/a.rs"), root.join("src/b.txt")])
+    );
+
+    // A removal selects, but the file is gone, so it isn't listed.
+    std::fs::remove_file(root.join("src/old.rs")).unwrap();
+    let seen = watch_until(&mut handle, |seen| seen.contains_key("rust")).await;
+    assert_eq!(seen["rust"], BTreeSet::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]

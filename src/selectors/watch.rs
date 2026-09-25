@@ -3,7 +3,6 @@ use crate::selectors::matching::command_matches;
 use log::{debug, error, info};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
-use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -37,50 +36,98 @@ pub struct WatchReport {
     pub limit_reached: bool,
 }
 
+/// A command selected by file changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchMatch {
+    pub id: String,
+    /// Changed files matching the command's `auto` rules that still exist: absolute, sorted and
+    /// deduplicated. Empty if only removals or directories matched.
+    pub files: Vec<PathBuf>,
+}
+
 /// A running file watcher. Watching stops when it is dropped.
 pub struct WatchHandle {
-    /// Batches of commands selected by file changes.
-    pub events: mpsc::Receiver<Vec<Command>>,
+    /// Commands selected by file changes, a batch at a time, in config order.
+    pub events: mpsc::Receiver<Vec<WatchMatch>>,
     pub report: WatchReport,
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
 }
 
-fn commands_for_paths<'a>(
-    paths: &[PathBuf],
-    path_map: &'a HashMap<PathBuf, Vec<Command>>,
-) -> Vec<&'a Command> {
-    let mut seen = std::collections::HashSet::new();
-    paths
-        .iter()
-        .flat_map(|path| {
-            path_map.iter().flat_map(move |(key, cmds)| {
-                cmds.iter()
-                    .filter(move |cmd| command_matches(cmd, key, path))
-            })
-        })
-        .filter(|cmd| seen.insert(cmd.id.clone()))
-        .collect()
+/// A watch path and the commands watching it.
+struct WatchKey {
+    path: PathBuf,
+    /// Indices into [`Matcher::commands`].
+    commands: Vec<usize>,
 }
 
-fn path_lookup_table(commands: Vec<Command>) -> HashMap<PathBuf, Vec<Command>> {
-    commands
-        .into_iter()
-        .filter(|cmd| cmd.auto.watch.unwrap_or(false))
-        .flat_map(|cmd| {
-            cmd.auto
-                .paths()
-                .to_vec()
-                .into_iter()
-                .map(move |p| (p, cmd.clone()))
-        })
-        .fold(HashMap::new(), |mut acc, (path, cmd)| {
-            acc.entry(path).or_default().push(cmd);
-            acc
-        })
+/// Matches changed paths against the `auto` rules of the commands with `auto.watch`.
+struct Matcher {
+    commands: Vec<Command>,
+    /// Sorted by path.
+    keys: Vec<WatchKey>,
+}
+
+impl Matcher {
+    fn new(commands: Vec<Command>) -> Self {
+        let commands: Vec<Command> = commands
+            .into_iter()
+            .filter(|cmd| cmd.auto.watch == Some(true))
+            .collect();
+        let mut keys: Vec<WatchKey> = Vec::new();
+        for (index, cmd) in commands.iter().enumerate() {
+            for path in cmd.auto.paths() {
+                match keys.iter_mut().find(|key| &key.path == path) {
+                    Some(key) if key.commands.contains(&index) => {}
+                    Some(key) => key.commands.push(index),
+                    None => keys.push(WatchKey {
+                        path: path.clone(),
+                        commands: vec![index],
+                    }),
+                }
+            }
+        }
+        keys.sort_by(|a, b| a.path.cmp(&b.path));
+        Matcher { commands, keys }
+    }
+
+    /// The commands that `changed` paths select, in config order.
+    fn matches(&self, changed: &[PathBuf]) -> Vec<WatchMatch> {
+        let mut selected: Vec<Option<Vec<PathBuf>>> = vec![None; self.commands.len()];
+        for path in changed {
+            let mut is_file = None;
+            for key in self.keys.iter().filter(|key| path.starts_with(&key.path)) {
+                for &index in &key.commands {
+                    if !command_matches(&self.commands[index], &key.path, path) {
+                        continue;
+                    }
+                    let files = selected[index].get_or_insert_with(Vec::new);
+                    if *is_file.get_or_insert_with(|| {
+                        path.symlink_metadata().is_ok_and(|meta| !meta.is_dir())
+                    }) {
+                        files.push(path.clone());
+                    }
+                }
+            }
+        }
+        self.commands
+            .iter()
+            .zip(selected)
+            .filter_map(|(cmd, files)| {
+                let mut files = files?;
+                files.sort();
+                files.dedup();
+                Some(WatchMatch {
+                    id: cmd.id.clone(),
+                    files,
+                })
+            })
+            .collect()
+    }
 }
 
 fn start_debouncer(
-    sender: mpsc::Sender<Vec<PathBuf>>,
+    matcher: Matcher,
+    sender: mpsc::Sender<Vec<WatchMatch>>,
 ) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, notify::Error> {
     info!("Starting file watcher");
     // `timeout` is how long every event is held back, not a quiet period.
@@ -89,23 +136,33 @@ fn start_debouncer(
         Some(Duration::from_millis(100)),
         move |res: DebounceEventResult| match res {
             Ok(events) => {
-                let files: Vec<PathBuf> = events
+                let mut changed: Vec<PathBuf> = events
                     .iter()
                     .filter(|event| {
                         event.event.kind.is_create()
                             || event.event.kind.is_modify()
                             || event.event.kind.is_remove()
                     })
-                    .flat_map(|event| event.paths.clone())
+                    .flat_map(|event| event.paths.iter().cloned())
                     .collect();
+                changed.sort();
+                changed.dedup();
 
-                if !files.is_empty()
-                    && let Err(e) = sender.blocking_send(files)
-                {
-                    error!("Failed to send watch event: {e}");
+                let selected = matcher.matches(&changed);
+                if selected.is_empty() {
+                    return;
+                }
+                let ids: Vec<&str> = selected.iter().map(|m| m.id.as_str()).collect();
+                debug!("Watcher matched commands: {}", ids.join(", "));
+                if sender.blocking_send(selected).is_err() {
+                    debug!("Dropping watch events: nothing receives them");
                 }
             }
-            Err(e) => error!("Watch error: {e:?}"),
+            Err(errors) => {
+                for e in errors {
+                    error!("Watch error: {e}");
+                }
+            }
         },
     )
 }
@@ -147,43 +204,21 @@ fn register(
 /// `WatchError::NothingWatched` if none of their paths could be watched, or
 /// `WatchError::Watch` if the file watcher fails to start.
 pub fn watch_commands(commands: Vec<Command>) -> Result<WatchHandle, WatchError> {
-    let (path_tx, mut path_rx) = mpsc::channel(100);
-    let lookup_table = path_lookup_table(commands);
-
-    if lookup_table.is_empty() {
+    let matcher = Matcher::new(commands);
+    if matcher.keys.is_empty() {
         return Err(WatchError::NoWatchableCommands);
     }
+    let paths: Vec<PathBuf> = matcher.keys.iter().map(|key| key.path.clone()).collect();
+    let paths: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
 
-    let mut paths = lookup_table
-        .keys()
-        .map(PathBuf::as_path)
-        .collect::<Vec<&Path>>();
-    paths.sort();
-    let mut debouncer = start_debouncer(path_tx)?;
+    let (sender, events) = mpsc::channel(100);
+    let mut debouncer = start_debouncer(matcher, sender)?;
     let report = register(&mut debouncer, &paths);
     if report.roots.is_empty() {
         return Err(WatchError::NothingWatched(report));
     }
-
-    let (cmd_tx, cmd_rx) = mpsc::channel(100);
-    let lookup = lookup_table;
-
-    tokio::spawn(async move {
-        while let Some(changed_files) = path_rx.recv().await {
-            let matched = commands_for_paths(&changed_files, &lookup);
-            if !matched.is_empty() {
-                let names: Vec<&str> = matched.iter().map(|c| c.name.as_str()).collect();
-                debug!("Watcher matched commands: {}", names.join(", "));
-                let cmds: Vec<Command> = matched.into_iter().cloned().collect();
-                if cmd_tx.send(cmds).await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-
     Ok(WatchHandle {
-        events: cmd_rx,
+        events,
         report,
         _debouncer: debouncer,
     })
@@ -221,90 +256,71 @@ mod tests {
         }
     }
 
-    fn create_path_map(commands: Vec<Command>) -> HashMap<PathBuf, Vec<Command>> {
-        let mut map: HashMap<PathBuf, Vec<Command>> = HashMap::new();
-        for cmd in commands {
-            for path in cmd.auto.paths() {
-                map.entry(path.clone()).or_default().push(cmd.clone());
-            }
-        }
-        map
+    /// Ids of the `commands` that the `changed` paths (relative to [`ROOT`]) select.
+    fn matched_ids(commands: Vec<Command>, changed: &[&str]) -> Vec<String> {
+        let changed: Vec<PathBuf> = changed.iter().map(|path| abs(path)).collect();
+        Matcher::new(commands)
+            .matches(&changed)
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
     }
 
     #[test]
-    fn test_commands_for_paths_basic_match() {
+    fn matches_basic_match() {
         let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
-        let path_map = create_path_map(vec![cmd]);
-
-        let changed_paths = vec![abs("src/main.rs")];
-        let matching_commands = commands_for_paths(&changed_paths, &path_map);
-
-        assert_eq!(matching_commands.len(), 1);
-        assert_eq!(matching_commands[0].name, "test1");
+        assert_eq!(matched_ids(vec![cmd], &["src/main.rs"]), ["test1"]);
     }
 
     #[test]
-    fn test_commands_for_paths_no_match() {
+    fn matches_no_match() {
         let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
-        let path_map = create_path_map(vec![cmd]);
-
-        let changed_paths = vec![abs("src/main.txt"), abs("other/main.rs")];
-        let matching_commands = commands_for_paths(&changed_paths, &path_map);
-
-        assert_eq!(matching_commands.len(), 0);
+        assert!(matched_ids(vec![cmd], &["src/main.txt", "other/main.rs"]).is_empty());
     }
 
     #[test]
-    fn test_commands_for_paths_multiple_commands() {
+    fn matches_multiple_commands() {
         let cmd1 = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
         let cmd2 = create_test_command("test2", vec!["src"], vec![r".*\.rs$"]);
-        let path_map = create_path_map(vec![cmd1, cmd2]);
-
-        let changed_paths = vec![abs("src/main.rs")];
-        let matching_commands = commands_for_paths(&changed_paths, &path_map);
-
-        assert_eq!(matching_commands.len(), 2);
+        assert_eq!(
+            matched_ids(vec![cmd1, cmd2], &["src/main.rs"]),
+            ["test1", "test2"]
+        );
     }
 
     #[test]
-    fn test_commands_for_paths_multiple_patterns() {
+    fn matches_multiple_patterns() {
         let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$", r".*\.toml$"]);
-        let path_map = create_path_map(vec![cmd]);
-
-        let changed_paths = vec![
-            abs("src/main.rs"),
-            abs("src/Cargo.toml"),
-            abs("src/README.md"),
-        ];
-        let matching_commands = commands_for_paths(&changed_paths, &path_map);
-
-        // Same command matches both .rs and .toml, but should be deduplicated
-        assert_eq!(matching_commands.len(), 1);
-        assert_eq!(matching_commands[0].name, "test1");
+        let changed = ["src/main.rs", "src/Cargo.toml", "src/README.md"];
+        assert_eq!(matched_ids(vec![cmd], &changed), ["test1"]);
     }
 
     #[test]
-    fn test_commands_for_paths_empty_regex_matches_all() {
+    fn matches_empty_regex_matches_all() {
         let cmd = create_test_command("test1", vec!["docs"], vec![]);
-        let path_map = create_path_map(vec![cmd]);
-
-        let changed_paths = vec![abs("docs/demo.tape")];
-        let matching_commands = commands_for_paths(&changed_paths, &path_map);
-
-        assert_eq!(matching_commands.len(), 1);
-        assert_eq!(matching_commands[0].name, "test1");
+        assert_eq!(matched_ids(vec![cmd], &["docs/demo.tape"]), ["test1"]);
     }
 
     #[test]
-    fn test_commands_for_paths_regex_relative_to_cwd() {
+    fn matches_regex_relative_to_cwd() {
         let anchored = create_test_command("anchored", vec!["."], vec![r"^src/.*\.rs$"]);
         let parent_name = create_test_command("parent", vec!["."], vec!["project"]);
-        let path_map = create_path_map(vec![anchored, parent_name]);
+        let changed = ["src/main.rs", "nested/src/lib.rs"];
+        assert_eq!(
+            matched_ids(vec![anchored, parent_name], &changed),
+            ["anchored"]
+        );
+    }
 
-        let changed_paths = vec![abs("src/main.rs"), abs("nested/src/lib.rs")];
-        let matching_commands = commands_for_paths(&changed_paths, &path_map);
-
-        assert_eq!(matching_commands.len(), 1);
-        assert_eq!(matching_commands[0].name, "anchored");
+    #[test]
+    fn matches_follow_config_order_and_skip_unwatched() {
+        let mut unwatched = create_test_command("unwatched", vec!["src"], vec![]);
+        unwatched.auto.watch = Some(false);
+        let second = create_test_command("second", vec!["src/b"], vec![]);
+        let first = create_test_command("first", vec!["src", "src/b"], vec![]);
+        assert_eq!(
+            matched_ids(vec![unwatched, first, second], &["src/b/x.rs"]),
+            ["first", "second"]
+        );
     }
 }
