@@ -47,7 +47,17 @@ pub fn load_config(
             if !config_path.exists() {
                 return Err(ConfigError::ConfigFileMissing(config_path));
             }
-            config_path
+            // Canonicalize the directory (not the file, which may be a symlink) so `..`
+            // components don't break workspace discovery's path prefix checks.
+            let dir = config_path
+                .parent()
+                .ok_or_else(|| ConfigError::ConfigNotFound(config_path.clone()))?
+                .canonicalize()
+                .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
+            match config_path.file_name() {
+                Some(name) => dir.join(name),
+                None => return Err(ConfigError::ConfigFileMissing(config_path)),
+            }
         }
         None => Config::find_config()?,
     };
