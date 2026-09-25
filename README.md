@@ -280,7 +280,7 @@ children:
 
 Workspace mode discovers `.fnug.yaml` files in subdirectories and merges them as child groups. This is useful for mono-repos where each package has its own config.
 
-When `workspace: true`, fnug walks the filesystem (skipping `.gitignore`'d and hidden directories) to find sub-configs. Files do not need to be git-tracked to be discovered.
+When `workspace: true`, fnug walks the filesystem (skipping `.gitignore`'d and hidden directories) to find sub-configs. Files do not need to be git-tracked to be discovered. Outside a git repository nothing counts as ignored, so only hidden directories are skipped.
 
 ```yaml
 # Auto-discover sub-configs (walks up to 5 levels deep)

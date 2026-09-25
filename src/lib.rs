@@ -133,7 +133,7 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
 
     let packages = match (packages, &workspace) {
         (Some(packages), _) => packages,
-        (None, Some(ws)) => workspace::discover(ws, &cwd)?,
+        (None, Some(ws)) => workspace::discover(ws, &cwd, workspace::OutsideGit::Walk)?,
         (None, None) => Vec::new(),
     };
     let mut sources = vec![config_path.clone()];
@@ -219,7 +219,7 @@ fn find_workspace_root(
         let Some(ws) = &parsed.workspace else {
             continue;
         };
-        let packages = match workspace::discover(ws, dir) {
+        let packages = match workspace::discover(ws, dir, workspace::OutsideGit::Fail) {
             Ok(packages) => packages,
             Err(e) => {
                 warn!("Ignoring parent workspace {}: {e}", candidate.display());
