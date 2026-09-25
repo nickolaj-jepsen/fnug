@@ -4,7 +4,6 @@
 //! and git changes. It allows users to define commands and command groups in a configuration
 //! file, with flexible automation rules for when commands should be executed.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use log::{debug, warn};
@@ -91,6 +90,7 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     let parsed = Config::from_file(&config_path)?;
     check_version(parsed.fnug_version.as_deref());
     let (mut root, workspace) = parsed.into_root();
+    root.source = Some(config_path.clone());
 
     let mut sources = vec![config_path.clone()];
     // Discover and merge workspace sub-configs before converting
@@ -98,9 +98,9 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         sources.extend(workspace::discover_and_merge(ws, &cwd, &mut root)?);
     }
 
+    commands::ids::assign_ids(&mut root)?;
     let mut config: CommandGroup = root.try_into()?;
     validate_tree(&config)?;
-    validate_dependencies(&config)?;
     config.inherit(&Inheritance::from(cwd.clone()))?;
     Ok(LoadedConfig {
         root: config,
@@ -233,11 +233,9 @@ fn version_core(version: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-/// Validate the config tree for duplicate IDs, empty groups, and invalid values
+/// Reject empty `cmd`s and warn about empty groups. Names and ids are checked by
+/// [`commands::ids::assign_ids`].
 fn validate_tree(root: &CommandGroup) -> Result<(), ConfigError> {
-    let mut seen_ids = HashSet::new();
-    check_duplicates(root, &mut seen_ids)?;
-    check_empty_names(root)?;
     check_empty_commands(root)?;
     check_empty_groups(root);
     Ok(())
@@ -258,48 +256,6 @@ fn walk_tree(
         .try_for_each(|child| walk_tree(child, visit_group, visit_cmd))
 }
 
-fn check_duplicates(group: &CommandGroup, seen: &mut HashSet<String>) -> Result<(), ConfigError> {
-    fn check_id(id: &str, seen: &mut HashSet<String>) -> Result<(), ConfigError> {
-        if !seen.insert(id.to_string()) {
-            return Err(ConfigError::DuplicateId(id.to_string()));
-        }
-        Ok(())
-    }
-
-    check_id(&group.id, seen)?;
-    for cmd in &group.commands {
-        check_id(&cmd.id, seen)?;
-    }
-    for child in &group.children {
-        check_duplicates(child, seen)?;
-    }
-    Ok(())
-}
-
-fn check_empty_names(group: &CommandGroup) -> Result<(), ConfigError> {
-    walk_tree(
-        group,
-        &mut |g| {
-            if g.name.trim().is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "Group with id '{}' has an empty name",
-                    g.id
-                )));
-            }
-            Ok(())
-        },
-        &mut |cmd| {
-            if cmd.name.trim().is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "Command with id '{}' has an empty name",
-                    cmd.id
-                )));
-            }
-            Ok(())
-        },
-    )
-}
-
 fn check_empty_commands(group: &CommandGroup) -> Result<(), ConfigError> {
     walk_tree(group, &mut |_| Ok(()), &mut |cmd| {
         if cmd.cmd.trim().is_empty() {
@@ -310,61 +266,6 @@ fn check_empty_commands(group: &CommandGroup) -> Result<(), ConfigError> {
         }
         Ok(())
     })
-}
-
-/// Validate that all `depends_on` references resolve and there are no cycles
-fn validate_dependencies(root: &CommandGroup) -> Result<(), ConfigError> {
-    let commands = root.all_commands();
-    let cmd_by_id: HashMap<&str, &Command> = commands.iter().map(|c| (c.id.as_str(), *c)).collect();
-
-    // Validate references
-    for cmd in &commands {
-        for dep in &cmd.depends_on {
-            if !cmd_by_id.contains_key(dep.as_str()) {
-                return Err(ConfigError::Validation(format!(
-                    "Command '{}' depends on '{}' which does not exist",
-                    cmd.name, dep
-                )));
-            }
-        }
-    }
-
-    // Cycle detection via DFS with O(1) lookup
-    let mut visited = HashSet::new();
-    let mut stack = HashSet::new();
-    for cmd in &commands {
-        if !visited.contains(cmd.id.as_str()) {
-            detect_cycle(cmd.id.as_str(), &cmd_by_id, &mut visited, &mut stack)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn detect_cycle<'a>(
-    id: &'a str,
-    cmd_by_id: &HashMap<&str, &'a Command>,
-    visited: &mut HashSet<&'a str>,
-    stack: &mut HashSet<&'a str>,
-) -> Result<(), ConfigError> {
-    visited.insert(id);
-    stack.insert(id);
-
-    if let Some(cmd) = cmd_by_id.get(id) {
-        for dep in &cmd.depends_on {
-            let dep_str: &str = dep.as_str();
-            if !visited.contains(dep_str) {
-                detect_cycle(dep_str, cmd_by_id, visited, stack)?;
-            } else if stack.contains(dep_str) {
-                return Err(ConfigError::Validation(format!(
-                    "Circular dependency detected involving '{dep}'"
-                )));
-            }
-        }
-    }
-
-    stack.remove(id);
-    Ok(())
 }
 
 fn check_empty_groups(group: &CommandGroup) {
@@ -384,51 +285,6 @@ fn check_empty_groups(group: &CommandGroup) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::command::Command;
-
-    fn make_cmd(id: &str) -> Command {
-        Command {
-            id: id.to_string(),
-            name: id.to_string(),
-            cmd: "echo test".to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn make_group(id: &str, children: Vec<CommandGroup>, commands: Vec<Command>) -> CommandGroup {
-        CommandGroup {
-            id: id.to_string(),
-            name: id.to_string(),
-            children,
-            commands,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_duplicate_id_detection() {
-        let config = make_group(
-            "root",
-            vec![make_group("dup", vec![], vec![make_cmd("dup")])],
-            vec![],
-        );
-        let result = validate_tree(&config);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ConfigError::DuplicateId(id) => assert_eq!(id, "dup"),
-            other => panic!("Expected DuplicateId, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_unique_ids_pass() {
-        let config = make_group(
-            "root",
-            vec![make_group("group1", vec![], vec![make_cmd("cmd1")])],
-            vec![make_cmd("cmd2")],
-        );
-        assert!(validate_tree(&config).is_ok());
-    }
 
     #[test]
     fn version_core_compare() {

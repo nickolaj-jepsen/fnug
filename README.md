@@ -226,6 +226,32 @@ children:
           regex: []
 ```
 
+### Ids and dependencies
+
+Every command and group has an id, which `depends_on` and the MCP tools use. It defaults to the name, with `/` replaced by `-`. When several commands or groups would get the same default id, each of them gets its group path instead, such as `backend/test` and `frontend/test`. Set `id` to choose one yourself; explicit ids must be unique and can't contain `/`.
+
+A `depends_on` entry is an id, a group path like `backend/test`, or a name that is unique among the command's siblings or in the whole config:
+
+```yaml
+fnug_version: 0.1.0
+name: my-project
+children:
+  - name: backend
+    commands:
+      - name: build
+        cmd: cargo build
+      - name: test
+        cmd: cargo test
+        depends_on: [build]   # the sibling: backend/build
+  - name: frontend
+    commands:
+      - name: build
+        cmd: pnpm build
+      - name: test
+        cmd: pnpm test
+        depends_on: [build]   # frontend/build
+```
+
 ### Workspace
 
 Workspace mode discovers `.fnug.yaml` files in subdirectories and merges them as child groups. This is useful for mono-repos where each package has its own config.
@@ -296,11 +322,11 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | ------------ | ----------------- | ------------------------------------------------------------------- |
 | `name`       | string            | Display name (required)                                             |
 | `cmd`        | string            | Shell command to run (required)                                     |
-| `id`         | string            | Custom identifier — defaults to the command name                    |
+| `id`         | string            | Identifier — defaults to the name ([Ids](#ids-and-dependencies))    |
 | `cwd`        | string            | Working directory override                                          |
 | `env`        | map               | Extra environment variables                                         |
 | `auto`       | object            | Auto-selection rules (see below)                                    |
-| `depends_on` | list of strings   | Command IDs that must finish before this one runs                   |
+| `depends_on` | list of strings   | Commands that must finish first, by id or unique name               |
 | `scrollback` | integer           | PTY scrollback buffer size (number of lines)                        |
 
 #### Group fields
@@ -308,7 +334,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | Field      | Type              | Description                                                           |
 | ---------- | ----------------- | --------------------------------------------------------------------- |
 | `name`     | string            | Display name (required)                                               |
-| `id`       | string            | Custom identifier — defaults to the group name                        |
+| `id`       | string            | Identifier — defaults to the name ([Ids](#ids-and-dependencies))      |
 | `cwd`      | string            | Working directory (inherited by children)                             |
 | `env`      | map               | Environment variables (inherited by children)                         |
 | `auto`     | object            | Default auto rules (inherited by children)                            |
@@ -362,3 +388,4 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 
 - Unknown config keys are errors. Fix any key the error names (it suggests the closest valid key), and replace YAML merge keys (`<<: *anchor`) with a plain alias (`auto: *anchor`).
 - `auto.regex: []` and `auto.path: []` now clear the value inherited from the parent group instead of being ignored. If you wrote `regex: []` expecting the group's regex to apply, remove the line.
+- Ids default to the command or group name instead of a random UUID, and names that repeat get group-path ids such as `backend/test`. `depends_on` entries can now be names. Explicit ids can't contain `/`.

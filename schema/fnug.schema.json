@@ -67,7 +67,7 @@
       ]
     },
     "id": {
-      "description": "Identifier for the root group.",
+      "description": "Identifier for the root group. Defaults to the name; must not contain `/`.",
       "type": [
         "string",
         "null"
@@ -176,7 +176,7 @@
           ]
         },
         "depends_on": {
-          "description": "Ids of commands that must finish successfully before this one runs.",
+          "description": "Commands that must finish successfully before this one runs, by id or by a name that is\nunique among the command's siblings or in the config.",
           "type": [
             "array",
             "null"
@@ -196,7 +196,7 @@
           }
         },
         "id": {
-          "description": "Identifier used by `depends_on` and the MCP tools.",
+          "description": "Identifier used by `depends_on` and the MCP tools. Defaults to the name; must not\ncontain `/`.",
           "type": [
             "string",
             "null"
@@ -275,7 +275,7 @@
           }
         },
         "id": {
-          "description": "Identifier for the group.",
+          "description": "Identifier for the group. Defaults to the name; must not contain `/`.",
           "type": [
             "string",
             "null"

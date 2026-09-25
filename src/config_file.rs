@@ -9,14 +9,15 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::commands::auto::Auto;
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
+use crate::commands::ids::local_id;
 
 /// Errors that can occur while loading configuration
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("No config file found in current directory or its parents: {0}")]
     ConfigNotFound(PathBuf),
@@ -57,8 +58,15 @@ pub enum ConfigError {
         source: regex::Error,
         pattern: String,
     },
-    #[error("Duplicate ID in config: {0}")]
-    DuplicateId(String),
+    #[error(
+        "Duplicate id '{id}': the {first} and the {second} both have it; give one of them a different `id`"
+    )]
+    DuplicateId {
+        id: String,
+        /// Where the id is first used, e.g. `command 'root > lint' in /repo/.fnug.yaml`.
+        first: String,
+        second: String,
+    },
     #[error("Invalid config: {0}")]
     Validation(String),
     #[error("Workspace discovery error: {0}")]
@@ -176,7 +184,8 @@ impl TryFrom<ConfigAuto> for Auto {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigCommand {
-    /// Identifier used by `depends_on` and the MCP tools.
+    /// Identifier used by `depends_on` and the MCP tools. Defaults to the name; must not
+    /// contain `/`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Display name.
@@ -192,7 +201,8 @@ pub struct ConfigCommand {
     /// Extra environment variables, added to the inherited ones.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
-    /// Ids of commands that must finish successfully before this one runs.
+    /// Commands that must finish successfully before this one runs, by id or by a name that is
+    /// unique among the command's siblings or in the config.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<String>>,
     /// Number of scrollback lines kept for the command's terminal.
@@ -208,7 +218,7 @@ impl TryFrom<ConfigCommand> for Command {
             cwd: config.cwd.unwrap_or_default(),
             auto: config.auto.unwrap_or_default().try_into()?,
             cmd: config.cmd,
-            id: config.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            id: config.id.unwrap_or_else(|| local_id(&config.name)),
             name: config.name,
             env: config.env.unwrap_or_default(),
             depends_on: config.depends_on.unwrap_or_default(),
@@ -268,7 +278,7 @@ impl<'de> Deserialize<'de> for WorkspaceConfig {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigCommandGroup {
-    /// Identifier for the group.
+    /// Identifier for the group. Defaults to the name; must not contain `/`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Display name.
@@ -288,6 +298,9 @@ pub struct ConfigCommandGroup {
     /// Environment variables for everything in the group, added to the inherited ones.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+    /// The config file this group is the root of.
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
 }
 
 impl TryFrom<ConfigCommandGroup> for CommandGroup {
@@ -307,7 +320,7 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
             .map(Command::try_from)
             .collect::<Result<Vec<Command>, ConfigError>>()?;
         Ok(CommandGroup {
-            id: config.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            id: config.id.unwrap_or_else(|| local_id(&config.name)),
             name: config.name,
             auto: config.auto.unwrap_or_default().try_into()?,
             cwd: config.cwd.unwrap_or_default(),
@@ -335,7 +348,7 @@ pub struct Config {
     /// Discover and merge package configs from subdirectories.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceConfig>,
-    /// Identifier for the root group.
+    /// Identifier for the root group. Defaults to the name; must not contain `/`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Display name for the root group.
@@ -377,6 +390,7 @@ impl Config {
             commands: self.commands,
             children: self.children,
             env: self.env,
+            source: None,
         };
         (root, self.workspace)
     }

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use fnug::commands::command::Command;
 use fnug::commands::group::CommandGroup;
+use fnug::commands::ids::{ResolveError, resolve_command};
 use fnug::{LoadOptions, load_config};
 
 fn write_config(dir: &Path, content: &str) -> String {
@@ -595,4 +596,380 @@ fn path_empty_list_resets_to_cwd() {
     let everything = &command(&config, "everything").auto;
     assert_eq!(everything.paths(), [dir.path().canonicalize().unwrap()]);
     assert_eq!(everything.regexes().len(), 1);
+}
+
+// ─── ids ───
+
+fn ids(config: &CommandGroup) -> Vec<(String, String)> {
+    config
+        .all_commands()
+        .into_iter()
+        .map(|c| (c.name.clone(), c.id.clone()))
+        .collect()
+}
+
+#[test]
+fn ids_default_to_name() {
+    let (_dir, config) = load(
+        r"
+name: root
+commands:
+  - name: fmt
+    cmd: 'true'
+  - name: clippy
+    cmd: 'true'
+    depends_on: [fmt]
+",
+    );
+    assert_eq!(command(&config, "fmt").id, "fmt");
+    assert_eq!(command(&config, "clippy").depends_on, ["fmt"]);
+    assert_eq!(config.id, "root");
+}
+
+#[test]
+fn ids_stable_across_loads() {
+    let content = r"
+name: root
+children:
+  - name: a
+    commands:
+      - name: fmt
+        cmd: 'true'
+  - name: b
+    commands:
+      - name: fmt
+        cmd: 'true'
+";
+    let (_d1, first) = load(content);
+    let (_d2, second) = load(content);
+    assert_eq!(ids(&first), ids(&second));
+    assert_eq!(first.children[0].id, second.children[0].id);
+}
+
+#[test]
+fn name_slash_replaced_in_default_id() {
+    let (_dir, config) = load("name: root\ncommands:\n  - name: a/b\n    cmd: 'true'\n");
+    assert_eq!(command(&config, "a/b").id, "a-b");
+}
+
+#[test]
+fn duplicate_names_are_group_qualified() {
+    let (_dir, config) = load(
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: test
+        cmd: 'true'
+      - name: lint
+        cmd: 'true'
+  - name: frontend
+    commands:
+      - name: test
+        cmd: 'true'
+        depends_on: [backend/test]
+",
+    );
+    assert_eq!(
+        ids(&config),
+        [
+            ("test".into(), "backend/test".into()),
+            ("lint".into(), "lint".into()),
+            ("test".into(), "frontend/test".into()),
+        ]
+    );
+    assert_eq!(config.children[1].commands[0].depends_on, ["backend/test"]);
+}
+
+#[test]
+fn explicit_id_wins_over_defaulted_name() {
+    // This repo's own config: rust `fmt` has `id: rust-fmt`, so nix `fmt` keeps `fmt`.
+    let (_dir, config) = load(
+        r"
+name: root
+children:
+  - name: rust
+    commands:
+      - name: fmt
+        id: rust-fmt
+        cmd: 'true'
+  - name: nix
+    commands:
+      - name: fmt
+        cmd: 'true'
+      - name: after
+        cmd: 'true'
+        depends_on: [rust-fmt, fmt]
+",
+    );
+    assert_eq!(command(&config, "after").depends_on, ["rust-fmt", "fmt"]);
+    assert_eq!(config.children[1].commands[0].id, "fmt");
+}
+
+#[test]
+fn depends_on_prefers_sibling() {
+    let (_dir, config) = load(
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: build
+        cmd: 'true'
+      - name: test
+        cmd: 'true'
+        depends_on: [build]
+  - name: frontend
+    commands:
+      - name: build
+        cmd: 'true'
+      - name: test
+        cmd: 'true'
+        depends_on: [build]
+",
+    );
+    assert_eq!(config.children[0].commands[1].depends_on, ["backend/build"]);
+    assert_eq!(
+        config.children[1].commands[1].depends_on,
+        ["frontend/build"]
+    );
+}
+
+#[test]
+fn depends_on_ambiguous_lists_candidates() {
+    let err = load_err(
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: build
+        cmd: 'true'
+  - name: frontend
+    commands:
+      - name: build
+        cmd: 'true'
+commands:
+  - name: deploy
+    cmd: 'true'
+    depends_on: [build]
+",
+    );
+    assert!(err.contains("'build'"), "{err}");
+    assert!(err.contains("backend/build"), "{err}");
+    assert!(err.contains("frontend/build"), "{err}");
+}
+
+#[test]
+fn depends_on_unknown_names_id_of_named_command() {
+    let err = load_err(
+        r"
+name: root
+commands:
+  - name: fmt
+    id: rust-fmt
+    cmd: 'true'
+  - name: clippy
+    cmd: 'true'
+    depends_on: [fmt]
+",
+    );
+    assert!(err.contains("root > clippy"), "{err}");
+    assert!(err.contains("'fmt'"), "{err}");
+    assert!(err.contains("has id 'rust-fmt'"), "{err}");
+}
+
+#[test]
+fn depends_on_typo_suggests_close_id() {
+    let err = load_err(
+        r"
+name: root
+commands:
+  - name: build
+    cmd: 'true'
+  - name: test
+    cmd: 'true'
+    depends_on: [biuld]
+",
+    );
+    assert!(err.contains("did you mean 'build'?"), "{err}");
+}
+
+#[test]
+fn explicit_duplicate_id_reports_both_locations() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: lint
+        id: check
+        cmd: 'true'
+  - name: frontend
+    commands:
+      - name: eslint
+        id: check
+        cmd: 'true'
+",
+    );
+    let err = load_config(Some(&path), true).unwrap_err();
+    assert!(
+        matches!(&err, fnug::config_file::ConfigError::DuplicateId { id, .. } if id == "check"),
+        "{err:?}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("root > backend > lint"), "{msg}");
+    assert!(msg.contains("root > frontend > eslint"), "{msg}");
+    assert!(msg.contains(".fnug.yaml"), "{msg}");
+}
+
+#[test]
+fn explicit_id_with_slash_rejected() {
+    let err = load_err("name: root\ncommands:\n  - name: a\n    id: x/y\n    cmd: 'true'\n");
+    assert!(err.contains("'x/y'"), "{err}");
+    assert!(err.contains("must not contain '/'"), "{err}");
+}
+
+#[test]
+fn explicit_empty_id_rejected() {
+    let err = load_err("name: root\ncommands:\n  - name: a\n    id: ''\n    cmd: 'true'\n");
+    assert!(err.contains("empty id"), "{err}");
+}
+
+#[test]
+fn sibling_duplicate_names_error() {
+    let err = load_err(
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: test
+        cmd: 'true'
+      - name: test
+        cmd: 'false'
+",
+    );
+    assert!(err.contains("backend/test"), "{err}");
+    assert!(err.contains("root > backend > test"), "{err}");
+}
+
+#[test]
+fn group_and_command_share_namespace() {
+    let (_dir, config) = load(
+        r"
+name: root
+children:
+  - name: lint
+    commands:
+      - name: lint
+        cmd: 'true'
+",
+    );
+    assert_eq!(config.children[0].id, "lint");
+    assert_eq!(config.children[0].commands[0].id, "lint/lint");
+}
+
+#[test]
+fn dependency_cycle_lists_whole_cycle() {
+    let err = load_err(
+        r"
+name: root
+commands:
+  - name: a
+    cmd: 'true'
+    depends_on: [b]
+  - name: b
+    cmd: 'true'
+    depends_on: [c]
+  - name: c
+    cmd: 'true'
+    depends_on: [a]
+",
+    );
+    assert!(err.contains("a -> b -> c -> a"), "{err}");
+}
+
+#[test]
+fn dogfood_config_ids() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/.fnug.yaml");
+    let (config, _) = load_config(Some(path), true).unwrap();
+    let ids: Vec<&str> = config
+        .all_commands()
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    for id in ["rust-fmt", "fmt", "test", "clippy check"] {
+        assert!(ids.contains(&id), "{id} not in {ids:?}");
+    }
+}
+
+// ─── resolve_command ───
+
+fn resolve_fixture() -> (tempfile::TempDir, CommandGroup) {
+    load(
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: test
+        cmd: 'true'
+      - name: fmt
+        id: rust-fmt
+        cmd: 'true'
+  - name: frontend
+    commands:
+      - name: test
+        cmd: 'true'
+      - name: Build
+        cmd: 'true'
+",
+    )
+}
+
+#[test]
+fn resolve_command_exact_id_then_unique_name() {
+    let (_dir, config) = resolve_fixture();
+    assert_eq!(resolve_command(&config, "rust-fmt").unwrap().name, "fmt");
+    assert_eq!(resolve_command(&config, "fmt").unwrap().id, "rust-fmt");
+    assert_eq!(resolve_command(&config, "build").unwrap().id, "Build");
+    assert_eq!(
+        resolve_command(&config, "backend/test").unwrap().id,
+        "backend/test"
+    );
+}
+
+#[test]
+fn resolve_command_ambiguous_name_lists_candidates() {
+    let (_dir, config) = resolve_fixture();
+    match resolve_command(&config, "TEST") {
+        Err(ResolveError::Ambiguous { candidates, .. }) => assert_eq!(
+            candidates,
+            [
+                ("backend/test".to_string(), "root > backend".to_string()),
+                ("frontend/test".to_string(), "root > frontend".to_string()),
+            ]
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn resolve_command_not_found_suggests() {
+    let (_dir, config) = resolve_fixture();
+    match resolve_command(&config, "rust-fnt") {
+        Err(err @ ResolveError::NotFound { .. }) => {
+            let ResolveError::NotFound { suggestions, .. } = &err else {
+                unreachable!()
+            };
+            assert_eq!(suggestions, &["rust-fmt"]);
+            assert!(err.to_string().contains("rust-fmt"), "{err}");
+        }
+        other => panic!("{other:?}"),
+    }
 }
