@@ -19,6 +19,7 @@ impl From<&Command> for CommandBuilder {
             command_builder.env(key, value);
         }
         command_builder.env("TERM", "xterm-256color");
+        // portable-pty silently falls back to $HOME for a missing cwd; spawn_pty rejects it first
         command_builder.cwd(command.cwd.clone());
         command_builder
     }
