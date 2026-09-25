@@ -205,12 +205,14 @@ impl App {
         self.mark_tree_dirty();
     }
 
-    /// Stop a command process, or drop its queued run (and its dependents') if it hasn't started
+    /// Stop a command process and drop its queued run (and its dependents'), if any
     pub fn stop_command(&mut self, cmd_id: &str) {
         info!("Stopping command '{cmd_id}'");
         if self.pending_deps.remove(cmd_id).is_some() {
             self.cancel_dependents(cmd_id);
-        } else if let Some(proc) = self.processes.get(cmd_id)
+        }
+        // A queued rerun can wait behind a previous run that is still going
+        if let Some(proc) = self.processes.get(cmd_id)
             && let Err(e) = proc.terminal.stop(StopSignal::Interrupt, STOP_GRACE)
         {
             warn!("Failed to stop process '{cmd_id}': {e}");
@@ -583,6 +585,51 @@ mod tests {
             app.processes["a"].terminal.is_running(),
             "stopped the dependency"
         );
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_reaches_run_still_going_behind_queued_rerun() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let command = |id: &str, cmd: &str, depends_on: Vec<String>| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: cmd.into(),
+            cwd: dir.path().to_path_buf(),
+            depends_on,
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                command("a", "exec sleep 30", vec![]),
+                command("b", ": > ready; exec sleep 30", vec!["a".into()]),
+            ],
+            ..Default::default()
+        };
+        let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
+        app.start_command("b", AREA, true);
+        app.handle_app_event(exited(&app, "a", 0));
+        assert!(wait_until(Duration::from_secs(5), || dir
+            .path()
+            .join("ready")
+            .exists()));
+        // Restarting the dependency queues the rerun of `b` while its first run keeps going
+        app.start_command("a", AREA, false);
+        app.start_command("b", AREA, true);
+        assert!(app.pending_deps.contains_key("b"));
+        let first_run = std::sync::Arc::clone(&app.processes["b"].terminal);
+
+        app.stop_command("b");
+
+        assert!(!app.pending_deps.contains_key("b"));
+        let exit = tokio::time::timeout(Duration::from_secs(3), first_run.wait()).await;
+        let exit = exit.expect("running instance was not stopped").unwrap();
+        assert!(exit.stop_requested);
         app.shutdown().await;
     }
 
