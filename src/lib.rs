@@ -29,7 +29,8 @@ pub mod workspace;
 /// How to find and load a config.
 #[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
-    /// Explicit config file. Without it, the nearest config file at or above `start_dir` is used.
+    /// Explicit config file, always loaded as the root. Without it, the nearest config file at
+    /// or above `start_dir` is used, or the parent workspace root whose discovery includes it.
     pub config: Option<PathBuf>,
     /// Don't resolve upward to a parent workspace root.
     pub no_workspace: bool,
@@ -65,17 +66,23 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     }
     .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
 
-    let config_path = match &opts.config {
+    let found = match &opts.config {
         Some(file) if opts.start_dir.is_some() => resolve_config_arg(&start_dir.join(file))?,
         Some(file) => resolve_config_arg(file)?,
         None => config_file::find_config_from(&start_dir)?,
     };
 
-    // If workspace resolution is enabled, check for a parent workspace root
-    let config_path = if opts.no_workspace {
-        config_path
+    // An explicit config is always the root; a found one may belong to a parent workspace.
+    let promoted = if opts.no_workspace || opts.config.is_some() {
+        None
     } else {
-        find_workspace_root(&config_path)?.unwrap_or(config_path)
+        find_workspace_root(&found)
+    };
+    let (config_path, parsed, packages) = if let Some((path, parsed, packages)) = promoted {
+        (path, parsed, Some(packages))
+    } else {
+        let parsed = Config::from_file(&found)?;
+        (found, parsed, None)
     };
 
     let cwd = config_path
@@ -87,16 +94,17 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         config_path.display(),
         cwd.display()
     );
-    let parsed = Config::from_file(&config_path)?;
     check_version(parsed.fnug_version.as_deref());
     let (mut root, workspace) = parsed.into_root();
     root.source = Some(config_path.clone());
 
+    let packages = match (packages, &workspace) {
+        (Some(packages), _) => packages,
+        (None, Some(ws)) => workspace::discover(ws, &cwd)?,
+        (None, None) => Vec::new(),
+    };
     let mut sources = vec![config_path.clone()];
-    // Discover and merge workspace sub-configs before converting
-    if let Some(ref ws) = workspace {
-        sources.extend(workspace::discover_and_merge(ws, &cwd, &mut root)?);
-    }
+    sources.extend(workspace::merge(&mut root, &packages)?);
 
     commands::ids::assign_ids(&mut root)?;
     let mut config: CommandGroup = root.try_into()?;
@@ -150,35 +158,47 @@ fn resolve_config_arg(file: &Path) -> Result<PathBuf, ConfigError> {
     }
 }
 
-/// Search upward from a config file's directory for a parent config with `workspace` enabled.
-/// Returns `Some(parent_config_path)` if found, `None` otherwise.
-fn find_workspace_root(config_path: &std::path::Path) -> Result<Option<PathBuf>, ConfigError> {
-    let config_dir = config_path
-        .parent()
-        .and_then(|p| p.canonicalize().ok())
-        .ok_or_else(|| ConfigError::ConfigNotFound(config_path.to_path_buf()))?;
-
-    let mut search_dir = config_dir.clone();
-    while search_dir.pop() {
-        if let Some(candidate) = config_file::find_config_in_dir(&search_dir) {
-            let parsed = Config::from_file(&candidate)?;
-            if matches!(
-                parsed.workspace,
-                Some(
-                    config_file::WorkspaceConfig::Enabled(true)
-                        | config_file::WorkspaceConfig::Options(_)
-                )
-            ) {
-                debug!(
-                    "Found workspace root: {} (from {})",
-                    candidate.display(),
-                    config_path.display()
-                );
-                return Ok(Some(candidate));
+/// The nearest ancestor config whose workspace discovery includes `start` (a config path with a
+/// canonical directory), with its parsed config and discovered packages.
+///
+/// Ancestors that fail to parse or whose discovery fails are skipped with a warning.
+fn find_workspace_root(start: &Path) -> Option<(PathBuf, Config, Vec<PathBuf>)> {
+    for dir in start.parent()?.ancestors().skip(1) {
+        let Some(candidate) = config_file::find_config_in_dir(dir) else {
+            continue;
+        };
+        let parsed = match Config::from_file(&candidate) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                warn!("Ignoring parent config: {e}");
+                continue;
             }
+        };
+        let Some(ws) = &parsed.workspace else {
+            continue;
+        };
+        let packages = match workspace::discover(ws, dir) {
+            Ok(packages) => packages,
+            Err(e) => {
+                warn!("Ignoring parent workspace {}: {e}", candidate.display());
+                continue;
+            }
+        };
+        if packages.iter().any(|p| p == start) {
+            debug!(
+                "Found workspace root: {} (from {})",
+                candidate.display(),
+                start.display()
+            );
+            return Some((candidate, parsed, packages));
         }
+        debug!(
+            "Workspace {} does not include {}",
+            candidate.display(),
+            start.display()
+        );
     }
-    Ok(None)
+    None
 }
 
 /// Warn if the config's `fnug_version` doesn't fit this binary (see [`version_warning`]).
