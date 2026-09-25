@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use git2::Repository;
+use git2::{Repository, RepositoryOpenFlags};
 use log::debug;
 
 use crate::commands::command::Command;
 use crate::selectors::{RunnableSelector, SelectorError};
 
-/// Discover the git repo root for a given path, using a cache to avoid
-/// repeated filesystem traversal for paths in the same repo.
+/// Discover the work tree root of the git repo containing `path`, using a cache
+/// to avoid repeated filesystem traversal for paths in the same repo.
+/// Fails if no repo contains `path` or the repo is bare.
 fn discover_repo(
     path: &Path,
     cache: &mut HashMap<PathBuf, PathBuf>,
@@ -16,11 +17,12 @@ fn discover_repo(
     if let Some(cached) = cache.get(path) {
         return Ok(cached.clone());
     }
-    let repo_path = Repository::discover_path(path, &[] as &[&Path])?;
-    // discover_path returns the .git directory; we want the parent (worktree root)
-    let repo_path = repo_path
-        .parent()
-        .ok_or_else(|| git2::Error::from_str("Git repo path has no parent directory"))?
+    // Not `Repository::discover`: it reopens the gitdir, so a `.git` file without
+    // `core.worktree` (as `git init --separate-git-dir` writes) gets the wrong work tree.
+    let repo = Repository::open_ext(path, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path])?;
+    let repo_path = repo
+        .workdir()
+        .ok_or_else(|| git2::Error::from_str("bare repository has no working tree"))?
         .to_path_buf();
     debug!("Discovered git repo at {}", repo_path.display());
     cache.insert(path.to_path_buf(), repo_path.clone());
