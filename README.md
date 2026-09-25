@@ -1,8 +1,5 @@
 # Fnug
 
-> [!WARNING]
-> The main branch is currently undergoing a refactor to Rust. If you're looking for the latest Python version, see the [`python`](https://github.com/nickolaj-jepsen/fnug/tree/python) branch.
-
 [![CI](https://github.com/nickolaj-jepsen/fnug/workflows/CI/badge.svg)](https://github.com/nickolaj-jepsen/fnug/actions)
 [![Crates.io](https://img.shields.io/crates/v/fnug)](https://crates.io/crates/fnug)
 [![image](https://img.shields.io/pypi/v/fnug.svg)](https://pypi.python.org/pypi/fnug)
@@ -17,7 +14,7 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 - **File watching** — monitor the file system and re-select commands when files change
 - **Terminal emulation with scrollback** — full PTY support for interactive commands and long output
 - **Headless mode** (`fnug check`) — run selected commands without the TUI, useful for CI
-- **Git hook integration** (`fnug init-hooks`) — install a pre-commit hook that runs `fnug check`
+- **Setup wizard** (`fnug setup`) — install a pre-commit hook that runs `fnug check` and add the MCP server to your editor
 - **Command dependencies** — define `depends_on` to control execution order
 - **Environment variables** — set per-command or per-group env vars
 - **Nested command groups** — organize commands into a hierarchical tree with inherited settings
@@ -25,20 +22,26 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 
 ## Installation
 
+Linux and macOS only; commands run via `sh -c`.
+
 ### From crates.io
 
+Only prereleases are published so far. `cargo install fnug` skips prereleases, so name the version explicitly:
+
 ```bash
-cargo install fnug
+cargo install --locked fnug@0.1.0-alpha.13
 ```
 
 ### From PyPI
 
+The latest stable release on PyPI (0.0.x) is the old Python implementation, so allow prereleases:
+
 ```bash
 # With uv
-uv tool install fnug
+uv tool install --prerelease=allow fnug
 
 # With pipx
-pipx install fnug
+pipx install --pip-args=--pre fnug
 ```
 
 ### From GitHub Releases
@@ -69,11 +72,12 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 ### Subcommands
 
-| Command           | Description                                                     |
-| ----------------- | --------------------------------------------------------------- |
-| `fnug`            | Launch the TUI                                                  |
-| `fnug check`      | Run selected commands headlessly (exit code reflects pass/fail) |
-| `fnug init-hooks` | Install a git pre-commit hook that runs `fnug check`            |
+| Command      | Description                                                     |
+| ------------ | --------------------------------------------------------------- |
+| `fnug`       | Launch the TUI                                                  |
+| `fnug check` | Run selected commands headlessly (exit code reflects pass/fail) |
+| `fnug setup` | Interactive wizard: git pre-commit hook and editor MCP config   |
+| `fnug mcp`   | Run an MCP server over stdio                                    |
 
 ### Flags
 
@@ -87,7 +91,6 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
 | `--mute-success`  | Suppress output for passing commands (`check` only)             |
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
-| `--force`         | Overwrite existing hook (`init-hooks` only)                     |
 
 ## Configuration
 
