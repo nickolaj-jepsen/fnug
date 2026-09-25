@@ -1,3 +1,4 @@
+pub mod fsutil;
 pub mod hooks;
 pub mod mcp;
 pub mod workspace;
