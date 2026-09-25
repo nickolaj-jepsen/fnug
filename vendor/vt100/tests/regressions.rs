@@ -250,3 +250,83 @@ fn cell_chars_combining() {
     assert_eq!(screen.cell(0, 1).unwrap().chars().collect::<String>(), "中");
     assert_eq!(screen.cell(0, 3).unwrap().chars().count(), 0);
 }
+
+fn attrs_at(screen: &vt100::Screen, col: u16) -> (bool, bool, bool, vt100::Color) {
+    let cell = screen.cell(0, col).unwrap();
+    (
+        cell.bold(),
+        cell.dim(),
+        cell.strikethrough(),
+        cell.fgcolor(),
+    )
+}
+
+#[test]
+fn sgr_dim_strike() {
+    let mut parser = vt100::Parser::new(2, 20, 0);
+    parser.process(b"\x1b[2mD\x1b[9mS\x1b[0;2;9;31mX");
+    let screen = parser.screen();
+
+    let default = vt100::Color::Default;
+    assert_eq!(attrs_at(screen, 0), (false, true, false, default));
+    assert_eq!(attrs_at(screen, 1), (false, true, true, default));
+    assert_eq!(
+        attrs_at(screen, 2),
+        (false, true, true, vt100::Color::Idx(1))
+    );
+    assert!(screen.dim());
+    assert!(screen.strikethrough());
+}
+
+#[test]
+fn sgr_22_clears_dim() {
+    let mut parser = vt100::Parser::new(2, 20, 0);
+    parser.process(b"\x1b[1;2mA\x1b[22mB");
+    let screen = parser.screen();
+
+    let default = vt100::Color::Default;
+    assert_eq!(attrs_at(screen, 0), (true, true, false, default));
+    assert_eq!(attrs_at(screen, 1), (false, false, false, default));
+    assert!(!screen.bold());
+    assert!(!screen.dim());
+}
+
+#[test]
+fn sgr_29_clears_strike() {
+    let mut parser = vt100::Parser::new(2, 20, 0);
+    parser.process(b"\x1b[9mA\x1b[29mB");
+    let screen = parser.screen();
+
+    assert!(screen.cell(0, 0).unwrap().strikethrough());
+    assert!(!screen.cell(0, 1).unwrap().strikethrough());
+    assert!(!screen.strikethrough());
+}
+
+/// Every intensity and strikethrough transition, one per cell.
+const INTENSITY_STEPS: &[u8] =
+    b"\x1b[1mB\x1b[2mX\x1b[22;2mD\x1b[1mX\x1b[22;1mB\x1b[22mN\x1b[9mS\x1b[2mX\x1b[29mD\x1b[mN";
+
+#[test]
+fn formatted_roundtrips_dim() {
+    let mut parser = vt100::Parser::new(2, 20, 0);
+    let empty = parser.screen().clone();
+    parser.process(INTENSITY_STEPS);
+    let screen = parser.screen();
+
+    let mut formatted = vt100::Parser::new(2, 20, 0);
+    formatted.process(&screen.contents_formatted());
+    let mut diffed = vt100::Parser::new(2, 20, 0);
+    diffed.process(&empty.contents_formatted());
+    diffed.process(&screen.contents_diff(&empty));
+
+    for replay in [formatted.screen(), diffed.screen()] {
+        for col in 0..10 {
+            assert_eq!(attrs_at(replay, col), attrs_at(screen, col), "col {col}");
+        }
+    }
+    // bold to dim-only must reset intensity, since no SGR turns off only bold
+    assert!(screen
+        .contents_formatted()
+        .windows(7)
+        .any(|w| w == b"\x1b[22;2m"));
+}
