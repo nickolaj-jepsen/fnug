@@ -35,7 +35,7 @@ commands:
     assert_eq!(config.name, "root");
     assert_eq!(config.commands.len(), 1);
     assert_eq!(config.commands[0].name, "test");
-    assert_eq!(cwd, dir.path());
+    assert_eq!(cwd, dir.path().canonicalize().unwrap());
 }
 
 #[test]
@@ -723,7 +723,10 @@ commands:
     let (config, _) = load_config(Some(&path), false).unwrap();
 
     let sub_group = &config.children[0];
-    assert_eq!(sub_group.cwd, dir.path().join("packages/foo"));
+    assert_eq!(
+        sub_group.cwd,
+        dir.path().canonicalize().unwrap().join("packages/foo")
+    );
 }
 
 #[test]
