@@ -5,7 +5,7 @@
 //! file, with flexible automation rules for when commands should be executed.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use log::{debug, warn};
 
@@ -27,44 +27,53 @@ pub mod theme;
 pub mod tui;
 pub mod workspace;
 
-/// Load configuration from a file (or auto-detect), returning the root `CommandGroup` and cwd.
-///
-/// A relative `config_file` is resolved against the process working directory.
+/// How to find and load a config.
+#[derive(Debug, Clone, Default)]
+pub struct LoadOptions {
+    /// Explicit config file. Without it, the nearest config file at or above `start_dir` is used.
+    pub config: Option<PathBuf>,
+    /// Don't resolve upward to a parent workspace root.
+    pub no_workspace: bool,
+    /// Directory to act from: the config search starts here and a relative `config` resolves
+    /// against it. Defaults to the process working directory.
+    pub start_dir: Option<PathBuf>,
+}
+
+/// A loaded, validated config with inheritance applied.
+#[derive(Debug, Clone)]
+pub struct LoadedConfig {
+    /// The root command group.
+    pub root: CommandGroup,
+    /// The root config's directory, which relative paths in it are resolved against.
+    pub cwd: PathBuf,
+    /// The root config file (the workspace root, if one was resolved).
+    pub config_path: PathBuf,
+    /// Every config file that was read: `config_path`, then any workspace packages.
+    pub sources: Vec<PathBuf>,
+}
+
+/// Find, parse, validate and resolve a config.
 ///
 /// # Errors
 ///
-/// Returns `ConfigError::ConfigFileMissing` if `config_file` doesn't exist, and another
-/// `ConfigError` if no config file is found, it cannot be parsed, contains invalid values,
-/// or references non-existent directories.
-pub fn load_config(
-    config_file: Option<&str>,
-    no_workspace: bool,
-) -> Result<(CommandGroup, PathBuf), ConfigError> {
-    let config_path = match config_file {
-        Some(file) => {
-            // A bare filename has an empty parent, which breaks cwd and workspace resolution.
-            let config_path = std::path::absolute(file)
-                .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
-            if !config_path.exists() {
-                return Err(ConfigError::ConfigFileMissing(config_path));
-            }
-            // Canonicalize the directory (not the file, which may be a symlink) so `..`
-            // components don't break workspace discovery's path prefix checks.
-            let dir = config_path
-                .parent()
-                .ok_or_else(|| ConfigError::ConfigNotFound(config_path.clone()))?
-                .canonicalize()
-                .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
-            match config_path.file_name() {
-                Some(name) => dir.join(name),
-                None => return Err(ConfigError::ConfigFileMissing(config_path)),
-            }
-        }
-        None => Config::find_config()?,
+/// Returns `ConfigError::ConfigFileMissing` if `opts.config` doesn't exist,
+/// `ConfigError::ConfigNotFound` if no config file is found, and another `ConfigError` if a
+/// config cannot be parsed, contains invalid values, or references non-existent directories.
+pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
+    let start_dir = match &opts.start_dir {
+        Some(dir) => dir.canonicalize(),
+        None => std::env::current_dir(),
+    }
+    .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
+
+    let config_path = match &opts.config {
+        Some(file) if opts.start_dir.is_some() => resolve_config_arg(&start_dir.join(file))?,
+        Some(file) => resolve_config_arg(file)?,
+        None => config_file::find_config_from(&start_dir)?,
     };
 
     // If workspace resolution is enabled, check for a parent workspace root
-    let config_path = if no_workspace {
+    let config_path = if opts.no_workspace {
         config_path
     } else {
         find_workspace_root(&config_path)?.unwrap_or(config_path)
@@ -83,16 +92,62 @@ pub fn load_config(
     check_version(parsed.fnug_version.as_deref());
     let (mut root, workspace) = parsed.into_root();
 
+    let mut sources = vec![config_path.clone()];
     // Discover and merge workspace sub-configs before converting
     if let Some(ref ws) = workspace {
-        workspace::discover_and_merge(ws, &cwd, &mut root)?;
+        sources.extend(workspace::discover_and_merge(ws, &cwd, &mut root)?);
     }
 
     let mut config: CommandGroup = root.try_into()?;
     validate_tree(&config)?;
     validate_dependencies(&config)?;
     config.inherit(&Inheritance::from(cwd.clone()))?;
-    Ok((config, cwd))
+    Ok(LoadedConfig {
+        root: config,
+        cwd,
+        config_path,
+        sources,
+    })
+}
+
+/// Load configuration from a file (or auto-detect), returning the root `CommandGroup` and cwd.
+///
+/// A relative `config_file` is resolved against the process working directory.
+///
+/// # Errors
+///
+/// See [`load`].
+pub fn load_config(
+    config_file: Option<&str>,
+    no_workspace: bool,
+) -> Result<(CommandGroup, PathBuf), ConfigError> {
+    let loaded = load(&LoadOptions {
+        config: config_file.map(PathBuf::from),
+        no_workspace,
+        ..LoadOptions::default()
+    })?;
+    Ok((loaded.root, loaded.cwd))
+}
+
+/// Make an explicitly given config path absolute, with its directory canonicalized.
+fn resolve_config_arg(file: &Path) -> Result<PathBuf, ConfigError> {
+    // A bare filename has an empty parent, which breaks cwd and workspace resolution.
+    let config_path = std::path::absolute(file)
+        .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
+    if !config_path.exists() {
+        return Err(ConfigError::ConfigFileMissing(config_path));
+    }
+    // Canonicalize the directory (not the file, which may be a symlink) so `..`
+    // components don't break workspace discovery's path prefix checks.
+    let dir = config_path
+        .parent()
+        .ok_or_else(|| ConfigError::ConfigNotFound(config_path.clone()))?
+        .canonicalize()
+        .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
+    match config_path.file_name() {
+        Some(name) => Ok(dir.join(name)),
+        None => Err(ConfigError::ConfigFileMissing(config_path)),
+    }
 }
 
 /// Search upward from a config file's directory for a parent config with `workspace` enabled.

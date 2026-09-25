@@ -407,30 +407,22 @@ impl Config {
         };
         Ok(config)
     }
+}
 
-    /// Searches for a configuration file in the current directory and its parents.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ConfigError::UnknownWorkingDirectory` if the cwd cannot be determined,
-    /// or `ConfigError::ConfigNotFound` if no config file is found.
-    pub fn find_config() -> Result<PathBuf, ConfigError> {
-        let config_path = std::env::current_dir()
-            .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
-        let mut path = config_path.clone();
-        debug!("Searching for config file in {}", config_path.display());
-        loop {
-            for file in &FILENAMES {
-                let config_path = path.join(file);
-                if config_path.exists() {
-                    info!("Found config file: {}", config_path.display());
-                    return Ok(config_path);
-                }
-            }
-            if !path.pop() {
-                return Err(ConfigError::ConfigNotFound(config_path));
-            }
+/// Find the nearest config file in `start` or its ancestors.
+///
+/// # Errors
+///
+/// Returns `ConfigError::ConfigNotFound` if no directory up to the root has a config file.
+pub(crate) fn find_config_from(start: &Path) -> Result<PathBuf, ConfigError> {
+    debug!("Searching for config file in {}", start.display());
+    let found = start.ancestors().find_map(find_config_in_dir);
+    match found {
+        Some(path) => {
+            info!("Found config file: {}", path.display());
+            Ok(path)
         }
+        None => Err(ConfigError::ConfigNotFound(start.to_path_buf())),
     }
 }
 
