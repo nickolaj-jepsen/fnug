@@ -121,6 +121,7 @@ pub async fn run(
     if let Err(e) = result {
         error!("Application error: {e}");
         eprintln!("Error: {e}");
+        return Ok(ExitCode::FAILURE);
     }
 
     Ok(ExitCode::SUCCESS)
