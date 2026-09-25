@@ -12,6 +12,8 @@ use portable_pty::{
 use crate::commands::command::Command;
 
 const DEFAULT_SCROLLBACK_SIZE: usize = 3500;
+/// Updates applied per parser lock acquisition before yielding it to the renderer
+const MAX_UPDATES_PER_LOCK: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -88,23 +90,17 @@ fn spawn_output_writer(
     let (update_tx, terminal_rx) = crossbeam_channel::bounded(1000);
 
     spawn(move || {
-        loop {
-            let res = terminal_rx.recv();
+        while let Ok(update) = terminal_rx.recv() {
             let mut parser = parser.lock();
-            if let Ok(update) = res {
+            apply_update(&mut parser, update);
+            // Bounded batch: an unbounded drain holds the lock for as long as output floods in
+            for update in terminal_rx.try_iter().take(MAX_UPDATES_PER_LOCK - 1) {
                 apply_update(&mut parser, update);
-
-                // Drain any pending updates to batch processing
-                while let Ok(update) = terminal_rx.try_recv() {
-                    apply_update(&mut parser, update);
-                }
-            } else {
-                debug!("Terminal update channel closed (process exited)");
-                break;
             }
-
+            drop(parser);
             dirty.store(true, Ordering::Release);
         }
+        debug!("Terminal update channel closed (process exited)");
     });
 
     update_tx
@@ -437,5 +433,84 @@ impl Terminal {
     /// Returns `ProcessError::WriterDisconnected` if the PTY channel is closed.
     pub fn write(&self, input: Vec<u8>) -> Result<(), ProcessError> {
         self.send_pty(PtyUpdate::Write(input))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use portable_pty::{PtySize, native_pty_system};
+
+    use super::{Terminal, TerminalSize};
+    use crate::commands::command::Command;
+
+    fn pty_available() -> bool {
+        let ok = native_pty_system().openpty(PtySize::default()).is_ok();
+        if !ok {
+            eprintln!("skipping: no PTY available");
+        }
+        ok
+    }
+
+    /// Kills the command when dropped, so a failed assertion doesn't leak it.
+    struct Spawned(Terminal);
+
+    impl Drop for Spawned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    fn spawn(cmd: &str, cwd: &Path) -> Spawned {
+        let command = Command {
+            id: "t".into(),
+            name: "t".into(),
+            cmd: cmd.into(),
+            cwd: cwd.to_path_buf(),
+            ..Default::default()
+        };
+        let size = TerminalSize::new(80, 24);
+        Spawned(Terminal::new(&command, size, Terminal::default_scrollback_size()).unwrap())
+    }
+
+    fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cond()
+    }
+
+    #[test]
+    fn parser_lock_available_during_flood() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn("touch ready && exec yes", dir.path());
+        let started = wait_until(Duration::from_secs(5), || dir.path().join("ready").exists());
+        assert!(started, "command did not start");
+
+        let parser = term.0.parser();
+        let start = Instant::now();
+        let mut acquired = 0;
+        let mut saw_output = false;
+        // Keep contending long enough for the output queue to fill up behind the parser
+        while acquired < 5 || !saw_output || start.elapsed() < Duration::from_millis(500) {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "no output from `yes`"
+            );
+            let Some(guard) = parser.try_lock_for(Duration::from_millis(500)) else {
+                panic!("parser lock starved after {acquired} acquisitions");
+            };
+            saw_output |= guard.screen().contents().contains('y');
+            acquired += 1;
+        }
     }
 }
