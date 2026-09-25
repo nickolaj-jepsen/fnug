@@ -87,8 +87,15 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         .as_ref()
         .map(|dir| {
             let dir = start_dir.join(dir);
-            dir.canonicalize()
-                .map_err(|source| ConfigError::RootDirMissing { path: dir, source })
+            match dir.canonicalize() {
+                Ok(canonical) if !canonical.is_dir() => Err(ConfigError::RootDirMissing {
+                    path: dir,
+                    source: std::io::ErrorKind::NotADirectory.into(),
+                }),
+                result => {
+                    result.map_err(|source| ConfigError::RootDirMissing { path: dir, source })
+                }
+            }
         })
         .transpose()?;
 
