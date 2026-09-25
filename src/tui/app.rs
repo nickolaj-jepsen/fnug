@@ -527,6 +527,20 @@ impl App {
         }
     }
 
+    /// Drop queued runs that wait on `cancelled_id`, without marking them failed (recursive)
+    pub(super) fn cancel_dependents(&mut self, cancelled_id: &str) {
+        let dependents: Vec<String> = self
+            .pending_deps
+            .iter()
+            .filter(|(_, deps)| deps.iter().any(|d| d == cancelled_id))
+            .map(|(cmd_id, _)| cmd_id.clone())
+            .collect();
+        for cmd_id in dependents {
+            self.pending_deps.remove(&cmd_id);
+            self.cancel_dependents(&cmd_id);
+        }
+    }
+
     /// Check if a batch run is complete and auto-focus first failure
     fn check_batch_complete(&mut self) {
         let Some(ref batch_ids) = self.batch_run_ids else {
