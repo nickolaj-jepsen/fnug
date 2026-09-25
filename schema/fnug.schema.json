@@ -1,0 +1,332 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "fnug config",
+  "description": "A fnug config file (`.fnug.yaml`, `.fnug.yml` or `.fnug.json`). The file is the root group,\nplus file-level settings.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema reference for editors; ignored by fnug.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "auto": {
+      "description": "Default auto-selection rules for every command.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConfigAuto"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "children": {
+      "description": "Command groups.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ConfigCommandGroup"
+      }
+    },
+    "commands": {
+      "description": "Top-level commands.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ConfigCommand"
+      }
+    },
+    "cwd": {
+      "description": "Working directory, relative to this file's directory.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "env": {
+      "description": "Environment variables for every command.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "fnug_version": {
+      "description": "fnug version the config is written for. fnug warns if it needs a newer fnug or targets\nan older release series.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "Identifier for the root group.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "Display name for the root group.",
+      "type": "string"
+    },
+    "workspace": {
+      "description": "Discover and merge package configs from subdirectories.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WorkspaceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name"
+  ],
+  "definitions": {
+    "ConfigAuto": {
+      "description": "Rules for when a command is selected automatically. Each field is inherited from the\nparent group unless set here.",
+      "type": "object",
+      "properties": {
+        "always": {
+          "description": "Always select, regardless of changes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "check": {
+          "description": "Set to `false` to skip in `fnug check`, git hooks and MCP runs (default `true`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "git": {
+          "description": "Select when a file under `path` matching `regex` has uncommitted git changes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path prefixes, relative to the working directory, that changed files must be under.\nDefaults to the working directory.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "regex": {
+          "description": "Regular expressions matched against changed file paths; a file must match at least one.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "watch": {
+          "description": "Select when a watched file under `path` matching `regex` changes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigCommand": {
+      "description": "A command to run.",
+      "type": "object",
+      "properties": {
+        "auto": {
+          "description": "Auto-selection rules.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConfigAuto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cmd": {
+          "description": "Shell command, run with `sh -c`.",
+          "type": "string"
+        },
+        "cwd": {
+          "description": "Working directory, relative to the parent group's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on": {
+          "description": "Ids of commands that must finish successfully before this one runs.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "description": "Extra environment variables, added to the inherited ones.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "description": "Identifier used by `depends_on` and the MCP tools.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        },
+        "scrollback": {
+          "description": "Number of scrollback lines kept for the command's terminal.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cmd"
+      ]
+    },
+    "ConfigCommandGroup": {
+      "description": "A group of commands and nested groups that share settings.",
+      "type": "object",
+      "properties": {
+        "auto": {
+          "description": "Default auto-selection rules for everything in the group.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConfigAuto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "children": {
+          "description": "Nested groups.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/ConfigCommandGroup"
+          }
+        },
+        "commands": {
+          "description": "Commands in the group.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/ConfigCommand"
+          }
+        },
+        "cwd": {
+          "description": "Working directory, relative to the parent group's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "description": "Environment variables for everything in the group, added to the inherited ones.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "description": "Identifier for the group.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "WorkspaceConfig": {
+      "description": "Workspace mode: `true` to discover package configs in subdirectories, or options.",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/WorkspaceOptions"
+        }
+      ]
+    },
+    "WorkspaceOptions": {
+      "description": "Where to look for workspace package configs.",
+      "type": "object",
+      "properties": {
+        "max_depth": {
+          "description": "How many directory levels the walk descends (default 5).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "paths": {
+          "description": "Glob patterns for package directories, relative to this config. Without it, fnug walks\nthe directory tree, skipping hidden and gitignored directories.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

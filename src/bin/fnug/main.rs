@@ -47,6 +47,8 @@ enum Commands {
     Setup(setup::SetupArgs),
     /// Start an MCP server over stdio
     Mcp,
+    /// Print the config file's JSON Schema
+    Schema,
 }
 
 fn main() -> ExitCode {
@@ -62,6 +64,11 @@ fn main() -> ExitCode {
 #[tokio::main]
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    if let Some(Commands::Schema) = cli.command {
+        print!("{}", fnug::schema::config_schema_json());
+        return Ok(ExitCode::SUCCESS);
+    }
 
     // Setup can work without a config file
     if let Some(Commands::Setup(ref args)) = cli.command {
@@ -82,7 +89,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             check::CheckOutcome::OpenTui(result) => Some(result),
         },
         Some(Commands::Mcp) => return mcp::run(config, cwd).await,
-        Some(Commands::Setup(_)) => unreachable!(),
+        Some(Commands::Setup(_) | Commands::Schema) => unreachable!(),
         None => None,
     };
 

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use log::{debug, info};
 use regex_cache::LazyRegex;
+use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -126,15 +127,29 @@ pub fn parse_regexes(regex: Vec<String>) -> Result<Vec<LazyRegex>, ConfigError> 
         .collect()
 }
 
-/// Configuration for automatic command execution
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+/// Rules for when a command is selected automatically. Each field is inherited from the
+/// parent group unless set here.
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigAuto {
+    /// Select when a watched file under `path` matching `regex` changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub watch: Option<bool>,
+    /// Select when a file under `path` matching `regex` has uncommitted git changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<bool>,
+    /// Path prefixes, relative to the working directory, that changed files must be under.
+    /// Defaults to the working directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<Vec<PathBuf>>,
+    /// Regular expressions matched against changed file paths; a file must match at least one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub regex: Option<Vec<String>>,
+    /// Always select, regardless of changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub always: Option<bool>,
+    /// Set to `false` to skip in `fnug check`, git hooks and MCP runs (default `true`).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<bool>,
 }
 
@@ -154,17 +169,31 @@ impl TryFrom<ConfigAuto> for Auto {
     }
 }
 
-/// Configuration for a single command
-#[derive(Debug, Deserialize, Serialize)]
+/// A command to run.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigCommand {
+    /// Identifier used by `depends_on` and the MCP tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Display name.
     pub name: String,
+    /// Working directory, relative to the parent group's.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    /// Shell command, run with `sh -c`.
     pub cmd: String,
+    /// Auto-selection rules.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<ConfigAuto>,
+    /// Extra environment variables, added to the inherited ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+    /// Ids of commands that must finish successfully before this one runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<String>>,
+    /// Number of scrollback lines kept for the command's terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scrollback: Option<usize>,
 }
 
@@ -185,17 +214,22 @@ impl TryFrom<ConfigCommand> for Command {
     }
 }
 
-/// Configuration for workspace discovery options
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Where to look for workspace package configs.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceOptions {
+    /// Glob patterns for package directories, relative to this config. Without it, fnug walks
+    /// the directory tree, skipping hidden and gitignored directories.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
+    /// How many directory levels the walk descends (default 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_depth: Option<usize>,
 }
 
-/// Workspace configuration: either a boolean or explicit options
+/// Workspace mode: `true` to discover package configs in subdirectories, or options.
 // Deserialize is hand-written: `untagged` would replace field errors with "did not match any variant".
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum WorkspaceConfig {
     Enabled(bool),
@@ -227,16 +261,29 @@ impl<'de> Deserialize<'de> for WorkspaceConfig {
     }
 }
 
-/// Configuration for a group of commands
-#[derive(Debug, Deserialize, Serialize)]
+/// A group of commands and nested groups that share settings.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigCommandGroup {
+    /// Identifier for the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Display name.
     pub name: String,
+    /// Default auto-selection rules for everything in the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<ConfigAuto>,
+    /// Working directory, relative to the parent group's.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    /// Commands in the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<ConfigCommand>>,
+    /// Nested groups.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<ConfigCommandGroup>>,
+    /// Environment variables for everything in the group, added to the inherited ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 }
 
@@ -268,24 +315,42 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
     }
 }
 
-/// Root configuration structure for Fnug: the root group's fields plus file-level settings.
+/// A fnug config file (`.fnug.yaml`, `.fnug.yml` or `.fnug.json`). The file is the root group,
+/// plus file-level settings.
 // Not `#[serde(flatten)]` over `ConfigCommandGroup`: flatten hides unknown keys and error locations.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(title = "fnug config")]
 pub struct Config {
     /// JSON Schema reference for editors; ignored by fnug.
-    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// fnug version the config is written for. fnug warns if it needs a newer fnug or targets
+    /// an older release series.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fnug_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Discover and merge package configs from subdirectories.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceConfig>,
+    /// Identifier for the root group.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Display name for the root group.
     pub name: String,
+    /// Default auto-selection rules for every command.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<ConfigAuto>,
+    /// Working directory, relative to this file's directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    /// Top-level commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<ConfigCommand>>,
+    /// Command groups.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<ConfigCommandGroup>>,
+    /// Environment variables for every command.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 }
 

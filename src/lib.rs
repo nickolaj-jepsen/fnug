@@ -20,6 +20,7 @@ pub mod config_file;
 pub mod logger;
 pub mod mcp;
 pub mod pty;
+pub mod schema;
 pub mod selectors;
 pub mod setup;
 pub mod theme;

@@ -285,6 +285,59 @@ fn json_unknown_key_hint() {
     assert!(err.contains("did you mean `commands`?"), "{err}");
 }
 
+#[test]
+fn schema_matches_committed_file() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/fnug.schema.json");
+    let committed = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        committed == fnug::schema::config_schema_json(),
+        "{} is stale; regenerate it with `cargo run --bin fnug -- schema > schema/fnug.schema.json`",
+        path.display()
+    );
+}
+
+#[test]
+fn schema_denies_additional_properties() {
+    let schema: serde_json::Value =
+        serde_json::from_str(&fnug::schema::config_schema_json()).unwrap();
+    assert_eq!(schema["additionalProperties"], false);
+    for definition in ["ConfigCommand", "ConfigCommandGroup", "ConfigAuto"] {
+        let def = &schema["definitions"][definition];
+        assert_eq!(def["additionalProperties"], false, "{definition}");
+    }
+    let command = &schema["definitions"]["ConfigCommand"];
+    assert!(command["properties"]["depends_on"].is_object());
+    assert_eq!(command["required"], serde_json::json!(["name", "cmd"]));
+}
+
+#[test]
+fn config_serializes_without_nulls() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        "name: root\ncommands:\n  - name: a\n    cmd: 'true'\n    auto:\n      git: true\n",
+    );
+    let config = fnug::config_file::Config::from_file(Path::new(&path)).unwrap();
+    let yaml = serde_yaml::to_string(&config).unwrap();
+    assert!(!yaml.contains("null"), "{yaml}");
+    assert!(!yaml.contains('~'), "{yaml}");
+}
+
+#[test]
+fn schema_subcommand_needs_no_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(dir.path())
+        .arg("schema")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        fnug::schema::config_schema_json()
+    );
+}
+
 /// Full configs (with a top-level `name`) from the README's yaml blocks.
 fn readme_configs() -> Vec<String> {
     let readme = include_str!("../README.md");
