@@ -1258,3 +1258,87 @@ commands:
     std::fs::write(root.join("src/a.txt"), "").unwrap();
     assert_eq!(next_ids(&mut handle, 5).await, ["src"]);
 }
+
+/// Watch commands on a git repo in `repo/`, plus `ctl` on the separate `ctl/`: changes there
+/// mark the point by which earlier changes in the repo have been reported.
+const WATCH_REPO_CONFIG: &str = r"
+name: root
+auto:
+  watch: true
+commands:
+  - name: json
+    cmd: 'true'
+    auto:
+      path: [./repo]
+      regex: ['\.json$']
+  - name: any
+    cmd: 'true'
+    auto:
+      path: [./repo]
+  - name: ctl
+    cmd: 'true'
+    auto:
+      path: [./ctl]
+";
+
+/// A temp dir with [`WATCH_REPO_CONFIG`], an empty `ctl/` and a repo in `repo/` that ignores
+/// `target/`.
+fn watch_repo() -> (tempfile::TempDir, PathBuf, Repository) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("repo/target/debug")).unwrap();
+    std::fs::create_dir(root.join("ctl")).unwrap();
+    let repo = Repository::init(root.join("repo")).unwrap();
+    std::fs::write(root.join("repo/.gitignore"), "target/\n").unwrap();
+    write_config(&root, WATCH_REPO_CONFIG);
+    (tmp, root, repo)
+}
+
+/// Touch a file in `ctl/` and merge watch events until it is reported.
+async fn watch_until_ctl(handle: &mut WatchHandle, root: &Path) -> Seen {
+    std::fs::write(root.join("ctl/done"), "").unwrap();
+    watch_until(handle, |seen| seen.contains_key("ctl")).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_ignores_gitignored_target() {
+    let (_tmp, root, _repo) = watch_repo();
+    let mut handle = start_watch(&root.join(".fnug.yaml"));
+
+    std::fs::write(root.join("repo/target/debug/fingerprint.json"), "{}").unwrap();
+    std::fs::write(root.join("repo/target/out.json"), "{}").unwrap();
+    let seen = watch_until_ctl(&mut handle, &root).await;
+    assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_ignores_dot_git() {
+    let (_tmp, root, repo) = watch_repo();
+    let mut handle = start_watch(&root.join(".fnug.yaml"));
+
+    commit_all(&repo);
+    let seen = watch_until_ctl(&mut handle, &root).await;
+    assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_path_that_is_ignored_still_selects() {
+    let (_tmp, root, _repo) = watch_repo();
+    std::fs::create_dir(root.join("repo/target/doc")).unwrap();
+    let config = write_config(
+        &root,
+        &format!(
+            "{WATCH_REPO_CONFIG}  - name: docs\n    cmd: 'true'\n    auto:\n      \
+             path: [./repo/target/doc]\n"
+        ),
+    );
+    let mut handle = start_watch(&config);
+
+    std::fs::write(root.join("repo/target/doc/index.json"), "{}").unwrap();
+    let seen = watch_until_ctl(&mut handle, &root).await;
+    assert_eq!(seen.keys().collect::<Vec<_>>(), ["ctl", "docs"]);
+    assert_eq!(
+        seen["docs"],
+        BTreeSet::from([root.join("repo/target/doc/index.json")])
+    );
+}
