@@ -31,6 +31,8 @@ Repository = "https://github.com/nickolaj-jepsen/fnug"
 bindings = "bin"
 python-source = "python"
 strip = true
+# The pin is for development; sdist builds use whatever toolchain the user has.
+exclude = [{ path = "rust-toolchain.toml", format = "sdist" }]
 
 [tool.ruff]
 target-version = "py310"

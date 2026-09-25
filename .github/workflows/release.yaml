@@ -164,6 +164,14 @@ jobs:
           command: sdist
           args: --out dist
 
+      # Builds outside the checkout, with the runner's default toolchain, like a user would.
+      - name: Smoke test the sdist
+        run: |
+          python3 -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install dist/*.tar.gz
+          "$RUNNER_TEMP/smoke/bin/fnug" --help
+          "$RUNNER_TEMP/smoke/bin/python" -c "import sys, fnug; sys.exit(fnug.run('--help').returncode)"
+
       - uses: actions/upload-artifact@v5
         with:
           name: pypi-sdist
