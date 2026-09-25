@@ -281,8 +281,8 @@ pub fn install_with(
     target: &HookTarget,
     opts: &InstallOptions,
 ) -> Result<InstallOutcome, HookError> {
-    let (steps, outcome) = plan_install(target, opts)?;
-    apply(&steps)?;
+    let (plan, outcome) = plan_install(target, opts)?;
+    plan.apply()?;
     Ok(outcome)
 }
 
@@ -308,7 +308,48 @@ pub fn install(config_dir: &Path, no_workspace: bool) -> Result<(), HookError> {
 ///
 /// Returns the errors of [`resolve`], and `HookError::Io` on IO failures.
 pub fn remove(config_dir: &Path) -> Result<(), HookError> {
-    apply(&plan_remove(&resolve(config_dir)?)?)
+    plan_remove(&resolve(config_dir)?)?.apply()
+}
+
+/// Changes to a hook, worked out by [`plan_install`] or [`plan_remove`] without making them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookPlan {
+    steps: Vec<Step>,
+    note: Option<String>,
+}
+
+impl HookPlan {
+    /// Whether there is nothing to change.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// Something to tell the user before they apply the plan.
+    #[must_use]
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    /// Make the changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `HookError::Io` if a file can't be written, renamed or removed.
+    pub fn apply(&self) -> Result<(), HookError> {
+        for step in &self.steps {
+            match step {
+                Step::Write {
+                    path,
+                    content,
+                    mode,
+                } => write_atomic(path, content, *mode)?,
+                Step::Rename { from, to } => std::fs::rename(from, to)?,
+                Step::Remove(path) => std::fs::remove_file(path)?,
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A filesystem change, worked out before any is made.
@@ -326,25 +367,35 @@ enum Step {
     Remove(PathBuf),
 }
 
-fn apply(steps: &[Step]) -> Result<(), HookError> {
-    for step in steps {
-        match step {
-            Step::Write {
-                path,
-                content,
-                mode,
-            } => write_atomic(path, content, *mode)?,
-            Step::Rename { from, to } => std::fs::rename(from, to)?,
-            Step::Remove(path) => std::fs::remove_file(path)?,
-        }
-    }
-    Ok(())
-}
-
-fn plan_install(
+/// Work out what [`install_with`] would change, and what that amounts to, without changing it.
+///
+/// # Errors
+///
+/// Returns the errors of [`install_with`], except those from writing.
+pub fn plan_install(
     target: &HookTarget,
     opts: &InstallOptions,
-) -> Result<(Vec<Step>, InstallOutcome), HookError> {
+) -> Result<(HookPlan, InstallOutcome), HookError> {
+    let (steps, outcome, note) = install_steps(target, opts)?;
+    Ok((HookPlan { steps, note }, outcome))
+}
+
+/// Work out what [`remove`] would change in `target`'s hook, without changing it.
+///
+/// # Errors
+///
+/// Returns `HookError::Io` if the hook exists but can't be read.
+pub fn plan_remove(target: &HookTarget) -> Result<HookPlan, HookError> {
+    Ok(HookPlan {
+        steps: remove_steps(target)?,
+        note: None,
+    })
+}
+
+/// Steps, what they amount to, and a note for the user.
+type Planned = (Vec<Step>, InstallOutcome, Option<String>);
+
+fn install_steps(target: &HookTarget, opts: &InstallOptions) -> Result<Planned, HookError> {
     let args = hook_args(opts.no_workspace);
     let local = target.location == HookLocation::Local;
     let block = |chain| {
@@ -380,6 +431,7 @@ fn plan_install(
             return Ok((
                 vec![write_step(path, content, 0o755)],
                 InstallOutcome::Created,
+                None,
             ));
         }
         Err(e) => return Err(e.into()),
@@ -402,13 +454,21 @@ fn plan_install(
             return Ok((
                 vec![write_step(path, content, mode)],
                 InstallOutcome::Updated,
+                None,
             ));
         }
         if script == Script::Shell || find_legacy(&lines).is_some() {
             let content = splice(&text, &block(false));
+            let note = sets_up_path(&text).then(|| {
+                format!(
+                    "{} sets PATH or sources files, and fnug now runs before that. If fnug needs it, move fnug's block below those lines; updates keep it there.",
+                    path.display()
+                )
+            });
             return Ok((
                 vec![write_step(path, content, mode)],
                 InstallOutcome::Updated,
+                note,
             ));
         }
     }
@@ -422,28 +482,28 @@ fn plan_install(
             interpreter,
             snippet: in_config_dir(&target.config_rel, &format!("fnug {}", args.join(" "))),
         }),
-        ForeignPolicy::Chain => {
-            let original = path.with_file_name(CHAINED_NAME);
-            if original.exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("can't chain hooks: {} already exists", original.display()),
-                )
-                .into());
-            }
-            let wrapper = format!("#!/bin/sh\n{}", block(true));
-            Ok((
-                vec![
-                    Step::Rename {
-                        from: path.clone(),
-                        to: original.clone(),
-                    },
-                    write_step(path, wrapper, 0o755),
-                ],
-                InstallOutcome::Chained { original },
-            ))
-        }
+        ForeignPolicy::Chain => chain_steps(path, format!("#!/bin/sh\n{}", block(true))),
     }
+}
+
+/// Move the hook at `path` aside, to be run by `wrapper`, which replaces it.
+fn chain_steps(path: &Path, wrapper: String) -> Result<Planned, HookError> {
+    let original = path.with_file_name(CHAINED_NAME);
+    if original.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("can't chain hooks: {} already exists", original.display()),
+        )
+        .into());
+    }
+    let steps = vec![
+        Step::Rename {
+            from: path.to_path_buf(),
+            to: original.clone(),
+        },
+        write_step(path, wrapper, 0o755),
+    ];
+    Ok((steps, InstallOutcome::Chained { original }, None))
 }
 
 fn write_step(path: &Path, content: String, mode: u32) -> Step {
@@ -454,7 +514,15 @@ fn write_step(path: &Path, content: String, mode: u32) -> Step {
     }
 }
 
-fn plan_remove(target: &HookTarget) -> Result<Vec<Step>, HookError> {
+/// Whether a hook changes `PATH` or sources files, which fnug's block runs before.
+fn sets_up_path(content: &str) -> bool {
+    content.lines().map(str::trim_start).any(|line| {
+        !line.starts_with('#')
+            && (line.contains("PATH=") || line.starts_with(". ") || line.starts_with("source "))
+    })
+}
+
+fn remove_steps(target: &HookTarget) -> Result<Vec<Step>, HookError> {
     let path = &target.hook_path;
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
