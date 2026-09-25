@@ -770,7 +770,7 @@ mod tests {
         let shutdown = tokio::time::timeout(Duration::from_secs(3), app.shutdown()).await;
         assert!(shutdown.is_ok(), "shutdown hung on a PTY holder");
 
-        // The SIGKILL escalation thread would die with fnug, so shutdown itself must kill them
+        // Escalation threads die with fnug, so shutdown must not return before holders are reaped
         assert!(
             finished.is_reaped(),
             "holder of a finished command survived"
