@@ -276,7 +276,8 @@ pub struct Config {
     /// JSON Schema reference for editors; ignored by fnug.
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
-    pub fnug_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fnug_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceConfig>,
     pub id: Option<String>,

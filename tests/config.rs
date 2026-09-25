@@ -250,6 +250,12 @@ fn workspace_bool_and_options_still_parse() {
 }
 
 #[test]
+fn fnug_version_optional() {
+    let (_dir, config) = load("name: root\ncommands:\n  - name: a\n    cmd: 'true'\n");
+    assert_eq!(config.name, "root");
+}
+
+#[test]
 fn json_schema_key_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".fnug.json");
