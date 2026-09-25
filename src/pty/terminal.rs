@@ -1,20 +1,26 @@
 use std::io::{Read, Write};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::spawn;
+use std::time::Duration;
 
-use log::{debug, error};
+use crossbeam_channel::RecvTimeoutError;
+use log::{debug, error, warn};
 use parking_lot::Mutex;
-use portable_pty::{
-    Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system,
-};
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use tokio::sync::{Notify, watch};
 
 use crate::commands::command::Command;
+use crate::process::{ExitInfo, ProcessHandle};
+
+use super::messages::format_emulator_reset_message;
 
 const DEFAULT_SCROLLBACK_SIZE: usize = 3500;
 /// Updates applied per parser lock acquisition before yielding it to the renderer
 const MAX_UPDATES_PER_LOCK: usize = 64;
+/// How long output may keep draining after the command exits before its exit is published
+const DRAIN_DEADLINE: Duration = Duration::from_millis(200);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -55,7 +61,31 @@ impl From<TerminalSize> for PtySize {
     }
 }
 
-type SpawnedPty = (Box<dyn Child + Send + Sync>, Box<dyn MasterPty + Send>);
+/// Options for [`Terminal::new`]
+#[derive(Debug, Clone)]
+pub struct TerminalOptions {
+    /// Lines of scrollback kept by the parser
+    pub scrollback: usize,
+    /// Notified when output arrives while the terminal is not dirty
+    pub output_notify: Option<Arc<Notify>>,
+}
+
+impl Default for TerminalOptions {
+    fn default() -> Self {
+        Self {
+            scrollback: DEFAULT_SCROLLBACK_SIZE,
+            output_notify: None,
+        }
+    }
+}
+
+struct SpawnedPty {
+    child: Box<dyn Child + Send + Sync>,
+    pid: u32,
+    master: Box<dyn MasterPty + Send>,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+}
 
 fn spawn_pty(command: &Command, size: TerminalSize) -> Result<SpawnedPty, ProcessError> {
     debug!("Running PTY for command: {command:?}");
@@ -67,6 +97,15 @@ fn spawn_pty(command: &Command, size: TerminalSize) -> Result<SpawnedPty, Proces
     let pair = pty_system
         .openpty(size.into())
         .map_err(|e| ProcessError::PtyError(e.to_string()))?;
+    // Fallible setup happens before the spawn, so a started child always gets a waiter
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| ProcessError::PtyError(format!("Failed to clone PTY reader: {e}")))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| ProcessError::PtyError(format!("Failed to take PTY writer: {e}")))?;
 
     let child = pair
         .slave
@@ -75,7 +114,24 @@ fn spawn_pty(command: &Command, size: TerminalSize) -> Result<SpawnedPty, Proces
 
     drop(pair.slave); // This will make the reader close when the child process exits
 
-    Ok((child, pair.master))
+    // Never None on unix, so this cannot strand a started child
+    let pid = child
+        .process_id()
+        .ok_or_else(|| ProcessError::Process("Spawned process has no pid".into()))?;
+    Ok(SpawnedPty {
+        child,
+        pid,
+        master: pair.master,
+        reader,
+        writer,
+    })
+}
+
+fn spawn_thread(name: &str, f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(f)
+        .expect("failed to spawn PTY thread");
 }
 
 #[derive(Debug)]
@@ -86,30 +142,49 @@ enum TerminalUpdate {
     Scroll(isize),
     SetScroll(usize),
     Clear,
+    #[cfg(test)]
+    Panic,
 }
 
 /// Spawn a thread to process terminal output and set a dirty flag
 fn spawn_output_writer(
     parser: Arc<Mutex<vt100::Parser>>,
     dirty: Arc<AtomicBool>,
+    notify: Option<Arc<Notify>>,
+    scrollback: usize,
 ) -> crossbeam_channel::Sender<TerminalUpdate> {
     let (update_tx, terminal_rx) = crossbeam_channel::bounded(1000);
 
-    spawn(move || {
+    spawn_thread("fnug-pty-parse", move || {
         while let Ok(update) = terminal_rx.recv() {
             let mut parser = parser.lock();
-            apply_update(&mut parser, update);
+            apply_update_guarded(&mut parser, update, scrollback);
             // Bounded batch: an unbounded drain holds the lock for as long as output floods in
             for update in terminal_rx.try_iter().take(MAX_UPDATES_PER_LOCK - 1) {
-                apply_update(&mut parser, update);
+                apply_update_guarded(&mut parser, update, scrollback);
             }
             drop(parser);
-            dirty.store(true, Ordering::Release);
+            if !dirty.swap(true, Ordering::AcqRel)
+                && let Some(notify) = &notify
+            {
+                notify.notify_one();
+            }
         }
-        debug!("Terminal update channel closed (process exited)");
+        debug!("Terminal update channel closed");
     });
 
     update_tx
+}
+
+/// Apply `update`; if the emulator panics, replace it with a blank one and carry on
+fn apply_update_guarded(parser: &mut vt100::Parser, update: TerminalUpdate, scrollback: usize) {
+    if std::panic::catch_unwind(AssertUnwindSafe(|| apply_update(parser, update))).is_ok() {
+        return;
+    }
+    error!("Terminal emulator crashed; its screen was reset");
+    let (rows, cols) = parser.screen().size();
+    *parser = vt100::Parser::new(rows, cols, scrollback);
+    parser.process(&format_emulator_reset_message());
 }
 
 fn apply_update(parser: &mut vt100::Parser, update: TerminalUpdate) {
@@ -136,24 +211,21 @@ fn apply_update(parser: &mut vt100::Parser, update: TerminalUpdate) {
         TerminalUpdate::Clear => {
             parser.clear();
         }
+        #[cfg(test)]
+        TerminalUpdate::Panic => panic!("injected parser panic"),
     }
 }
 
-/// Spawn a thread to read from the PTY and send output to the update channel
-///
-/// Returns a channel to receive the process exit status. `reaped` is set once the
-/// process has been waited on, before its status is published.
+/// Spawn a thread that forwards PTY output to the parser; `done` is dropped at EOF
 fn spawn_pty_reader(
     mut reader: Box<dyn Read + Send>,
-    mut process: Box<dyn Child + Send + Sync>,
     update_tx: crossbeam_channel::Sender<TerminalUpdate>,
-    reaped: Arc<AtomicBool>,
-) -> crossbeam_channel::Receiver<ExitStatus> {
-    let (status_tx, status_rx) = crossbeam_channel::bounded(1);
-
-    spawn(move || {
+    done: crossbeam_channel::Sender<()>,
+) {
+    spawn_thread("fnug-pty-read", move || {
+        let _done = done;
+        let mut buf = [0u8; 1024];
         loop {
-            let mut buf = [0u8; 1024];
             match reader.read(&mut buf) {
                 Ok(0) => {
                     debug!("PTY reader EOF");
@@ -174,33 +246,59 @@ fn spawn_pty_reader(
                 }
             }
         }
+    });
+}
 
-        // Wait for the process to exit
-        let result = process.wait();
-        // The pid may be reused from here on, so it must never be signalled again
-        reaped.store(true, Ordering::Release);
-        match result {
-            Ok(status) => {
-                let _ = status_tx.send(status);
+/// Spawn a thread that detects the exit, publishes it and reaps the child.
+///
+/// Exit is published once output has drained, or after `DRAIN_DEADLINE` if background processes
+/// still hold the PTY. The child is reaped only after EOF: until then its zombie keeps the process
+/// group id reserved, so stopping those background processes cannot signal a reused pid.
+fn spawn_waiter(
+    name: String,
+    handle: ProcessHandle,
+    mut child: Box<dyn Child + Send + Sync>,
+    reader_done: crossbeam_channel::Receiver<()>,
+    status_tx: watch::Sender<Option<ExitInfo>>,
+) {
+    spawn_thread("fnug-pty-wait", move || {
+        let mut reap = || {
+            if let Err(e) = handle.reap_with(|| child.wait()) {
+                error!("Failed to reap '{name}': {e}");
             }
+        };
+        let exit = match handle.wait_exit() {
+            Ok(exit) => exit,
             Err(e) => {
-                error!("Failed to wait for process: {e:?}");
+                error!("Failed to wait for '{name}': {e}");
+                reap();
+                return;
             }
+        };
+        if matches!(
+            reader_done.recv_timeout(DRAIN_DEADLINE),
+            Err(RecvTimeoutError::Timeout)
+        ) {
+            warn!("'{name}' exited but background processes still hold its terminal");
+            status_tx.send_replace(Some(exit));
+            let _ = reader_done.recv();
+            reap();
+        } else {
+            reap();
+            status_tx.send_replace(Some(exit));
         }
     });
-
-    status_rx
 }
 
 fn spawn_pty_writer(
     mut writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     mut killer: Box<dyn ChildKiller + Send + Sync>,
-    reaped: Arc<AtomicBool>,
+    handle: ProcessHandle,
 ) -> crossbeam_channel::Sender<PtyUpdate> {
     let (pty_tx, pty_rx) = crossbeam_channel::bounded(1000);
 
-    spawn(move || {
+    spawn_thread("fnug-pty-write", move || {
         loop {
             match pty_rx.recv() {
                 Ok(PtyUpdate::MouseClick(x, y)) => {
@@ -229,7 +327,7 @@ fn spawn_pty_writer(
                     }
                 }
                 Ok(PtyUpdate::KillProcess) => {
-                    if reaped.load(Ordering::Acquire) {
+                    if handle.is_reaped() {
                         debug!("Process already exited, not killing");
                     } else {
                         debug!("Killing process");
@@ -253,10 +351,10 @@ fn spawn_pty_writer(
 pub struct Terminal {
     update_tx: crossbeam_channel::Sender<TerminalUpdate>,
     pty_tx: crossbeam_channel::Sender<PtyUpdate>,
-    status_rx: crossbeam_channel::Receiver<ExitStatus>,
+    status_rx: watch::Receiver<Option<ExitInfo>>,
+    handle: ProcessHandle,
     parser: Arc<Mutex<vt100::Parser>>,
     dirty: Arc<AtomicBool>,
-    reaped: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -273,41 +371,61 @@ impl Terminal {
     ///
     /// # Errors
     ///
-    /// Returns `ProcessError::PtyError` if the PTY cannot be opened, or
-    /// `ProcessError::Process` if the command fails to spawn.
+    /// Returns `ProcessError::MissingCwd` if the command's working directory does not exist,
+    /// `ProcessError::PtyError` if the PTY cannot be opened, or `ProcessError::Process` if the
+    /// command fails to spawn.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a worker thread cannot be spawned.
     pub fn new(
         command: &Command,
         size: TerminalSize,
-        scrollback_size: usize,
+        opts: TerminalOptions,
     ) -> Result<Self, ProcessError> {
-        let (process, master) = spawn_pty(command, size)?;
-        let reader = master
-            .try_clone_reader()
-            .map_err(|e| ProcessError::PtyError(format!("Failed to clone PTY reader: {e}")))?;
-        let killer = process.clone_killer();
-        let writer = master
-            .take_writer()
-            .map_err(|e| ProcessError::PtyError(format!("Failed to take PTY writer: {e}")))?;
+        let SpawnedPty {
+            child,
+            pid,
+            master,
+            reader,
+            writer,
+        } = spawn_pty(command, size)?;
+        // portable-pty calls setsid, so the child leads its own process group
+        let handle = ProcessHandle::new(pid);
+        let killer = child.clone_killer();
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(
             size.rows,
             size.cols,
-            scrollback_size,
+            opts.scrollback,
         )));
-
         let dirty = Arc::new(AtomicBool::new(false));
-        let reaped = Arc::new(AtomicBool::new(false));
-        let update_tx = spawn_output_writer(Arc::clone(&parser), Arc::clone(&dirty));
-        let status_rx = spawn_pty_reader(reader, process, update_tx.clone(), Arc::clone(&reaped));
-        let pty_tx = spawn_pty_writer(writer, master, killer, Arc::clone(&reaped));
+        let (status_tx, status_rx) = watch::channel(None);
+        let (reader_done_tx, reader_done_rx) = crossbeam_channel::bounded(0);
+
+        let update_tx = spawn_output_writer(
+            Arc::clone(&parser),
+            Arc::clone(&dirty),
+            opts.output_notify,
+            opts.scrollback,
+        );
+        spawn_pty_reader(reader, update_tx.clone(), reader_done_tx);
+        spawn_waiter(
+            command.name.clone(),
+            handle.clone(),
+            child,
+            reader_done_rx,
+            status_tx,
+        );
+        let pty_tx = spawn_pty_writer(writer, master, killer, handle.clone());
 
         Ok(Self {
             update_tx,
             pty_tx,
             status_rx,
+            handle,
             parser,
             dirty,
-            reaped,
         })
     }
 
@@ -315,6 +433,12 @@ impl Terminal {
     #[must_use]
     pub fn default_scrollback_size() -> usize {
         DEFAULT_SCROLLBACK_SIZE
+    }
+
+    /// Process id of the command, which also leads its process group
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.handle.pid()
     }
 
     /// Access the vt100 parser (for rendering with tui-term)
@@ -404,23 +528,36 @@ impl Terminal {
         Ok(true)
     }
 
-    /// Wait for the process to exit, returning the exit code.
+    /// Wait until the exit is published: once output has drained, or shortly after the command
+    /// exits if background processes keep the PTY open. Cancel-safe.
     ///
     /// # Errors
     ///
-    /// Returns `ProcessError::Process` if the status channel closes or the join fails.
-    pub async fn wait(&self) -> Result<u32, ProcessError> {
-        let rx = self.status_rx.clone();
-        let status = tokio::task::spawn_blocking(move || rx.recv())
+    /// Returns `ProcessError::Process` if the exit status could not be determined.
+    pub async fn wait(&self) -> Result<ExitInfo, ProcessError> {
+        let mut status_rx = self.status_rx.clone();
+        let exit = status_rx
+            .wait_for(Option::is_some)
             .await
-            .map_err(|e| ProcessError::Process(format!("Task join error: {e}")))?
-            .map_err(|_| ProcessError::Process("Process status channel closed".into()))?;
-        Ok(status.exit_code())
+            .ok()
+            .and_then(|exit| exit.clone());
+        exit.ok_or_else(|| ProcessError::Process("Process exit status unavailable".into()))
+    }
+
+    /// How the command ended, once [`wait`](Self::wait) would return.
+    #[must_use]
+    pub fn exit_info(&self) -> Option<ExitInfo> {
+        self.status_rx.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.exit_info().is_none()
     }
 
     /// Whether the process has exited and been reaped.
     pub(crate) fn has_exited(&self) -> bool {
-        self.reaped.load(Ordering::Acquire)
+        self.handle.is_reaped()
     }
 
     /// Kill the process running in the terminal. Does nothing once it has exited.
@@ -473,16 +610,18 @@ mod tests {
 
     use parking_lot::Mutex;
 
-    use super::{ProcessError, Terminal, TerminalSize, TerminalUpdate, spawn_output_writer};
+    use super::{
+        ProcessError, Terminal, TerminalOptions, TerminalSize, TerminalUpdate, spawn_output_writer,
+    };
     use crate::commands::command::Command;
     use crate::pty::test_util::{pty_available, wait_until};
 
-    /// Kills the command when dropped, so a failed assertion doesn't leak it.
+    /// Kills the command's process group when dropped, so a failed assertion doesn't leak it.
     struct Spawned(Terminal);
 
     impl Drop for Spawned {
         fn drop(&mut self) {
-            let _ = self.0.kill();
+            let _ = self.0.handle.force_kill();
         }
     }
 
@@ -495,8 +634,14 @@ mod tests {
             ..Default::default()
         };
         let size = TerminalSize::new(80, 24);
-        Spawned(Terminal::new(&command, size, Terminal::default_scrollback_size()).unwrap())
+        Spawned(Terminal::new(&command, size, TerminalOptions::default()).unwrap())
     }
+
+    fn output_writer(parser: &Arc<Mutex<vt100::Parser>>, dirty: &Arc<AtomicBool>) -> Sender {
+        spawn_output_writer(Arc::clone(parser), Arc::clone(dirty), None, 0)
+    }
+
+    type Sender = crossbeam_channel::Sender<TerminalUpdate>;
 
     #[test]
     fn parser_lock_available_during_flood() {
@@ -530,7 +675,7 @@ mod tests {
     fn output_writer_releases_lock_between_batches() {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
         let dirty = Arc::new(AtomicBool::new(false));
-        let tx = spawn_output_writer(Arc::clone(&parser), Arc::clone(&dirty));
+        let tx = output_writer(&parser, &dirty);
 
         // Queue a full channel of output while the writer is blocked on the lock
         let guard = parser.lock();
@@ -547,6 +692,42 @@ mod tests {
         assert!(!tx.is_empty(), "writer drained everything before yielding");
     }
 
+    #[test]
+    fn output_notify_fires_once_per_dirty_cycle() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let tx = spawn_output_writer(
+            Arc::clone(&parser),
+            Arc::clone(&dirty),
+            Some(Arc::clone(&notify)),
+            0,
+        );
+
+        tx.send(TerminalUpdate::Process(b"a".to_vec())).unwrap();
+        assert!(wait_until(Duration::from_secs(5), || dirty.load(Ordering::Acquire)));
+        // notify_one stores a permit, so the notification is observable after the fact
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let notified = |n: &tokio::sync::Notify| {
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_millis(100), n.notified())
+                    .await
+                    .is_ok()
+            })
+        };
+        assert!(notified(&notify));
+
+        // Still dirty: more output must not notify again
+        tx.send(TerminalUpdate::Process(b"b".to_vec())).unwrap();
+        assert!(wait_until(Duration::from_secs(5), || {
+            parser.lock().screen().contents().contains("ab")
+        }));
+        assert!(!notified(&notify));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn has_exited_once_wait_returns() {
         if !pty_available() {
@@ -555,8 +736,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = spawn("true", dir.path());
 
-        assert_eq!(term.0.wait().await.unwrap(), 0);
-        // Set before the exit status is published, so later kills are always skipped
+        assert!(term.0.wait().await.unwrap().success());
+        // Reaped before the exit status is published, so later kills are always skipped
         assert!(term.0.has_exited());
         term.0.kill().unwrap();
     }
@@ -598,12 +779,95 @@ mod tests {
         let result = Terminal::new(
             &command,
             TerminalSize::new(80, 24),
-            Terminal::default_scrollback_size(),
+            TerminalOptions::default(),
         );
         match result {
             Err(ProcessError::MissingCwd(path)) => assert_eq!(path, gone),
             Err(e) => panic!("unexpected error: {e}"),
             Ok(_) => panic!("spawned with a missing working directory"),
         }
+    }
+
+    /// Leaves a HUP-ignoring `sleep 30` holding the PTY, whose pid is in `bg.pid`, and exits.
+    const BACKGROUND_HOLDER: &str = "sh -c 'trap \"\" HUP; echo $$ > bg.pid; exec sleep 30' & \
+        while [ ! -s bg.pid ]; do sleep 0.01; done; echo done";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_reports_signal() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn("ulimit -c 0; kill -SEGV $$", dir.path());
+        let exit = term.0.wait().await.unwrap();
+        assert_eq!(exit.signal_name(), Some("SIGSEGV"));
+        assert_eq!(exit.shell_code(), 128 + libc::SIGSEGV.unsigned_abs());
+        assert!(!exit.stop_requested);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_not_gated_by_background_holder() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn(BACKGROUND_HOLDER, dir.path());
+        let waited = tokio::time::timeout(Duration::from_secs(3), term.0.wait()).await;
+        let exit = waited.expect("wait() blocked on a background PTY holder");
+        assert!(exit.unwrap().success());
+        assert!(!term.0.is_running());
+        assert!(!term.0.has_exited(), "reaped while the PTY was still held");
+    }
+
+    #[test]
+    fn aborted_wait_does_not_block_runtime_drop() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = Arc::new(spawn("exec sleep 30", dir.path()));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let polled = Arc::new(AtomicBool::new(false));
+        let task = rt.spawn({
+            let term = Arc::clone(&term);
+            let polled = Arc::clone(&polled);
+            async move {
+                let mut wait = std::pin::pin!(term.0.wait());
+                assert!(futures::poll!(&mut wait).is_pending());
+                polled.store(true, Ordering::Release);
+                let _ = wait.await;
+            }
+        });
+        assert!(wait_until(Duration::from_secs(5), || polled.load(Ordering::Acquire)));
+        task.abort();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(rt);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "runtime drop blocked on an aborted wait()"
+        );
+    }
+
+    #[test]
+    fn parser_panic_keeps_output_thread_alive() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let tx = output_writer(&parser, &dirty);
+
+        tx.send(TerminalUpdate::Panic).unwrap();
+        let _ = tx.send(TerminalUpdate::Process(b"after".to_vec()));
+        let alive = wait_until(Duration::from_secs(5), || {
+            parser.lock().screen().contents().contains("after")
+        });
+        assert!(alive, "output stopped after a parser panic");
+        assert_eq!(parser.lock().screen().size(), (24, 80));
     }
 }
