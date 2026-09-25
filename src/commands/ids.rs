@@ -266,8 +266,9 @@ fn local_of(
 }
 
 fn assign(nodes: &mut [Node], namespaces: &[Option<String>]) -> Result<(), ConfigError> {
+    // The root group's id only names the TUI's top node, so it never displaces another id.
     let mut counts: HashMap<(usize, &str), usize> = HashMap::new();
-    for node in nodes.iter() {
+    for node in nodes.iter().skip(1) {
         *counts.entry((node.scope, &node.local)).or_default() += 1;
     }
     let scoped: Vec<String> = nodes
@@ -280,7 +281,7 @@ fn assign(nodes: &mut [Node], namespaces: &[Option<String>]) -> Result<(), Confi
             }
         })
         .collect();
-    let ids: Vec<String> = nodes
+    let mut ids: Vec<String> = nodes
         .iter()
         .zip(&scoped)
         .map(|(node, scoped)| match &namespaces[node.scope] {
@@ -288,6 +289,10 @@ fn assign(nodes: &mut [Node], namespaces: &[Option<String>]) -> Result<(), Confi
             None => scoped.clone(),
         })
         .collect();
+    if !nodes[0].explicit && ids[1..].contains(&ids[0]) {
+        // No other id ends with the separator.
+        ids[0].push_str(SEPARATOR);
+    }
 
     let mut seen: HashMap<&str, usize> = HashMap::new();
     for (i, id) in ids.iter().enumerate() {
