@@ -2,30 +2,27 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use git2::{Repository, RepositoryOpenFlags};
-use log::debug;
+use log::{debug, warn};
 
 use crate::commands::command::Command;
 use crate::selectors::{RunnableSelector, SelectorError};
 
-/// Discover the work tree root of the git repo containing `path`, using a cache
-/// to avoid repeated filesystem traversal for paths in the same repo.
+/// Discover the work tree root of the git repo containing `path`.
 /// Fails if no repo contains `path` or the repo is bare.
-fn discover_repo(
-    path: &Path,
-    cache: &mut HashMap<PathBuf, PathBuf>,
-) -> Result<PathBuf, git2::Error> {
-    if let Some(cached) = cache.get(path) {
-        return Ok(cached.clone());
-    }
+fn discover_repo(path: &Path) -> Result<PathBuf, git2::Error> {
     // Not `Repository::discover`: it reopens the gitdir, so a `.git` file without
     // `core.worktree` (as `git init --separate-git-dir` writes) gets the wrong work tree.
     let repo = Repository::open_ext(path, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path])?;
     let repo_path = repo
         .workdir()
-        .ok_or_else(|| git2::Error::from_str("bare repository has no working tree"))?
+        .ok_or_else(|| {
+            git2::Error::from_str(&format!(
+                "bare repository at {} has no working tree",
+                repo.path().display()
+            ))
+        })?
         .to_path_buf();
     debug!("Discovered git repo at {}", repo_path.display());
-    cache.insert(path.to_path_buf(), repo_path.clone());
     Ok(repo_path)
 }
 
@@ -49,11 +46,11 @@ fn scan_repo(repo_path: &Path) -> Result<Vec<PathBuf>, git2::Error> {
 /// Check whether a command has matching git changes given pre-scanned repo data.
 fn command_has_changes(
     cmd: &Command,
-    path_to_repo: &HashMap<PathBuf, PathBuf>,
+    path_to_repo: &HashMap<PathBuf, Option<PathBuf>>,
     repo_changes: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> bool {
     cmd.auto.paths().iter().any(|path| {
-        let Some(repo_path) = path_to_repo.get(path) else {
+        let Some(Some(repo_path)) = path_to_repo.get(path) else {
             return false;
         };
         let Some(changes) = repo_changes.get(repo_path) else {
@@ -81,6 +78,8 @@ fn command_has_changes(
 pub(crate) struct GitSelector {}
 
 impl RunnableSelector for GitSelector {
+    /// Paths outside any work tree and repos that fail to scan are skipped with a warning:
+    /// they select nothing, but never fail the selection.
     fn split_active_commands(
         commands: Vec<Command>,
     ) -> Result<(Vec<Command>, Vec<Command>), SelectorError> {
@@ -94,44 +93,61 @@ impl RunnableSelector for GitSelector {
         }
 
         // 2. Discover repos for each command's paths (sequential, fast filesystem traversal)
-        let mut discover_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-        let mut path_to_repo: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let mut path_to_repo: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
         for cmd in &git_commands {
             for path in cmd.auto.paths() {
-                if !path_to_repo.contains_key(path) {
-                    let repo_path = discover_repo(path, &mut discover_cache)?;
-                    path_to_repo.insert(path.clone(), repo_path);
-                }
+                path_to_repo.entry(path.clone()).or_insert_with(|| {
+                    discover_repo(path)
+                        .inspect_err(|e| {
+                            warn!(
+                                "Git selection skipped for {}: {}",
+                                path.display(),
+                                e.message()
+                            );
+                        })
+                        .ok()
+                });
             }
         }
 
         // 3. Collect unique repo paths
         let unique_repos: Vec<PathBuf> = path_to_repo
             .values()
+            .flatten()
             .collect::<HashSet<_>>()
             .into_iter()
             .cloned()
             .collect();
 
-        // 4. Scan all repos in parallel (the expensive I/O part)
+        // 4. Scan all repos in parallel (the expensive I/O part); a failed scan selects nothing
         let repo_changes: HashMap<PathBuf, Vec<PathBuf>> = std::thread::scope(|s| {
             let handles: Vec<_> = unique_repos
                 .into_iter()
                 .map(|repo_path| {
-                    s.spawn(move || -> Result<(PathBuf, Vec<PathBuf>), git2::Error> {
-                        let changes = scan_repo(&repo_path)?;
-                        Ok((repo_path, changes))
-                    })
+                    let handle = s.spawn({
+                        let repo_path = repo_path.clone();
+                        move || scan_repo(&repo_path)
+                    });
+                    (repo_path, handle)
                 })
                 .collect();
 
             let mut results = HashMap::new();
-            for handle in handles {
-                let (path, changes) = handle.join().map_err(|_| SelectorError::ThreadPanic)??;
-                results.insert(path, changes);
+            for (repo_path, handle) in handles {
+                match handle.join() {
+                    Ok(Ok(changes)) => {
+                        results.insert(repo_path, changes);
+                    }
+                    Ok(Err(e)) => warn!(
+                        "Git scan of {} failed: {}",
+                        repo_path.display(),
+                        e.message()
+                    ),
+                    Err(_) => warn!("Git scan of {} panicked", repo_path.display()),
+                }
             }
-            Ok::<_, SelectorError>(results)
-        })?;
+            results
+        });
 
         // 5. Match each command's patterns against its repo's cached changes
         let mut with_git = Vec::new();
