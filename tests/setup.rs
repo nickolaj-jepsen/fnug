@@ -184,6 +184,89 @@ fn subdir_config_is_installed() {
     assert_eq!(hooks::resolve(&app).unwrap().config_rel, Path::new("app"));
 }
 
+fn init_gitlink_repo(gitdir: &Path, workdir: &Path) -> Repository {
+    Repository::init_opts(
+        gitdir,
+        RepositoryInitOptions::new()
+            .no_dotgit_dir(true)
+            .workdir_path(workdir),
+    )
+    .unwrap()
+}
+
+#[test]
+fn sub_repos_are_packages_in_other_repos() {
+    let (_tmp, root) = tempdir();
+    Repository::init(&root).unwrap();
+    std::fs::write(
+        root.join(".fnug.yaml"),
+        "name: root\nworkspace:\n  paths: [./sub, ./same]\nchildren:\n  - name: plain\n    cwd: plain-sub\n    commands: []\n",
+    )
+    .unwrap();
+    // A package in a submodule whose commands run in a subdirectory
+    let sub = root.join("sub");
+    init_gitlink_repo(&root.join(".git/modules/sub"), &sub);
+    std::fs::create_dir(sub.join("src")).unwrap();
+    std::fs::write(
+        sub.join(".fnug.yaml"),
+        "name: sub\ncwd: src\ncommands:\n  - name: test\n    cmd: 'true'\n",
+    )
+    .unwrap();
+    // A package in the root repo
+    std::fs::create_dir(root.join("same")).unwrap();
+    std::fs::write(
+        root.join("same/.fnug.yaml"),
+        "name: same\ncommands:\n  - name: test\n    cmd: 'true'\n",
+    )
+    .unwrap();
+    // A plain group whose cwd is another repo, but which has no config of its own
+    init_gitlink_repo(&root.join(".git/modules/plain"), &root.join("plain-sub"));
+
+    let loaded = fnug::load(&fnug::LoadOptions {
+        config: Some(root.join(".fnug.yaml")),
+        ..fnug::LoadOptions::default()
+    })
+    .unwrap();
+    let repos = fnug::setup::workspace::find_sub_repos(&loaded.cwd, &loaded.root);
+
+    let found: Vec<(&str, &Path)> = repos
+        .iter()
+        .map(|r| (r.name.as_str(), r.path.as_path()))
+        .collect();
+    assert_eq!(found, [("sub", sub.as_path())]);
+}
+
+#[test]
+fn packages_sharing_a_sub_repo_get_one_hook() {
+    let (_tmp, root) = tempdir();
+    Repository::init(&root).unwrap();
+    std::fs::write(
+        root.join(".fnug.yaml"),
+        "name: root\nworkspace:\n  paths: [./sub/a, ./sub/b]\ncommands: []\n",
+    )
+    .unwrap();
+    let sub = root.join("sub");
+    init_gitlink_repo(&root.join(".git/modules/sub"), &sub);
+    for name in ["a", "b"] {
+        std::fs::create_dir(sub.join(name)).unwrap();
+        std::fs::write(
+            sub.join(name).join(".fnug.yaml"),
+            format!("name: {name}\ncommands:\n  - name: test\n    cmd: 'true'\n"),
+        )
+        .unwrap();
+    }
+
+    let loaded = fnug::load(&fnug::LoadOptions {
+        config: Some(root.join(".fnug.yaml")),
+        ..fnug::LoadOptions::default()
+    })
+    .unwrap();
+    let repos = fnug::setup::workspace::find_sub_repos(&loaded.cwd, &loaded.root);
+
+    let found: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(found, ["a"], "one hook can only cd into one package");
+}
+
 #[test]
 fn bare_repo_is_an_error() {
     let (_tmp, root) = tempdir();
