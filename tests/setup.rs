@@ -388,9 +388,8 @@ impl Shim {
 
 fn options(foreign: ForeignPolicy) -> InstallOptions {
     InstallOptions {
-        no_workspace: false,
         foreign,
-        fallback_exe: None,
+        ..InstallOptions::default()
     }
 }
 
@@ -744,6 +743,32 @@ fn config_at_the_top_runs_there() {
     assert!(!read(&hook).contains("cd --"));
     assert_eq!(shim.run(&hook, &root, 0), 0);
     assert_eq!(shim.logged("pwd"), [root.display().to_string()]);
+}
+
+#[test]
+fn hook_passes_the_config_and_root_it_was_given() {
+    let (_tmp, root, hook) = repo();
+    let shim = Shim::new();
+    let app = root.join("app");
+    std::fs::create_dir(&app).unwrap();
+    let target = hooks::resolve(&app).unwrap();
+    let opts = InstallOptions {
+        config_file: Some("my ci.yaml".into()),
+        root_dir: Some("..".into()),
+        ..options(ForeignPolicy::Refuse)
+    };
+    hooks::install_with(&target, &opts).unwrap();
+
+    assert_eq!(shim.run(&hook, &root, 0), 0);
+    assert_eq!(shim.logged("pwd"), [app.display().to_string()]);
+    let mut expected = vec!["-c", "my ci.yaml", "--root", ".."];
+    expected.extend(hooks::hook_args(false));
+    assert_eq!(shim.args(), expected);
+    assert_eq!(
+        hooks::status_with(&target, &options(ForeignPolicy::Refuse)),
+        HookStatus::Outdated,
+        "setup without -c and --root rewrites the hook"
+    );
 }
 
 #[test]

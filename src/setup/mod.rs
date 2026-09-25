@@ -4,12 +4,12 @@ pub mod mcp;
 pub mod workspace;
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use inquire::{Confirm, MultiSelect};
 use thiserror::Error;
 
-use crate::LoadedConfig;
+use crate::{LoadOptions, LoadedConfig};
 use hooks::{
     ForeignPolicy, HookError, HookPlan, HookStatus, HookTarget, InstallOptions, InstallOutcome,
 };
@@ -277,22 +277,55 @@ impl Prepared {
     }
 }
 
+/// How the hook of the config's own repository runs fnug: from the config's directory, loading
+/// the config the way `load` did.
+fn root_hook_options(config: Option<&LoadedConfig>, load: &LoadOptions) -> InstallOptions {
+    let pinned = |flag_given: bool| config.filter(|_| flag_given);
+    InstallOptions {
+        no_workspace: load.no_workspace,
+        config_file: pinned(load.config.is_some())
+            .and_then(|c| c.config_path.file_name())
+            .map(PathBuf::from),
+        root_dir: pinned(load.root_dir.is_some())
+            .and_then(|c| Some(relative_path(&c.cwd, c.config_path.parent()?))),
+        ..InstallOptions::default()
+    }
+}
+
+/// `path` relative to `base`, both absolute.
+fn relative_path(path: &Path, base: &Path) -> PathBuf {
+    let common = path
+        .components()
+        .zip(base.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut relative: PathBuf = base
+        .components()
+        .skip(common)
+        .map(|_| Component::ParentDir)
+        .collect();
+    relative.extend(path.components().skip(common));
+    if relative.as_os_str().is_empty() {
+        relative.push(Component::CurDir);
+    }
+    relative
+}
+
 /// Find the hooks and editor configs, printing why any of them can't be set up.
-fn detect(cwd: &Path, config_dir: &Path, config: Option<&LoadedConfig>) -> Detected {
-    let repo_hook = |name: String, dir: &Path, no_workspace| match hooks::resolve(dir) {
-        Ok(target) => {
-            let opts = InstallOptions {
-                no_workspace,
-                foreign: ForeignPolicy::Refuse,
-                fallback_exe: std::env::current_exe().ok(),
-            };
-            Some(RepoHook {
-                name,
-                status: hooks::status_with(&target, &opts),
-                target,
-                opts,
-            })
-        }
+fn detect(
+    cwd: &Path,
+    config_dir: &Path,
+    config: Option<&LoadedConfig>,
+    load: &LoadOptions,
+) -> Detected {
+    let fallback_exe = std::env::current_exe().ok();
+    let repo_hook = |name: String, dir: &Path, opts: InstallOptions| match hooks::resolve(dir) {
+        Ok(target) => Some(RepoHook {
+            name,
+            status: hooks::status_with(&target, &opts),
+            target,
+            opts,
+        }),
         Err(e) => {
             println!(
                 "warning: can't set up a git hook for {}: {e}",
@@ -301,12 +334,21 @@ fn detect(cwd: &Path, config_dir: &Path, config: Option<&LoadedConfig>) -> Detec
             None
         }
     };
-    let root_hook = repo_hook(String::new(), config_dir, false);
+    let root_opts = InstallOptions {
+        fallback_exe: fallback_exe.clone(),
+        ..root_hook_options(config, load)
+    };
+    let root_hook = repo_hook(String::new(), config_dir, root_opts);
+    let sub_opts = InstallOptions {
+        no_workspace: true,
+        fallback_exe,
+        ..InstallOptions::default()
+    };
     let sub_repo_hooks = config
         .map(|c| workspace::find_sub_repos(config_dir, &c.root))
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|sub| repo_hook(sub.name, &sub.path, true))
+        .filter_map(|sub| repo_hook(sub.name, &sub.path, sub_opts.clone()))
         .collect();
     let editors = Editor::ALL
         .into_iter()
@@ -402,12 +444,17 @@ fn confirm_chain(hook: &Path, interpreter: &str) -> Result<bool, SetupError> {
 }
 
 /// Run the interactive setup wizard: it asks what to set up, shows every change it will make,
-/// and makes them only once the user confirms.
+/// and makes them only once the user confirms. `load` is how `config` was loaded; the pre-commit
+/// hook passes the same `-c`, `--root` and `--no-workspace`.
 ///
 /// # Errors
 ///
 /// Returns `SetupError` on prompt failures, IO errors, or if not run in a terminal.
-pub fn run(cwd: &Path, config: Option<&LoadedConfig>) -> Result<(), SetupError> {
+pub fn run(
+    cwd: &Path,
+    config: Option<&LoadedConfig>,
+    load: &LoadOptions,
+) -> Result<(), SetupError> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(SetupError::NotInteractive);
     }
@@ -419,7 +466,7 @@ pub fn run(cwd: &Path, config: Option<&LoadedConfig>) -> Result<(), SetupError> 
 
     // The hook runs fnug from the config's directory, so it finds the config there
     let config_dir = config.and_then(|c| c.config_path.parent()).unwrap_or(cwd);
-    let detected = detect(cwd, config_dir, config);
+    let detected = detect(cwd, config_dir, config, load);
     let choice = prompt(&detected)?;
     let prepared = prepare_all(&plan_actions(&detected, &choice))?;
 
@@ -464,8 +511,7 @@ mod tests {
             status,
             opts: InstallOptions {
                 no_workspace: !name.is_empty(),
-                foreign: ForeignPolicy::Refuse,
-                fallback_exe: None,
+                ..InstallOptions::default()
             },
         }
     }
@@ -590,5 +636,52 @@ mod tests {
             Err(SetupError::Mcp(mcp::McpError::Parse { .. }))
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn relative_path_climbs_and_descends() {
+        for (path, base, expected) in [
+            ("/a/b", "/a/b", "."),
+            ("/a", "/a/b/c", "../.."),
+            ("/a/x/y", "/a/b", "../x/y"),
+            ("/a/b/c", "/a", "b/c"),
+        ] {
+            assert_eq!(
+                relative_path(Path::new(path), Path::new(base)),
+                Path::new(expected),
+                "{path} from {base}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_hook_loads_the_config_like_setup_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("app")).unwrap();
+        std::fs::write(root.join("app/ci.yaml"), "name: ci\ncommands: []\n").unwrap();
+        std::fs::write(root.join("app/.fnug.yaml"), "name: app\ncommands: []\n").unwrap();
+
+        let pinned = LoadOptions {
+            config: Some(root.join("app/ci.yaml")),
+            root_dir: Some(root.clone()),
+            no_workspace: true,
+            ..LoadOptions::default()
+        };
+        let loaded = crate::load(&pinned).unwrap();
+        let opts = root_hook_options(Some(&loaded), &pinned);
+        assert_eq!(opts.config_file.as_deref(), Some(Path::new("ci.yaml")));
+        assert_eq!(opts.root_dir.as_deref(), Some(Path::new("..")));
+        assert!(opts.no_workspace);
+
+        let found = LoadOptions {
+            start_dir: Some(root.join("app")),
+            ..LoadOptions::default()
+        };
+        let loaded = crate::load(&found).unwrap();
+        assert_eq!(
+            root_hook_options(Some(&loaded), &found),
+            InstallOptions::default()
+        );
     }
 }
