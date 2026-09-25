@@ -20,7 +20,7 @@ pub fn run(
     load_opts: &LoadOptions,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let (cwd, loaded) = setup_context(load_opts)?;
-    fnug::setup::run(&cwd, loaded.as_ref())?;
+    fnug::setup::run(&cwd, loaded.as_ref(), load_opts)?;
     Ok(ExitCode::SUCCESS)
 }
 

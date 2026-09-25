@@ -167,7 +167,13 @@ mod tests {
     fn installed_hook_args_parse() {
         use std::os::unix::fs::PermissionsExt;
 
-        for no_workspace in [false, true] {
+        let pinned = hooks::InstallOptions {
+            no_workspace: true,
+            config_file: Some("ci.yaml".into()),
+            root_dir: Some("..".into()),
+            ..hooks::InstallOptions::default()
+        };
+        for opts in [hooks::InstallOptions::default(), pinned] {
             let dir = tempfile::tempdir().unwrap();
             let repo = git2::Repository::init(dir.path()).unwrap();
             // Overrides a global core.hooksPath, which would put the hook elsewhere
@@ -175,7 +181,7 @@ mod tests {
                 .unwrap()
                 .set_str("core.hooksPath", ".git/hooks")
                 .unwrap();
-            hooks::install(dir.path(), no_workspace).unwrap();
+            hooks::install_with(&hooks::resolve(dir.path()).unwrap(), &opts).unwrap();
 
             // Run the hook with a `fnug` first on PATH that prints its arguments
             let shim = dir.path().join("bin/fnug");
@@ -196,7 +202,9 @@ mod tests {
 
             let args = String::from_utf8(output.stdout).unwrap();
             let cli = Cli::try_parse_from(std::iter::once("fnug").chain(args.lines())).unwrap();
-            assert_eq!(cli.no_workspace, no_workspace);
+            assert_eq!(cli.no_workspace, opts.no_workspace);
+            assert_eq!(cli.config.map(PathBuf::from), opts.config_file);
+            assert_eq!(cli.root, opts.root_dir);
             assert!(matches!(cli.command, Some(Commands::Check(_))));
         }
     }
