@@ -299,24 +299,16 @@ impl App {
 mod tests {
     use std::path::Path;
 
-    use portable_pty::{PtySize, native_pty_system};
     use ratatui::layout::Rect;
 
     use crate::commands::command::Command;
     use crate::commands::group::CommandGroup;
+    use crate::pty::test_util::pty_available;
     use crate::tui::app::{App, AppEvent, CommandStatus};
     use crate::tui::log_state::LogBuffer;
     use crate::tui::tree_widget::NodeKind;
 
     const AREA: Rect = Rect::new(0, 0, 80, 24);
-
-    fn pty_available() -> bool {
-        let ok = native_pty_system().openpty(PtySize::default()).is_ok();
-        if !ok {
-            eprintln!("skipping: no PTY available");
-        }
-        ok
-    }
 
     /// `test` depends on `build`; both run `true` in `dir`.
     fn dep_app(dir: &Path) -> App {

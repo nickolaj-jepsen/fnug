@@ -462,8 +462,6 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use portable_pty::{PtySize, native_pty_system};
-
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -471,14 +469,7 @@ mod tests {
 
     use super::{Terminal, TerminalSize, TerminalUpdate, spawn_output_writer};
     use crate::commands::command::Command;
-
-    fn pty_available() -> bool {
-        let ok = native_pty_system().openpty(PtySize::default()).is_ok();
-        if !ok {
-            eprintln!("skipping: no PTY available");
-        }
-        ok
-    }
+    use crate::pty::test_util::{pty_available, wait_until};
 
     /// Kills the command when dropped, so a failed assertion doesn't leak it.
     struct Spawned(Terminal);
@@ -499,17 +490,6 @@ mod tests {
         };
         let size = TerminalSize::new(80, 24);
         Spawned(Terminal::new(&command, size, Terminal::default_scrollback_size()).unwrap())
-    }
-
-    fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if cond() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        cond()
     }
 
     #[test]
