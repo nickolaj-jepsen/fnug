@@ -187,14 +187,20 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
     }
 }
 
-/// Root configuration structure for Fnug
+/// Root configuration structure for Fnug: the root group's fields plus file-level settings.
+// Not `#[serde(flatten)]` over `ConfigCommandGroup`: flatten hides unknown keys and error locations.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub fnug_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceConfig>,
-    #[serde(flatten)]
-    pub root: ConfigCommandGroup,
+    pub id: Option<String>,
+    pub name: String,
+    pub auto: Option<ConfigAuto>,
+    pub cwd: Option<PathBuf>,
+    pub commands: Option<Vec<ConfigCommand>>,
+    pub children: Option<Vec<ConfigCommandGroup>>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 /// List of supported configuration file names
@@ -206,6 +212,21 @@ pub(crate) fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 impl Config {
+    /// Split into the root command group and the workspace setting.
+    #[must_use]
+    pub fn into_root(self) -> (ConfigCommandGroup, Option<WorkspaceConfig>) {
+        let root = ConfigCommandGroup {
+            id: self.id,
+            name: self.name,
+            auto: self.auto,
+            cwd: self.cwd,
+            commands: self.commands,
+            children: self.children,
+            env: self.env,
+        };
+        (root, self.workspace)
+    }
+
     /// Loads and parses a configuration file.
     ///
     /// # Errors
@@ -276,7 +297,7 @@ mod tests {
         )
         .unwrap();
         let config = Config::from_file(&path).unwrap();
-        assert_eq!(config.root.name, "root");
+        assert_eq!(config.name, "root");
     }
 
     #[test]
@@ -289,7 +310,7 @@ mod tests {
         )
         .unwrap();
         let config = Config::from_file(&path).unwrap();
-        assert_eq!(config.root.name, "root");
+        assert_eq!(config.name, "root");
     }
 
     #[test]
