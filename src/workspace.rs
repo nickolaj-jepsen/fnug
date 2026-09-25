@@ -214,7 +214,9 @@ fn canonical_config(config_path: &Path) -> Result<PathBuf, ConfigError> {
 
 /// Load a sub-config file and prepare it as a `ConfigCommandGroup`.
 fn load_sub_config(config_path: &Path) -> Result<ConfigCommandGroup, ConfigError> {
-    let (mut group, workspace) = Config::from_file(config_path)?.into_root();
+    let config = Config::from_file(config_path)?;
+    crate::check_version(config.fnug_version.as_deref(), config_path);
+    let (mut group, workspace) = config.into_root();
 
     if workspace.is_some() {
         warn!(
