@@ -1,4 +1,5 @@
 use crate::commands::command::Command;
+use crate::selectors::ignore::IgnoreFilter;
 use crate::selectors::matching::command_matches;
 use log::{debug, error, info};
 use notify::{RecommendedWatcher, RecursiveMode};
@@ -58,6 +59,9 @@ struct WatchKey {
     path: PathBuf,
     /// Indices into [`Matcher::commands`].
     commands: Vec<usize>,
+    /// Git ignores the path itself. Ignore rules don't filter changes under it then, as
+    /// watching it was asked for explicitly.
+    ignored: bool,
 }
 
 /// Matches changed paths against the `auto` rules of the commands with `auto.watch`.
@@ -65,6 +69,7 @@ struct Matcher {
     commands: Vec<Command>,
     /// Sorted by path.
     keys: Vec<WatchKey>,
+    ignore: IgnoreFilter,
 }
 
 impl Matcher {
@@ -82,28 +87,61 @@ impl Matcher {
                     None => keys.push(WatchKey {
                         path: path.clone(),
                         commands: vec![index],
+                        ignored: false,
                     }),
                 }
             }
         }
         keys.sort_by(|a, b| a.path.cmp(&b.path));
-        Matcher { commands, keys }
+        let mut ignore = IgnoreFilter::new(keys.iter().map(|key| key.path.as_path()));
+        for key in &mut keys {
+            key.ignored = ignore.is_ignored(&key.path, key.path.is_dir());
+        }
+        Matcher {
+            commands,
+            keys,
+            ignore,
+        }
     }
 
-    /// The commands that `changed` paths select, in config order.
-    fn matches(&self, changed: &[PathBuf]) -> Vec<WatchMatch> {
+    /// The commands that `changed` paths select, in config order. Changes inside a `.git`
+    /// directory never count, nor do changes git ignores unless under an ignored watch path.
+    fn matches(&mut self, changed: &[PathBuf]) -> Vec<WatchMatch> {
+        if changed
+            .iter()
+            .any(|path| path.file_name().is_some_and(|name| name == ".gitignore"))
+        {
+            self.ignore.clear_cache();
+        }
         let mut selected: Vec<Option<Vec<PathBuf>>> = vec![None; self.commands.len()];
         for path in changed {
-            let mut is_file = None;
+            // Looked up once needed: whether the path is a directory (`None` once removed),
+            // and whether git ignores it.
+            let mut is_dir: Option<Option<bool>> = None;
+            let mut ignored = None;
             for key in self.keys.iter().filter(|key| path.starts_with(&key.path)) {
-                for &index in &key.commands {
-                    if !command_matches(&self.commands[index], &key.path, path) {
-                        continue;
-                    }
+                if in_git_dir(path, &key.path) {
+                    continue;
+                }
+                let mut hits = key
+                    .commands
+                    .iter()
+                    .filter(|&&index| command_matches(&self.commands[index], &key.path, path))
+                    .peekable();
+                if hits.peek().is_none() {
+                    continue;
+                }
+                let is_dir = *is_dir
+                    .get_or_insert_with(|| path.symlink_metadata().ok().map(|meta| meta.is_dir()));
+                if !key.ignored
+                    && *ignored
+                        .get_or_insert_with(|| self.ignore.is_ignored(path, is_dir == Some(true)))
+                {
+                    continue;
+                }
+                for &index in hits {
                     let files = selected[index].get_or_insert_with(Vec::new);
-                    if *is_file.get_or_insert_with(|| {
-                        path.symlink_metadata().is_ok_and(|meta| !meta.is_dir())
-                    }) {
+                    if is_dir == Some(false) {
                         files.push(path.clone());
                     }
                 }
@@ -125,8 +163,14 @@ impl Matcher {
     }
 }
 
+/// Whether `path` is inside a `.git` directory below the watch path `key`.
+fn in_git_dir(path: &Path, key: &Path) -> bool {
+    path.strip_prefix(key)
+        .is_ok_and(|rel| rel.components().any(|part| part.as_os_str() == ".git"))
+}
+
 fn start_debouncer(
-    matcher: Matcher,
+    mut matcher: Matcher,
     sender: mpsc::Sender<Vec<WatchMatch>>,
 ) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, notify::Error> {
     info!("Starting file watcher");
