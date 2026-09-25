@@ -205,6 +205,27 @@ children:
         cmd: cargo clippy
 ```
 
+`auto.path` and `auto.regex` are inherited separately and both must match, so a command that narrows `path` keeps the group's `regex`. Set `regex: []` to drop an inherited regex (any file under `path` matches), or `path: []` to reset `path` to the command's own directory:
+
+```yaml
+fnug_version: 0.1.0
+name: my-project
+children:
+  - name: rust
+    auto:
+      git: true
+      path: ["./src"]
+      regex: ["\\.rs$"]
+    commands:
+      - name: test
+        cmd: cargo test
+      - name: lockfile
+        cmd: cargo check --locked
+        auto:
+          path: ["./Cargo.toml"]
+          regex: []
+```
+
 ### Workspace
 
 Workspace mode discovers `.fnug.yaml` files in subdirectories and merges them as child groups. This is useful for mono-repos where each package has its own config.
