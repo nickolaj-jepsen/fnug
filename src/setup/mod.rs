@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use inquire::MultiSelect;
 use thiserror::Error;
 
+use crate::LoadedConfig;
 use crate::commands::group::CommandGroup;
 use mcp::Editor;
 
@@ -42,7 +43,12 @@ impl Action {
     fn execute(&self) -> Result<(), SetupError> {
         match self {
             Self::InstallHook { path, no_workspace } => {
-                hooks::install(path, *no_workspace)?;
+                let opts = hooks::InstallOptions {
+                    no_workspace: *no_workspace,
+                    foreign: hooks::ForeignPolicy::Refuse,
+                    fallback_exe: std::env::current_exe().ok(),
+                };
+                hooks::install_with(&hooks::resolve(path)?, &opts)?;
                 println!("Installed pre-commit hook {}", hook_path(path).display());
             }
             Self::RemoveHook { path } => {
@@ -119,9 +125,13 @@ impl fmt::Display for Feature {
 /// Prompt the user for which features/editors/sub-repos they want, then build
 /// the list of actions to apply.
 #[allow(clippy::too_many_lines)]
-fn gather_actions(cwd: &Path, config: Option<&CommandGroup>) -> Result<Vec<Action>, SetupError> {
+fn gather_actions(
+    cwd: &Path,
+    config_dir: &Path,
+    config: Option<&CommandGroup>,
+) -> Result<Vec<Action>, SetupError> {
     // Detect current state
-    let hooks_installed = hooks::is_installed(cwd);
+    let hooks_installed = hooks::is_installed(config_dir);
     let editors_installed: Vec<(Editor, bool)> = Editor::ALL
         .iter()
         .map(|&e| (e, e.is_installed(cwd)))
@@ -173,7 +183,7 @@ fn gather_actions(cwd: &Path, config: Option<&CommandGroup>) -> Result<Vec<Actio
     // Find sub-repos for hook installation
     let sub_repos = if wants_hooks {
         config
-            .map(|c| workspace::find_sub_repos(cwd, c))
+            .map(|c| workspace::find_sub_repos(config_dir, c))
             .unwrap_or_default()
     } else {
         vec![]
@@ -207,12 +217,12 @@ fn gather_actions(cwd: &Path, config: Option<&CommandGroup>) -> Result<Vec<Actio
     // Root hook
     if wants_hooks && !hooks_installed {
         actions.push(Action::InstallHook {
-            path: cwd.to_path_buf(),
+            path: config_dir.to_path_buf(),
             no_workspace: false,
         });
     } else if !wants_hooks && hooks_installed {
         actions.push(Action::RemoveHook {
-            path: cwd.to_path_buf(),
+            path: config_dir.to_path_buf(),
         });
     }
 
@@ -257,12 +267,14 @@ fn gather_actions(cwd: &Path, config: Option<&CommandGroup>) -> Result<Vec<Actio
 /// # Errors
 ///
 /// Returns `SetupError` on prompt failures, IO errors, or if not run in a terminal.
-pub fn run(cwd: &Path, config: Option<&CommandGroup>) -> Result<(), SetupError> {
+pub fn run(cwd: &Path, config: Option<&LoadedConfig>) -> Result<(), SetupError> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(SetupError::NotInteractive);
     }
 
-    let actions = gather_actions(cwd, config)?;
+    // The hook runs fnug from the config's directory, so it finds the config there
+    let config_dir = config.and_then(|c| c.config_path.parent()).unwrap_or(cwd);
+    let actions = gather_actions(cwd, config_dir, config.map(|c| &c.root))?;
 
     if actions.is_empty() {
         println!("Everything is already configured. No changes needed.");
