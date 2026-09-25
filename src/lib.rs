@@ -67,7 +67,8 @@ pub struct LoadedConfig {
 ///
 /// # Errors
 ///
-/// Returns `ConfigError::ConfigFileMissing` if `opts.config` doesn't exist,
+/// Returns `ConfigError::EmptyConfigPath` if `opts.config` is empty,
+/// `ConfigError::ConfigFileMissing` if `opts.config` doesn't exist,
 /// `ConfigError::RootDirMissing` if `opts.root_dir` doesn't exist,
 /// `ConfigError::ConfigNotFound` if no config file is found, `ConfigError::UntrustedConfig` if
 /// the config found by searching is refused by `opts.trust`, and another `ConfigError` if a
@@ -91,6 +92,7 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         .transpose()?;
 
     let found = match &opts.config {
+        Some(file) if file.as_os_str().is_empty() => return Err(ConfigError::EmptyConfigPath),
         Some(file) if opts.start_dir.is_some() => resolve_config_arg(&start_dir.join(file))?,
         Some(file) => resolve_config_arg(file)?,
         None => {

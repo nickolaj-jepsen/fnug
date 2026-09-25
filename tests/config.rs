@@ -1596,3 +1596,28 @@ fn root_flag_runs_commands_in_root_dir() {
     let sub = root.path().canonicalize().unwrap().join("sub");
     assert!(stdout.contains(&*sub.to_string_lossy()), "{stdout}");
 }
+
+#[test]
+fn empty_config_path_is_a_clear_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), &one_command("here"));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(dir.path())
+        .args(["-c", "", "check", "--no-tui"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("config path is empty"), "{stderr}");
+
+    let err = fnug::load(&LoadOptions {
+        config: Some("".into()),
+        start_dir: Some(dir.path().to_path_buf()),
+        ..LoadOptions::default()
+    })
+    .unwrap_err();
+    assert!(
+        matches!(err, fnug::config_file::ConfigError::EmptyConfigPath),
+        "{err:?}"
+    );
+}

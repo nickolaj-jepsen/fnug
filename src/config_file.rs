@@ -24,6 +24,8 @@ pub enum ConfigError {
     ConfigNotFound(PathBuf),
     #[error("Config file not found: {0}")]
     ConfigFileMissing(PathBuf),
+    #[error("The config path is empty; pass a file to -c, or leave -c out to search for one")]
+    EmptyConfigPath,
     #[error("Root directory {path} not found: {source}")]
     RootDirMissing {
         path: PathBuf,
