@@ -139,10 +139,11 @@ pub struct ConfigAuto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<bool>,
     /// Path prefixes, relative to the working directory, that changed files must be under.
-    /// Defaults to the working directory.
+    /// Defaults to the working directory; `[]` resets an inherited value to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<Vec<PathBuf>>,
     /// Regular expressions matched against changed file paths; a file must match at least one.
+    /// `[]` clears an inherited value, so any file matches.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regex: Option<Vec<String>>,
     /// Always select, regardless of changes.
@@ -157,12 +158,11 @@ impl TryFrom<ConfigAuto> for Auto {
     type Error = ConfigError;
 
     fn try_from(config: ConfigAuto) -> Result<Self, Self::Error> {
-        let regex = config.regex.map_or(Ok(Vec::new()), parse_regexes)?;
         Ok(Auto {
-            regex,
+            regex: config.regex.map(parse_regexes).transpose()?,
             watch: config.watch,
             git: config.git,
-            path: config.path.unwrap_or_default(),
+            path: config.path,
             always: config.always,
             check: config.check,
         })
