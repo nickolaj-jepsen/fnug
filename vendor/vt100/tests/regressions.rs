@@ -330,3 +330,40 @@ fn formatted_roundtrips_dim() {
         .windows(7)
         .any(|w| w == b"\x1b[22;2m"));
 }
+
+fn contents_after(rows: u16, cols: u16, input: &str) -> String {
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(input.as_bytes());
+    parser.screen().contents()
+}
+
+#[test]
+fn rep_repeats() {
+    assert_eq!(contents_after(2, 20, "a\x1b[4b|"), "aaaaa|");
+    assert_eq!(contents_after(2, 20, "a\x1b[b|"), "aa|");
+    assert_eq!(contents_after(2, 20, "a\x1b[0b|"), "aa|");
+    assert_eq!(contents_after(2, 20, "a\x1b[2b\x1b[2b|"), "aaaaa|");
+    assert_eq!(contents_after(2, 20, "中\x1b[2b|"), "中中中|");
+    assert_eq!(contents_after(2, 20, "e\u{301}\x1b[2b|"), "e\u{301}ee|");
+}
+
+#[test]
+fn rep_after_control_ignored() {
+    assert_eq!(contents_after(2, 20, "\x1b[4b|"), "|");
+    assert_eq!(contents_after(2, 20, "a\x07\x1b[4b|"), "a|");
+    assert_eq!(contents_after(2, 20, "a\x1b[m\x1b[4b|"), "a|");
+    assert_eq!(contents_after(2, 20, "a\x1b7\x1b[4b|"), "a|");
+    assert_eq!(contents_after(2, 20, "a\x1b]0;title\x07\x1b[4b|"), "a|");
+    assert_eq!(contents_after(2, 20, "a\x1bPq\x1b\\\x1b[4b|"), "a|");
+}
+
+#[test]
+fn rep_wraps() {
+    let mut parser = vt100::Parser::new(3, 5, 0);
+    parser.process(b"abc\x1b[10b");
+
+    assert_eq!(parser.screen().contents(), "abccccccccccc");
+    assert!(parser.screen().row_wrapped(0));
+    assert!(parser.screen().row_wrapped(1));
+    assert_eq!(parser.screen().cursor_position(), (2, 3));
+}
