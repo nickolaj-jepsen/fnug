@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -70,18 +71,34 @@ def run(*args: str) -> subprocess.CompletedProcess[bytes]:
 
 @contextmanager
 def _config_tempfile(config: Config) -> Iterator[str]:
-    """Write a Config to a temp file, yield its path, clean up after."""
-    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
-        mode="w",
-        suffix=".fnug.yaml",
-        delete=False,
-    )
+    """Write a Config to a temporary JSON file, yield its path, and delete it after.
+
+    fnug resolves the root ``cwd`` against the config file's directory, so the
+    written copy pins it to the caller's working directory: an unset ``cwd`` becomes
+    that directory and a relative one is resolved against it. ``config`` itself is
+    not modified.
+
+    Raises:
+        ValueError: If ``config.workspace`` is enabled. Workspace discovery would
+            search the temporary directory.
+    """
+    if config.workspace:
+        msg = (
+            "A Config with 'workspace' set can't be passed directly: fnug would "
+            "look for workspace packages next to its temporary file. Write it with "
+            "Config.write() and pass config_path instead."
+        )
+        raise ValueError(msg)
+    data = config.to_dict()
+    data["cwd"] = str((Path.cwd() / data.get("cwd", ".")).resolve())
+    # Outside the project, so the file itself never counts as a changed file.
+    fd, path = tempfile.mkstemp(suffix=".fnug.json")
     try:
-        tmp.write(config.to_yaml())
-        tmp.close()
-        yield tmp.name
+        with os.fdopen(fd, "w") as file:
+            json.dump(data, file)
+        yield path
     finally:
-        Path(tmp.name).unlink(missing_ok=True)
+        Path(path).unlink(missing_ok=True)
 
 
 def _resolve_config_args(
@@ -106,7 +123,8 @@ def start(
     """Launch the fnug TUI.
 
     Args:
-        config: A Config dataclass to use (written to a temp file).
+        config: A Config to use. It is written to a temporary file, and its root
+            ``cwd`` is resolved against the caller's working directory (the default).
         config_path: Path to an existing .fnug.yaml file.
         log_file: Path for file logging.
 
@@ -114,7 +132,8 @@ def start(
         The completed process result.
 
     Raises:
-        ValueError: If both config and config_path are provided.
+        ValueError: If both config and config_path are provided, or config has
+            ``workspace`` enabled.
     """
     args = _resolve_config_args(config, config_path)
     if log_file is not None:
@@ -138,7 +157,8 @@ def check(  # noqa: PLR0913
     """Run fnug in headless check mode.
 
     Args:
-        config: A Config dataclass to use (written to a temp file).
+        config: A Config to use. It is written to a temporary file, and its root
+            ``cwd`` is resolved against the caller's working directory (the default).
         config_path: Path to an existing .fnug.yaml file.
         fail_fast: Stop on first failure.
         no_tui: Never prompt to open the TUI on failure.
@@ -149,7 +169,8 @@ def check(  # noqa: PLR0913
         The completed process result.
 
     Raises:
-        ValueError: If both config and config_path are provided.
+        ValueError: If both config and config_path are provided, or config has
+            ``workspace`` enabled.
     """
     args = _resolve_config_args(config, config_path)
     if log_file is not None:
