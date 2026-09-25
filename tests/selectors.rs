@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use fnug::load_config;
 use fnug::selectors::{
-    SelectOptions, SelectedBy, SelectionIssue, SelectorOutput, get_selected_commands, select,
+    GitScope, IndexOverride, SelectOptions, SelectedBy, SelectionIssue, SelectorOutput,
+    get_selected_commands, select,
 };
 use git2::{IndexAddOption, Repository, RepositoryInitOptions, RepositoryOpenFlags, Signature};
 
@@ -718,4 +719,180 @@ fn check_runs_command_whose_auto_path_was_deleted() {
     );
     assert!(stdout.contains("ALWAYS-RAN"), "{stdout}");
     assert!(stdout.contains("LEGACY-RAN"), "{stdout}");
+}
+
+fn staged() -> SelectOptions {
+    SelectOptions {
+        scope: GitScope::Staged,
+        index_override: None,
+    }
+}
+
+fn stage(repo: &Repository, paths: &[&str]) {
+    let mut index = repo.index().unwrap();
+    for path in paths {
+        index.add_path(Path::new(path)).unwrap();
+    }
+    index.write().unwrap();
+}
+
+/// One command per directory, each selected by any change under it.
+const DIRS_CONFIG: &str = r"
+name: root
+auto:
+  git: true
+commands:
+  - name: modified
+    cmd: 'true'
+    cwd: modified
+  - name: untracked
+    cmd: 'true'
+    cwd: untracked
+  - name: added
+    cmd: 'true'
+    cwd: added
+  - name: removed
+    cmd: 'true'
+    cwd: removed
+";
+
+fn dirs_repo() -> (tempfile::TempDir, PathBuf, Repository) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    for dir in ["modified", "untracked", "added", "removed"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+        std::fs::write(root.join(dir).join("keep.txt"), "one\n").unwrap();
+    }
+    write_config(&root, DIRS_CONFIG);
+    commit_all(&repo);
+    (tmp, root, repo)
+}
+
+#[test]
+fn staged_scope_ignores_unstaged_and_untracked() {
+    let (_tmp, root, repo) = dirs_repo();
+    let config = root.join(".fnug.yaml");
+    std::fs::write(root.join("modified/keep.txt"), "two\n").unwrap();
+    std::fs::write(root.join("untracked/new.txt"), "new\n").unwrap();
+    assert!(select_with(&config, &staged()).commands.is_empty());
+
+    std::fs::write(root.join("added/new.txt"), "new\n").unwrap();
+    stage(&repo, &["added/new.txt"]);
+    std::fs::remove_file(root.join("removed/keep.txt")).unwrap();
+    let mut index = repo.index().unwrap();
+    index.remove_path(Path::new("removed/keep.txt")).unwrap();
+    index.write().unwrap();
+
+    let output = select_with(&config, &staged());
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["added", "removed"]);
+    assert_eq!(
+        output.get("added").unwrap().files,
+        [root.join("added/new.txt")]
+    );
+    assert!(output.get("removed").unwrap().files.is_empty());
+    assert_eq!(output.changed_files, 2);
+
+    // The working tree scope still sees everything.
+    assert_eq!(
+        selected(&config),
+        ["modified", "untracked", "added", "removed"]
+    );
+}
+
+#[test]
+fn staged_unborn_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(&root, GIT_CONFIG);
+    std::fs::write(root.join("unstaged.txt"), "").unwrap();
+    assert!(select_with(&config, &staged()).commands.is_empty());
+
+    stage(&repo, &[".fnug.yaml"]);
+    let output = select_with(&config, &staged());
+    assert_eq!(output.get("lint").unwrap().files, [config]);
+    assert!(
+        !output
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, SelectionIssue::ScanFailed { .. })),
+        "{:?}",
+        output.issues
+    );
+}
+
+#[test]
+fn staged_missing_index_override_is_scan_failure() {
+    let (_tmp, root, repo) = dirs_repo();
+    let config = root.join(".fnug.yaml");
+    let missing = root.join(".git/no-such-index");
+    let opts = SelectOptions {
+        scope: GitScope::Staged,
+        index_override: Some(IndexOverride {
+            git_dir: repo.path().to_path_buf(),
+            index_file: missing.clone(),
+        }),
+    };
+
+    // libgit2 reads a missing index as an empty one, which would stage-delete every file.
+    let output = select_with(&config, &opts);
+    assert!(output.commands.is_empty(), "{:?}", output.commands);
+    let [SelectionIssue::ScanFailed { repo, message }] = output.issues.as_slice() else {
+        panic!("{:?}", output.issues);
+    };
+    assert_eq!(repo, &root);
+    assert!(
+        message.contains(&missing.display().to_string()),
+        "{message}"
+    );
+}
+
+#[test]
+fn staged_index_override() {
+    let (_tmp, root, repo) = dirs_repo();
+    let config = root.join(".fnug.yaml");
+    std::fs::write(root.join("added/new.txt"), "new\n").unwrap();
+
+    // Like `git commit -a`: git stages into a temporary index and leaves the real one alone.
+    let alt_index = root.join(".git/next-index.lock");
+    std::fs::copy(root.join(".git/index"), &alt_index).unwrap();
+    let mut alt = git2::Index::open(&alt_index).unwrap();
+    let owner = Repository::open(&root).unwrap();
+    owner.set_index(&mut alt).unwrap();
+    alt.add_path(Path::new("added/new.txt")).unwrap();
+    alt.write().unwrap();
+    drop(owner);
+
+    assert!(select_with(&config, &staged()).commands.is_empty());
+
+    let with_index = |git_dir: PathBuf| SelectOptions {
+        scope: GitScope::Staged,
+        index_override: Some(IndexOverride {
+            git_dir,
+            index_file: alt_index.clone(),
+        }),
+    };
+    let output = select_with(&config, &with_index(repo.path().to_path_buf()));
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["added"]);
+    assert_eq!(
+        output.get("added").unwrap().files,
+        [root.join("added/new.txt")]
+    );
+
+    // The override belongs to another repo, so this one reads its own index.
+    let other = tempfile::tempdir().unwrap();
+    let other_repo = Repository::init(other.path()).unwrap();
+    let output = select_with(&config, &with_index(other_repo.path().to_path_buf()));
+    assert!(output.commands.is_empty());
+
+    // Only the staged scope reads it.
+    let output = select_with(
+        &config,
+        &SelectOptions {
+            scope: GitScope::WorkingTree,
+            ..with_index(repo.path().to_path_buf())
+        },
+    );
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["added"]);
 }
