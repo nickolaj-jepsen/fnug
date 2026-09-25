@@ -70,10 +70,15 @@ impl Cell {
     #[must_use]
     pub fn contents(&self) -> String {
         let mut s = String::with_capacity(CODEPOINTS_IN_CELL * 4);
-        for c in self.contents.iter().take(self.len()) {
-            s.push(*c);
-        }
+        s.extend(self.chars());
         s
+    }
+
+    /// Returns the characters of the cell without allocating: the same
+    /// characters as `contents`, so a base character followed by any
+    /// combining characters, or nothing for an empty cell.
+    pub fn chars(&self) -> impl Iterator<Item = char> + '_ {
+        self.contents.iter().take(self.len()).copied()
     }
 
     /// Returns whether the cell contains any text data.
