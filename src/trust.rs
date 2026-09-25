@@ -129,6 +129,9 @@ mod tests {
         let file = dir.path().join(".fnug.yaml");
         std::fs::write(&file, "").unwrap();
         assert_eq!(TrustPolicy::default().check(&file), Ok(()));
+        if std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&file).unwrap()) == 0 {
+            return; // root's files are always trusted
+        }
 
         let stranger = TrustPolicy {
             uid: Some(u32::MAX - 1),

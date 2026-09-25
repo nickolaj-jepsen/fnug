@@ -1355,18 +1355,24 @@ fn non_git_ancestor_workspace_skipped() {
 
 /// A parent config that would take over `victim` (its workspace includes every subdirectory),
 /// and a policy under which only `victim` is trusted, as if another user owned the rest.
-fn planted_parent() -> (tempfile::TempDir, fnug::trust::TrustPolicy) {
+/// `None` when running as root, whose files are always trusted.
+fn planted_parent() -> Option<(tempfile::TempDir, fnug::trust::TrustPolicy)> {
+    use std::os::unix::fs::MetadataExt;
+
     let dir = workspace(
         "name: parent\nworkspace:\n  paths: ['*']\ncommands:\n  - name: planted\n    cmd: 'true'\n",
         &[("victim", &one_command("victim"))],
     );
+    if std::fs::metadata(dir.path()).unwrap().uid() == 0 {
+        return None;
+    }
     std::fs::create_dir(dir.path().join("victim-no-config")).unwrap();
     let trust = fnug::trust::TrustPolicy {
         uid: Some(u32::MAX - 1),
         safe_dirs: vec![dir.path().join("victim")],
         trust_all: false,
     };
-    (dir, trust)
+    Some((dir, trust))
 }
 
 fn load_trusting(
@@ -1382,14 +1388,18 @@ fn load_trusting(
 
 #[test]
 fn untrusted_ancestor_skipped() {
-    let (dir, trust) = planted_parent();
+    let Some((dir, trust)) = planted_parent() else {
+        return;
+    };
     let loaded = load_trusting(&dir.path().join("victim"), &trust).unwrap();
     assert_eq!(names(&loaded.root), ["victim-cmd"]);
 }
 
 #[test]
 fn untrusted_nearest_config_errors() {
-    let (dir, trust) = planted_parent();
+    let Some((dir, trust)) = planted_parent() else {
+        return;
+    };
     let err = load_trusting(&dir.path().join("victim-no-config"), &trust).unwrap_err();
     assert!(
         matches!(err, fnug::config_file::ConfigError::UntrustedConfig { .. }),
@@ -1402,7 +1412,9 @@ fn untrusted_nearest_config_errors() {
 
 #[test]
 fn explicit_config_bypasses_trust() {
-    let (dir, trust) = planted_parent();
+    let Some((dir, trust)) = planted_parent() else {
+        return;
+    };
     let loaded = fnug::load(&LoadOptions {
         config: Some(dir.path().join(".fnug.yaml")),
         trust: fnug::trust::TrustPolicy {
@@ -1419,7 +1431,9 @@ fn explicit_config_bypasses_trust() {
 
 #[test]
 fn safe_directories_trust_everything_below() {
-    let (dir, trust) = planted_parent();
+    let Some((dir, trust)) = planted_parent() else {
+        return;
+    };
     let trust = fnug::trust::TrustPolicy {
         safe_dirs: vec![dir.path().to_path_buf()],
         ..trust
