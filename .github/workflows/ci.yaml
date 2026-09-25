@@ -5,6 +5,11 @@ on:
   push:
     branches:
       - main
+  # The release workflow runs this as its gate.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   rust:
@@ -19,6 +24,40 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo test --manifest-path vendor/vt100/Cargo.toml --locked
+
+  rust-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo test --manifest-path vendor/vt100/Cargo.toml --locked
+
+  vt100-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Require a fnug-vt100 version bump when the fork changes
+        run: |
+          if ! tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null); then
+            echo "No release tag yet"
+            exit 0
+          fi
+          if git diff --quiet "$tag" HEAD -- vendor/vt100/src vendor/vt100/Cargo.toml; then
+            echo "vendor/vt100 unchanged since $tag"
+            exit 0
+          fi
+          version() { python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'; }
+          old=$(git show "$tag:vendor/vt100/Cargo.toml" | version)
+          new=$(version < vendor/vt100/Cargo.toml)
+          if [ "$old" = "$new" ]; then
+            echo "::error file=vendor/vt100/Cargo.toml::vendor/vt100 changed since $tag, but fnug-vt100 is still $new. Bump its version."
+            exit 1
+          fi
+          echo "fnug-vt100 $old -> $new since $tag"
 
   python:
     runs-on: ubuntu-latest
@@ -41,7 +80,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v30
         with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          github_access_token: ${{ github.token }}
       - run: nix run nixpkgs#alejandra -- --check .
       - run: nix run nixpkgs#statix -- check .
       - run: nix run nixpkgs#deadnix -- --fail .
