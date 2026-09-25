@@ -1,9 +1,11 @@
 //! Command and group ids: defaults, uniqueness, `depends_on` resolution, and looking up a
 //! command by id or name.
 //!
-//! A node's *local id* is its explicit `id`, or its name with `/` replaced by `-`. A defaulted
-//! local id that another node shares becomes the `/`-joined path of local ids below the config
-//! root (e.g. `backend/test`), so ids are unique and the same on every load.
+//! A node's *local id* is its explicit `id`, or its name with `/` replaced by `-`. Ids are
+//! assigned per *scope*: the root config is one scope and each workspace package is another. A
+//! defaulted local id that another node in the scope shares becomes the `/`-joined path of local
+//! ids below the scope root (e.g. `backend/test`). Ids in a package are prefixed with the
+//! package's local id (e.g. `api/build`), so ids are unique and the same on every load.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -45,7 +47,9 @@ struct Node {
     name: String,
     local: String,
     explicit: bool,
-    /// Local ids from below the root down to this node; empty for the root.
+    /// Index into the scope namespaces. A package's root group belongs to the enclosing scope.
+    scope: usize,
+    /// Local ids from below the scope root down to this node; empty for the root.
     path: Vec<String>,
     /// Names from the root down to this node, joined with ` > `.
     entry: String,
@@ -53,6 +57,9 @@ struct Node {
     /// Index of the enclosing group.
     parent: Option<usize>,
     depends_on: Vec<String>,
+    /// Unique within the scope.
+    scoped: String,
+    /// Unique within the whole config.
     id: String,
 }
 
@@ -74,8 +81,9 @@ fn in_file(file: Option<&Path>) -> String {
 /// Validate names and explicit ids, give every group and command its final id, and rewrite
 /// each `depends_on` entry to the id of the command it refers to.
 ///
-/// A `depends_on` entry resolves to the first match of: an exact id; a path of local ids
-/// (`backend/test`); a unique local id among the command's siblings; a unique local id anywhere.
+/// A `depends_on` entry resolves to the first match of, within the command's scope: an id; a
+/// path of local ids (`backend/test`); a unique local id among the command's siblings; a unique
+/// local id anywhere. Failing those, it may name any command's full id (`api/build`).
 ///
 /// # Errors
 ///
@@ -83,9 +91,23 @@ fn in_file(file: Option<&Path>) -> String {
 /// `/`, an unknown or ambiguous `depends_on` entry, or a dependency cycle, and
 /// `ConfigError::DuplicateId` when two nodes end up with the same id.
 pub(crate) fn assign_ids(root: &mut ConfigCommandGroup) -> Result<(), ConfigError> {
-    let mut nodes = Vec::new();
-    collect(root, None, &[], None, None, &mut nodes)?;
-    assign(&mut nodes)?;
+    let mut tree = Tree {
+        nodes: Vec::new(),
+        namespaces: vec![None],
+    };
+    let place = Place {
+        parent: None,
+        scope: 0,
+        path: &[],
+        entry: None,
+        file: None,
+    };
+    tree.collect(root, &place)?;
+    let Tree {
+        mut nodes,
+        namespaces,
+    } = tree;
+    assign(&mut nodes, &namespaces)?;
     let edges = nodes
         .iter()
         .enumerate()
@@ -106,62 +128,93 @@ pub(crate) fn assign_ids(root: &mut ConfigCommandGroup) -> Result<(), ConfigErro
     Ok(())
 }
 
-fn collect(
-    group: &ConfigCommandGroup,
+/// Where a group is collected: its parent, and the scope and path it continues.
+struct Place<'a> {
     parent: Option<usize>,
-    parent_path: &[String],
-    parent_entry: Option<&str>,
-    file: Option<&Path>,
-    nodes: &mut Vec<Node>,
-) -> Result<(), ConfigError> {
-    let file = group.source.as_deref().or(file);
-    let entry = check_name(&group.name, Kind::Group, parent_entry, file)?;
-    let (local, explicit) = local_of(group.id.as_deref(), &group.name, Kind::Group, &entry, file)?;
-    let path = if parent.is_some() {
-        [parent_path, std::slice::from_ref(&local)].concat()
-    } else {
-        Vec::new()
-    };
-    let index = nodes.len();
-    nodes.push(Node {
-        kind: Kind::Group,
-        name: group.name.clone(),
-        local,
-        explicit,
-        path: path.clone(),
-        entry: entry.clone(),
-        file: file.map(Path::to_path_buf),
-        parent,
-        depends_on: Vec::new(),
-        id: String::new(),
-    });
+    scope: usize,
+    /// Local ids from below the scope root down to the parent.
+    path: &'a [String],
+    entry: Option<&'a str>,
+    file: Option<&'a Path>,
+}
 
-    for cmd in group.commands.iter().flatten() {
-        let cmd_entry = check_name(&cmd.name, Kind::Command, Some(&entry), file)?;
-        let (local, explicit) = local_of(
-            cmd.id.as_deref(),
-            &cmd.name,
-            Kind::Command,
-            &cmd_entry,
-            file,
-        )?;
-        nodes.push(Node {
-            kind: Kind::Command,
-            name: cmd.name.clone(),
-            path: [path.as_slice(), std::slice::from_ref(&local)].concat(),
+struct Tree {
+    nodes: Vec<Node>,
+    /// Id prefix of each scope; `None` for the root config.
+    namespaces: Vec<Option<String>>,
+}
+
+impl Tree {
+    fn collect(&mut self, group: &ConfigCommandGroup, place: &Place) -> Result<(), ConfigError> {
+        let file = group.source.as_deref().or(place.file);
+        let entry = check_name(&group.name, Kind::Group, place.entry, file)?;
+        let (local, explicit) =
+            local_of(group.id.as_deref(), &group.name, Kind::Group, &entry, file)?;
+        let path = if place.parent.is_some() {
+            [place.path, std::slice::from_ref(&local)].concat()
+        } else {
+            Vec::new()
+        };
+        let index = self.nodes.len();
+
+        // A package's contents form a new scope, prefixed with the package's local id.
+        let (scope, inner_path) = if group.source.is_some() && place.parent.is_some() {
+            self.namespaces.push(Some(local.clone()));
+            (self.namespaces.len() - 1, Vec::new())
+        } else {
+            (place.scope, path.clone())
+        };
+        self.nodes.push(Node {
+            kind: Kind::Group,
+            name: group.name.clone(),
             local,
             explicit,
-            entry: cmd_entry,
+            scope: place.scope,
+            path,
+            entry: entry.clone(),
             file: file.map(Path::to_path_buf),
-            parent: Some(index),
-            depends_on: cmd.depends_on.clone().unwrap_or_default(),
+            parent: place.parent,
+            depends_on: Vec::new(),
+            scoped: String::new(),
             id: String::new(),
         });
+
+        for cmd in group.commands.iter().flatten() {
+            let cmd_entry = check_name(&cmd.name, Kind::Command, Some(&entry), file)?;
+            let (local, explicit) = local_of(
+                cmd.id.as_deref(),
+                &cmd.name,
+                Kind::Command,
+                &cmd_entry,
+                file,
+            )?;
+            self.nodes.push(Node {
+                kind: Kind::Command,
+                name: cmd.name.clone(),
+                path: [inner_path.as_slice(), std::slice::from_ref(&local)].concat(),
+                local,
+                explicit,
+                scope,
+                entry: cmd_entry,
+                file: file.map(Path::to_path_buf),
+                parent: Some(index),
+                depends_on: cmd.depends_on.clone().unwrap_or_default(),
+                scoped: String::new(),
+                id: String::new(),
+            });
+        }
+        for child in group.children.iter().flatten() {
+            let child_place = Place {
+                parent: Some(index),
+                scope,
+                path: &inner_path,
+                entry: Some(&entry),
+                file,
+            };
+            self.collect(child, &child_place)?;
+        }
+        Ok(())
     }
-    for child in group.children.iter().flatten() {
-        collect(child, Some(index), &path, Some(&entry), file, nodes)?;
-    }
-    Ok(())
 }
 
 /// The node's display entry path, or an error if its name is empty.
@@ -212,23 +265,29 @@ fn local_of(
     Ok((id.to_string(), true))
 }
 
-fn assign(nodes: &mut [Node]) -> Result<(), ConfigError> {
-    let ids: Vec<String> = {
-        let mut counts: HashMap<&str, usize> = HashMap::new();
-        for node in nodes.iter() {
-            *counts.entry(&node.local).or_default() += 1;
-        }
-        nodes
-            .iter()
-            .map(|node| {
-                if node.explicit || node.path.is_empty() || counts[node.local.as_str()] == 1 {
-                    node.local.clone()
-                } else {
-                    node.path.join(SEPARATOR)
-                }
-            })
-            .collect()
-    };
+fn assign(nodes: &mut [Node], namespaces: &[Option<String>]) -> Result<(), ConfigError> {
+    let mut counts: HashMap<(usize, &str), usize> = HashMap::new();
+    for node in nodes.iter() {
+        *counts.entry((node.scope, &node.local)).or_default() += 1;
+    }
+    let scoped: Vec<String> = nodes
+        .iter()
+        .map(|node| {
+            if node.explicit || node.path.is_empty() || counts[&(node.scope, &*node.local)] == 1 {
+                node.local.clone()
+            } else {
+                node.path.join(SEPARATOR)
+            }
+        })
+        .collect();
+    let ids: Vec<String> = nodes
+        .iter()
+        .zip(&scoped)
+        .map(|(node, scoped)| match &namespaces[node.scope] {
+            Some(namespace) => format!("{namespace}{SEPARATOR}{scoped}"),
+            None => scoped.clone(),
+        })
+        .collect();
 
     let mut seen: HashMap<&str, usize> = HashMap::new();
     for (i, id) in ids.iter().enumerate() {
@@ -248,7 +307,8 @@ fn assign(nodes: &mut [Node]) -> Result<(), ConfigError> {
         }
         seen.insert(id, i);
     }
-    for (node, id) in nodes.iter_mut().zip(ids) {
+    for ((node, scoped), id) in nodes.iter_mut().zip(scoped).zip(ids) {
+        node.scoped = scoped;
         node.id = id;
     }
     Ok(())
@@ -261,15 +321,17 @@ fn resolve_dependency(nodes: &[Node], from: usize, reference: &str) -> Result<us
             .enumerate()
             .filter(|(_, node)| node.kind == Kind::Command)
     };
-    if let Some((j, _)) = commands().find(|(_, node)| node.id == reference) {
-        return Ok(j);
-    }
-
-    let parent = nodes[from].parent;
-    let steps: [&dyn Fn(&Node) -> bool; 3] = [
-        &|node| reference.contains(SEPARATOR) && node.path.join(SEPARATOR) == reference,
-        &|node| node.parent == parent && node.local == reference,
-        &|node| node.local == reference,
+    let (scope, parent) = (nodes[from].scope, nodes[from].parent);
+    let steps: [&dyn Fn(&Node) -> bool; 5] = [
+        &|node| node.scope == scope && node.scoped == reference,
+        &|node| {
+            node.scope == scope
+                && reference.contains(SEPARATOR)
+                && node.path.join(SEPARATOR) == reference
+        },
+        &|node| node.scope == scope && node.parent == parent && node.local == reference,
+        &|node| node.scope == scope && node.local == reference,
+        &|node| node.id == reference,
     ];
     for matches in steps {
         let found: Vec<usize> = commands()

@@ -282,6 +282,8 @@ workspace:
     - "./apps/*/"
 ```
 
+Each package behaves the same as when fnug runs inside it on its own: its `cwd` and `auto.path` are relative to the package directory, and it inherits no `cwd`, `auto` or `env` from the root config. Package ids are prefixed with the package's id, which defaults to its `name`, so a `build` command in a package named `api` has the id `api/build`. Inside a package, `depends_on: [build]` means the package's own `build`; reference another package's command by its full id (`api/build`) and a root command by its id.
+
 When run from a subdirectory that contains a `.fnug.yaml`, fnug automatically resolves upward to the nearest workspace root. Use `--no-workspace` to disable this behavior.
 
 ### Advanced example

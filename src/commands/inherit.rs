@@ -100,6 +100,15 @@ impl Inheritance {
         new_entry_path.push(entry.to_string());
         new_entry_path
     }
+
+    /// A fresh start for a workspace package: nothing is inherited, but errors keep naming
+    /// the package's place in the tree.
+    fn scope_root(entry_path: Vec<String>) -> Self {
+        Inheritance {
+            entry_path,
+            ..Default::default()
+        }
+    }
 }
 
 impl From<PathBuf> for Inheritance {
@@ -243,7 +252,11 @@ impl Inheritable for CommandGroup {
             command.inherit(inheritance)?;
         }
         for child in &mut self.children {
-            child.inherit(inheritance)?;
+            if child.source.is_some() {
+                child.inherit(&Inheritance::scope_root(inheritance.entry_path.clone()))?;
+            } else {
+                child.inherit(inheritance)?;
+            }
         }
         Ok(())
     }

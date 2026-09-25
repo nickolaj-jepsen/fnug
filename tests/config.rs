@@ -973,3 +973,205 @@ fn resolve_command_not_found_suggests() {
         other => panic!("{other:?}"),
     }
 }
+
+// ─── workspace packages ───
+
+/// A tempdir with `.fnug.yaml` = `root` and each `(dir, config)` package written below it.
+fn workspace(root: &str, packages: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), root);
+    for (pkg, content) in packages {
+        let pkg_dir = dir.path().join(pkg);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        write_config(&pkg_dir, content);
+    }
+    dir
+}
+
+fn load_workspace(dir: &Path) -> CommandGroup {
+    let path = dir.join(".fnug.yaml");
+    load_config(path.to_str(), false).unwrap().0
+}
+
+const GLOB_ROOT: &str = "name: root\nworkspace:\n  paths: [packages/*]\n";
+
+#[test]
+fn workspace_package_ids_namespaced() {
+    let pkg = |name: &str| {
+        format!(
+            r"
+name: {name}
+commands:
+  - name: build
+    id: build
+    cmd: 'true'
+  - name: test
+    id: test
+    cmd: 'true'
+    depends_on: [build]
+"
+        )
+    };
+    let dir = workspace(
+        &format!(
+            "{GLOB_ROOT}commands:\n  - name: all\n    cmd: 'true'\n    depends_on: [api/test, web/test]\n"
+        ),
+        &[("packages/api", &pkg("api")), ("packages/web", &pkg("web"))],
+    );
+    let config = load_workspace(dir.path());
+    assert_eq!(
+        ids(&config),
+        [
+            ("all".into(), "all".into()),
+            ("build".into(), "api/build".into()),
+            ("test".into(), "api/test".into()),
+            ("build".into(), "web/build".into()),
+            ("test".into(), "web/test".into()),
+        ]
+    );
+    assert_eq!(config.children[0].id, "api");
+    assert_eq!(config.children[0].commands[1].depends_on, ["api/build"]);
+    assert_eq!(config.children[1].commands[1].depends_on, ["web/build"]);
+    assert_eq!(config.commands[0].depends_on, ["api/test", "web/test"]);
+}
+
+#[test]
+fn workspace_package_depends_on_root_command() {
+    let dir = workspace(
+        &format!("{GLOB_ROOT}commands:\n  - name: codegen\n    cmd: 'true'\n"),
+        &[(
+            "packages/a",
+            "name: a\ncommands:\n  - name: build\n    cmd: 'true'\n    depends_on: [codegen]\n",
+        )],
+    );
+    let config = load_workspace(dir.path());
+    assert_eq!(command(&config, "build").id, "a/build");
+    assert_eq!(command(&config, "build").depends_on, ["codegen"]);
+}
+
+#[test]
+fn workspace_package_name_collision_names_both_files() {
+    let pkg = "name: app\ncommands:\n  - name: build\n    cmd: 'true'\n";
+    let dir = workspace(GLOB_ROOT, &[("packages/a", pkg), ("packages/b", pkg)]);
+    let path = dir.path().join(".fnug.yaml");
+    let err = load_config(path.to_str(), false).unwrap_err().to_string();
+    assert!(err.contains("'app'"), "{err}");
+    assert!(err.contains("packages/a/.fnug.yaml"), "{err}");
+    assert!(err.contains("packages/b/.fnug.yaml"), "{err}");
+}
+
+#[test]
+fn workspace_package_cwd_anchored() {
+    let dir = workspace(
+        GLOB_ROOT,
+        &[(
+            "packages/a",
+            "name: a\ncwd: src\ncommands:\n  - name: pwd\n    cmd: pwd\n",
+        )],
+    );
+    std::fs::create_dir(dir.path().join("packages/a/src")).unwrap();
+    let config = load_workspace(dir.path());
+    let root = dir.path().canonicalize().unwrap();
+    assert_eq!(command(&config, "pwd").cwd, root.join("packages/a/src"));
+}
+
+#[test]
+fn workspace_root_cwd_does_not_leak() {
+    let dir = workspace(
+        &format!("{GLOB_ROOT}cwd: app\n"),
+        &[(
+            "packages/a",
+            "name: a\ncommands:\n  - name: pwd\n    cmd: pwd\n",
+        )],
+    );
+    std::fs::create_dir(dir.path().join("app")).unwrap();
+    let config = load_workspace(dir.path());
+    let root = dir.path().canonicalize().unwrap();
+    assert_eq!(config.cwd, root.join("app"));
+    assert_eq!(command(&config, "pwd").cwd, root.join("packages/a"));
+}
+
+#[test]
+fn workspace_root_auto_does_not_leak() {
+    let dir = workspace(
+        &format!("{GLOB_ROOT}auto:\n  git: true\n  path: [src]\n  regex: ['\\.rs$']\n"),
+        &[(
+            "packages/a",
+            "name: a\ncommands:\n  - name: a-lint\n    cmd: 'true'\n    auto:\n      git: true\n",
+        )],
+    );
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/a/lib")).unwrap();
+    std::fs::write(dir.path().join("packages/a/lib/mod.py"), "").unwrap();
+    commit_all(&repo);
+
+    let config = load_workspace(dir.path());
+    let lint = command(&config, "a-lint");
+    let pkg = dir.path().canonicalize().unwrap().join("packages/a");
+    assert_eq!(lint.auto.paths(), [pkg]);
+    assert!(lint.auto.regexes().is_empty());
+    assert_eq!(config.children[0].auto.git, None);
+
+    std::fs::write(dir.path().join("packages/a/lib/mod.py"), "x = 1\n").unwrap();
+    let commands = config.all_commands().into_iter().cloned().collect();
+    let selected: Vec<String> = fnug::selectors::get_selected_commands(commands)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(selected, ["a-lint"]);
+}
+
+#[test]
+fn workspace_root_env_does_not_leak() {
+    let dir = workspace(
+        &format!(
+            "{GLOB_ROOT}env:\n  ROOT_ONLY: '1'\ncommands:\n  - name: root-cmd\n    cmd: 'true'\n"
+        ),
+        &[(
+            "packages/a",
+            "name: a\nenv:\n  PKG: '2'\ncommands:\n  - name: a-cmd\n    cmd: 'true'\n",
+        )],
+    );
+    let config = load_workspace(dir.path());
+    assert_eq!(command(&config, "root-cmd").env["ROOT_ONLY"], "1");
+    let pkg_env = &command(&config, "a-cmd").env;
+    assert!(!pkg_env.contains_key("ROOT_ONLY"), "{pkg_env:?}");
+    assert_eq!(pkg_env["PKG"], "2");
+}
+
+#[test]
+fn workspace_package_matches_standalone() {
+    let pkg = r"
+name: a
+cwd: src
+auto:
+  git: true
+env:
+  PKG: '1'
+commands:
+  - name: lint
+    cmd: 'true'
+    auto:
+      regex: ['\.py$']
+";
+    let dir = workspace(
+        &format!("{GLOB_ROOT}cwd: app\nauto:\n  watch: true\n  path: [x]\nenv:\n  ROOT: '1'\n"),
+        &[("packages/a", pkg)],
+    );
+    std::fs::create_dir(dir.path().join("app")).unwrap();
+    std::fs::create_dir(dir.path().join("packages/a/src")).unwrap();
+    let merged = load_workspace(dir.path());
+    let pkg_path = dir.path().join("packages/a/.fnug.yaml");
+    let (standalone, _) = load_config(pkg_path.to_str(), true).unwrap();
+
+    let (a, b) = (command(&merged, "lint"), command(&standalone, "lint"));
+    assert_eq!(a.cwd, b.cwd);
+    assert_eq!(a.env, b.env);
+    assert_eq!(a.auto.paths(), b.auto.paths());
+    assert_eq!(
+        (a.auto.git, a.auto.watch, a.auto.always, a.auto.check),
+        (b.auto.git, b.auto.watch, b.auto.always, b.auto.check)
+    );
+    assert_eq!(a.auto.regexes().len(), b.auto.regexes().len());
+}
