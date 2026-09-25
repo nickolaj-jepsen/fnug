@@ -1463,6 +1463,18 @@ fn unparseable_ancestor_skipped() {
 }
 
 #[test]
+fn workspace_root_outside_git_walks_filesystem() {
+    let dir = workspace(
+        "name: root\nworkspace: true\ncommands: []\n",
+        &[("pkg", &one_command("pkg"))],
+    );
+    if git2::Repository::discover(dir.path()).is_ok() {
+        return; // the tempdir is inside a git repo, so this is the git walk
+    }
+    assert_eq!(names(&load_workspace(dir.path())), ["pkg-cmd"]);
+}
+
+#[test]
 fn non_git_ancestor_workspace_skipped() {
     let dir = workspace(
         "name: root\nworkspace: true\ncommands:\n  - name: root-cmd\n    cmd: 'true'\n",

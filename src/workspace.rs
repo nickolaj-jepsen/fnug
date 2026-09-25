@@ -12,13 +12,27 @@ use crate::config_file::{
 };
 use crate::trust::TrustPolicy;
 
+/// How the directory walk treats a root that is not inside a git repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutsideGit {
+    /// Walk without gitignore filtering (the loaded config's own workspace).
+    Walk,
+    /// Fail, so a non-git parent directory never claims configs below it.
+    Fail,
+}
+
 /// Find the package configs `ws` selects below `root_dir`, as paths with canonical directories.
 ///
 /// # Errors
 ///
 /// Returns `ConfigError::Workspace` if `root_dir` can't be resolved, a glob pattern is invalid,
-/// or a directory walk fails (including when `root_dir` is not in a git repository).
-pub fn discover(ws: &WorkspaceConfig, root_dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
+/// or a directory walk fails (including when `root_dir` is not in a git repository and
+/// `outside_git` is [`OutsideGit::Fail`]).
+pub fn discover(
+    ws: &WorkspaceConfig,
+    root_dir: &Path,
+    outside_git: OutsideGit,
+) -> Result<Vec<PathBuf>, ConfigError> {
     const DEFAULT_MAX_DEPTH: usize = 5;
 
     let root_dir = root_dir.canonicalize().map_err(|e| {
@@ -26,13 +40,13 @@ pub fn discover(ws: &WorkspaceConfig, root_dir: &Path) -> Result<Vec<PathBuf>, C
     })?;
     let paths = match ws {
         WorkspaceConfig::Enabled(false) => return Ok(vec![]),
-        WorkspaceConfig::Enabled(true) => discover_git(&root_dir, DEFAULT_MAX_DEPTH)?,
+        WorkspaceConfig::Enabled(true) => discover_walk(&root_dir, DEFAULT_MAX_DEPTH, outside_git)?,
         WorkspaceConfig::Options(opts) => {
             let max_depth = opts.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
             if let Some(patterns) = &opts.paths {
                 discover_glob(&root_dir, patterns)?
             } else {
-                discover_git(&root_dir, max_depth)?
+                discover_walk(&root_dir, max_depth, outside_git)?
             }
         }
     };
@@ -68,16 +82,33 @@ pub fn merge(
 }
 
 /// Discover config files by walking the filesystem, skipping `.gitignore`'d paths.
-fn discover_git(root_dir: &Path, max_depth: usize) -> Result<Vec<PathBuf>, ConfigError> {
-    let repo = git2::Repository::discover(root_dir)
-        .map_err(|e| ConfigError::Workspace(format!("Failed to discover git repository: {e}")))?;
+fn discover_walk(
+    root_dir: &Path,
+    max_depth: usize,
+    outside_git: OutsideGit,
+) -> Result<Vec<PathBuf>, ConfigError> {
+    let repo = match git2::Repository::discover(root_dir) {
+        Ok(repo) => Some(repo),
+        Err(e) if outside_git == OutsideGit::Walk => {
+            debug!(
+                "No git repository at {} ({e}); walking without gitignore",
+                root_dir.display()
+            );
+            None
+        }
+        Err(e) => {
+            return Err(ConfigError::Workspace(format!(
+                "Failed to discover git repository: {e}"
+            )));
+        }
+    };
 
     let mut seen_dirs = HashSet::new();
     let mut results = Vec::new();
     walk_dir(
         root_dir,
         root_dir,
-        &repo,
+        repo.as_ref(),
         max_depth,
         0,
         &mut seen_dirs,
@@ -90,7 +121,7 @@ fn discover_git(root_dir: &Path, max_depth: usize) -> Result<Vec<PathBuf>, Confi
 fn walk_dir(
     dir: &Path,
     root_dir: &Path,
-    repo: &git2::Repository,
+    repo: Option<&git2::Repository>,
     max_depth: usize,
     current_depth: usize,
     seen_dirs: &mut HashSet<PathBuf>,
@@ -125,7 +156,7 @@ fn walk_dir(
         }
 
         // Skip gitignored directories
-        if repo.is_path_ignored(&path).unwrap_or(false) {
+        if repo.is_some_and(|repo| repo.is_path_ignored(&path).unwrap_or(false)) {
             continue;
         }
 
