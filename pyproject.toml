@@ -40,6 +40,7 @@ ignore = [
     "D",       # pydocstyle — docstring style enforcement
     "COM812",  # trailing comma (conflicts with formatter)
     "ISC001",  # single-line string concat (conflicts with formatter)
+    "CPY001",  # no per-file copyright headers
 ]
 
 [tool.ruff.lint.per-file-ignores]
