@@ -28,9 +28,12 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
-    #[error("Unable to find directory: {path:?} (entry: {entry:?})")]
+    #[error("Unable to find directory {path:?} ({field} of {entry:?}): {source}")]
     DirectoryNotFound {
+        /// Group/command path, e.g. `root > backend > lint`.
         entry: String,
+        /// The setting that names the directory, e.g. `cwd` or `auto.path[0]`.
+        field: String,
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -138,8 +141,8 @@ pub struct ConfigAuto {
     /// Select when a file under `path` matching `regex` has uncommitted git changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<bool>,
-    /// Path prefixes, relative to the working directory, that changed files must be under.
-    /// Defaults to the working directory; `[]` resets an inherited value to it.
+    /// Path prefixes, relative to the working directory, that changed files must be under. They
+    /// don't have to exist. Defaults to the working directory; `[]` resets an inherited value to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<Vec<PathBuf>>,
     /// Regular expressions matched against changed file paths; a file must match at least one.

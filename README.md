@@ -322,7 +322,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `git`    | bool              | Select when git-changed files match `path`/`regex`                      |
 | `watch`  | bool              | Select when watched files match `path`/`regex`                          |
 | `always` | bool              | Always selected regardless of changes                                   |
-| `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`)                        |
+| `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`); they may not exist yet |
 | `regex`  | list of strings   | Regex patterns to match against file paths (e.g. `"\\.rs$"`)           |
 | `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
 
