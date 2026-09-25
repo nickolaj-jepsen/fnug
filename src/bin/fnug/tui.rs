@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -60,6 +61,17 @@ fn start_file_watcher(
     })
 }
 
+/// Log line for a panic on `thread`, or `None` for the main thread, which runs the UI.
+///
+/// A worker thread's panic (caught or not) must not restore the terminal under a TUI that keeps
+/// running, so it is only logged.
+fn worker_panic_message(thread: Option<&str>, panic: &impl Display) -> Option<String> {
+    match thread {
+        Some("main") => None,
+        name => Some(format!("thread '{}' {panic}", name.unwrap_or("<unnamed>"))),
+    }
+}
+
 pub async fn run(
     config: CommandGroup,
     cwd: PathBuf,
@@ -72,12 +84,15 @@ pub async fn run(
     let log_file = log_file.as_ref().map(std::fs::File::create).transpose()?;
     fnug::logger::init(log_buffer.clone(), log_file, log_level);
 
-    // Install panic hook that restores the terminal before printing the panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-        original_hook(panic_info);
+        if let Some(message) = worker_panic_message(std::thread::current().name(), panic_info) {
+            error!("{message}");
+        } else {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            original_hook(panic_info);
+        }
     }));
 
     // Setup terminal
@@ -104,19 +119,20 @@ pub async fn run(
 
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app).await;
-
-    // Shutdown: kill processes, abort tasks
-    app.shutdown();
     file_watcher_handle.abort();
 
-    // Cleanup terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    // Give the terminal back before waiting for commands to stop
+    let restored = restore_terminal(&mut terminal);
+    let running = app
+        .processes
+        .values()
+        .filter(|p| p.terminal.is_running())
+        .count();
+    if running > 0 {
+        eprintln!("Stopping {running} running command(s)…");
+    }
+    app.shutdown().await;
+    restored?;
 
     if let Err(e) = result {
         error!("Application error: {e}");
@@ -125,6 +141,16 @@ pub async fn run(
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()
 }
 
 async fn run_event_loop(
@@ -222,4 +248,23 @@ async fn run_event_loop(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worker_panic_message;
+
+    #[test]
+    fn only_worker_panics_are_logged() {
+        let panic = "panicked at src/x.rs:1:1:\nboom";
+        assert_eq!(worker_panic_message(Some("main"), &panic), None);
+        assert_eq!(
+            worker_panic_message(Some("fnug-pty-parse"), &panic).as_deref(),
+            Some("thread 'fnug-pty-parse' panicked at src/x.rs:1:1:\nboom")
+        );
+        assert_eq!(
+            worker_panic_message(None, &panic).as_deref(),
+            Some("thread '<unnamed>' panicked at src/x.rs:1:1:\nboom")
+        );
+    }
 }

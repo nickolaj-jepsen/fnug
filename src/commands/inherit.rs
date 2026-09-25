@@ -1,10 +1,12 @@
 use crate::commands::auto::Auto;
 use crate::commands::command::Command;
+use crate::commands::env;
 use crate::commands::group::CommandGroup;
 use crate::config_file::ConfigError;
+use log::warn;
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[must_use]
 pub fn inherit_path(parent: &Path, child: PathBuf) -> PathBuf {
@@ -25,17 +27,73 @@ pub struct Inheritance {
     env: HashMap<String, String>,
 }
 
-impl Inheritance {
-    fn canonicalize(&mut self) -> Result<(), io::Error> {
-        if !self.cwd.as_os_str().is_empty() {
-            self.cwd = self.cwd.canonicalize()?;
+/// A configured path that could not be resolved.
+struct PathError {
+    field: String,
+    path: PathBuf,
+    source: io::Error,
+}
+
+/// Canonicalize `path`, allowing its tail to be missing: the deepest existing ancestor is
+/// canonicalized and the missing components are appended. This keeps missing paths comparable
+/// with canonical paths (e.g. git's realpath'd work tree).
+fn canonicalize_lenient(path: &Path) -> io::Result<PathBuf> {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(mut resolved) => {
+                // Missing components can't be symlinks, so `..` among them is resolved lexically.
+                for component in missing.into_iter().rev() {
+                    match component {
+                        Component::ParentDir => {
+                            resolved.pop();
+                        }
+                        Component::Normal(name) => resolved.push(name),
+                        _ => {}
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                match (existing.parent(), existing.components().next_back()) {
+                    (Some(parent), Some(last)) => {
+                        missing.push(last);
+                        existing = parent;
+                    }
+                    _ => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
         }
-        self.auto.path = self
-            .auto
-            .path
-            .iter()
-            .map(|p| inherit_path(&self.cwd, p.clone()).canonicalize())
-            .collect::<Result<Vec<PathBuf>, io::Error>>()?;
+    }
+}
+
+impl Inheritance {
+    /// Resolve `cwd`, which must exist, and `auto.path`, which may name missing paths.
+    fn canonicalize(&mut self) -> Result<(), PathError> {
+        if !self.cwd.as_os_str().is_empty() {
+            self.cwd = self.cwd.canonicalize().map_err(|source| PathError {
+                field: "cwd".to_string(),
+                path: self.cwd.clone(),
+                source,
+            })?;
+        }
+        if let Some(paths) = &self.auto.path {
+            let canonical = paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let path = inherit_path(&self.cwd, p.clone());
+                    canonicalize_lenient(&path).map_err(|source| PathError {
+                        field: format!("auto.path[{i}]"),
+                        path,
+                        source,
+                    })
+                })
+                .collect::<Result<Vec<PathBuf>, PathError>>()?;
+            self.auto.path = Some(canonical);
+        }
         Ok(())
     }
 
@@ -43,6 +101,15 @@ impl Inheritance {
         let mut new_entry_path = self.entry_path.clone();
         new_entry_path.push(entry.to_string());
         new_entry_path
+    }
+
+    /// A fresh start for a workspace package: nothing is inherited, but errors keep naming
+    /// the package's place in the tree.
+    fn scope_root(entry_path: Vec<String>) -> Self {
+        Inheritance {
+            entry_path,
+            ..Default::default()
+        }
     }
 }
 
@@ -75,15 +142,17 @@ pub trait Inheritable: Sized {
     ///
     /// # Errors
     ///
-    /// Returns `ConfigError::DirectoryNotFound` if a referenced directory does not exist.
+    /// Returns `ConfigError::DirectoryNotFound` if the working directory does not exist, or an
+    /// `auto.path` can't be resolved for another reason than being missing.
     fn inherit(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
         let mut inherited = self.calculate_inheritance(inheritance)?;
         inherited
             .canonicalize()
             .map_err(|e| ConfigError::DirectoryNotFound {
-                path: inherited.cwd.clone(),
-                entry: inherited.entry_path.join("."),
-                source: e,
+                entry: inherited.entry_path.join(" > "),
+                field: e.field,
+                path: e.path,
+                source: e.source,
             })?;
         self.apply_inheritance(&inherited)
     }
@@ -91,21 +160,11 @@ pub trait Inheritable: Sized {
 
 impl Auto {
     fn merge(&self, other: &Auto) -> Auto {
-        let path = if self.path.is_empty() {
-            other.path.clone()
-        } else {
-            self.path.clone()
-        };
-        let regex = if self.regex.is_empty() {
-            other.regex.clone()
-        } else {
-            self.regex.clone()
-        };
         Auto {
             watch: self.watch.or(other.watch),
             git: self.git.or(other.git),
-            path,
-            regex,
+            path: self.path.clone().or_else(|| other.path.clone()),
+            regex: self.regex.clone().or_else(|| other.regex.clone()),
             always: self.always.or(other.always),
             check: self.check.or(other.check),
         }
@@ -114,19 +173,10 @@ impl Auto {
 
 impl Inheritable for Auto {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        // Only inherit auto settings if the parent has watch, git, or always enabled
-        let mut auto = if inheritance.auto.watch.unwrap_or(false)
-            || inheritance.auto.git.unwrap_or(false)
-            || inheritance.auto.always.unwrap_or(false)
-        {
-            self.merge(&inheritance.auto)
-        } else {
-            self.clone()
-        };
+        let mut auto = self.merge(&inheritance.auto);
 
-        // If the path is empty, inherit the cwd from the parent
-        if auto.path.is_empty() {
-            auto.path.push(inheritance.cwd.clone());
+        if auto.paths().is_empty() {
+            auto.path = Some(vec![inheritance.cwd.clone()]);
         }
 
         Ok(Inheritance {
@@ -156,12 +206,30 @@ fn calculate_common_inheritance(
     env: &HashMap<String, String>,
     inheritance: &Inheritance,
 ) -> Inheritance {
+    let entry_path = inheritance.merge_entry_path(name);
+    // Values see the parent's env, then the process env, but not their siblings.
+    let lookup = |var: &str| {
+        inheritance
+            .env
+            .get(var)
+            .cloned()
+            .or_else(|| std::env::var_os(var).map(|value| value.to_string_lossy().into_owned()))
+    };
     let mut merged_env = inheritance.env.clone();
-    merged_env.extend(env.clone());
+    for (key, value) in env {
+        let (expanded, undefined) = env::expand(value, lookup);
+        for var in undefined {
+            warn!(
+                "{}: env {key} uses ${var}, which is not set, so it expands to nothing",
+                entry_path.join(" > ")
+            );
+        }
+        merged_env.insert(key.clone(), expanded);
+    }
     Inheritance {
         cwd: inherit_path(&inheritance.cwd, cwd.to_path_buf()),
         auto: auto.merge(&inheritance.auto),
-        entry_path: inheritance.merge_entry_path(name),
+        entry_path,
         env: merged_env,
     }
 }
@@ -204,7 +272,11 @@ impl Inheritable for CommandGroup {
             command.inherit(inheritance)?;
         }
         for child in &mut self.children {
-            child.inherit(inheritance)?;
+            if child.source.is_some() {
+                child.inherit(&Inheritance::scope_root(inheritance.entry_path.clone()))?;
+            } else {
+                child.inherit(inheritance)?;
+            }
         }
         Ok(())
     }
@@ -228,7 +300,7 @@ mod tests {
     #[test]
     fn test_basic_cwd_inheritance() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         create_dir_all(&root);
 
         let mut group = CommandGroup {
@@ -256,7 +328,7 @@ mod tests {
     #[test]
     fn test_relative_path_resolution() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 
@@ -285,14 +357,14 @@ mod tests {
     #[test]
     fn test_auto_settings_inheritance() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         create_dir_all(&root);
 
         let parent_auto = Auto {
             watch: Some(true),
             git: Some(true),
-            path: vec![],
-            regex: vec![],
+            path: None,
+            regex: None,
             always: Some(false),
             check: None,
         };
@@ -322,15 +394,15 @@ mod tests {
     #[test]
     fn test_nested_inheritance() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 
         let parent_auto = Auto {
             watch: Some(true),
             git: Some(true),
-            path: vec![root.clone()],
-            regex: vec![],
+            path: Some(vec![root.clone()]),
+            regex: None,
             always: Some(false),
             check: None,
         };
@@ -377,15 +449,15 @@ mod tests {
     #[test]
     fn test_no_base_path() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 
         let parent_auto = Auto {
             watch: Some(true),
             git: Some(true),
-            path: vec![],
-            regex: vec![],
+            path: None,
+            regex: None,
             always: Some(false),
             check: None,
         };
@@ -468,8 +540,8 @@ mod tests {
             auto: Auto {
                 watch: Some(true),
                 git: Some(true),
-                path: vec![],
-                regex: vec![],
+                path: None,
+                regex: None,
                 always: Some(false),
                 check: None,
             },
@@ -478,7 +550,7 @@ mod tests {
 
         command.inherit(&Inheritance::from(root.clone())).unwrap();
 
-        assert_eq!(command.auto.path, vec![root.join("subdir")]);
+        assert_eq!(command.auto.paths(), [root.join("subdir")]);
     }
 
     #[test]
@@ -494,8 +566,8 @@ mod tests {
             auto: Auto {
                 watch: Some(true),
                 git: Some(true),
-                path: vec![],
-                regex: vec![],
+                path: None,
+                regex: None,
                 always: Some(false),
                 check: None,
             },
@@ -509,8 +581,8 @@ mod tests {
                 auto: Auto {
                     watch: Some(true),
                     git: Some(true),
-                    path: vec![],
-                    regex: vec![],
+                    path: None,
+                    regex: None,
                     always: Some(false),
                     check: None,
                 },
@@ -521,7 +593,7 @@ mod tests {
         };
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
-        assert_eq!(group.commands[0].auto.path, vec![root.join("subdir")]);
+        assert_eq!(group.commands[0].auto.paths(), [root.join("subdir")]);
 
         let mut group = CommandGroup {
             id: "1".to_string(),
@@ -529,8 +601,8 @@ mod tests {
             auto: Auto {
                 watch: Some(true),
                 git: Some(true),
-                path: vec![root.clone()],
-                regex: vec![],
+                path: Some(vec![root.clone()]),
+                regex: None,
                 always: Some(false),
                 check: None,
             },
@@ -544,8 +616,8 @@ mod tests {
                 auto: Auto {
                     watch: Some(true),
                     git: Some(true),
-                    path: vec![],
-                    regex: vec![],
+                    path: None,
+                    regex: None,
                     always: Some(false),
                     check: None,
                 },
@@ -556,7 +628,7 @@ mod tests {
         };
 
         group.inherit(&Inheritance::from(root.clone())).unwrap();
-        assert_eq!(group.commands[0].auto.path, vec![root]);
+        assert_eq!(group.commands[0].auto.paths(), [root]);
     }
 
     #[test]

@@ -164,7 +164,10 @@ pub fn build_command_menu(selected: bool, status: &CommandStatus) -> Vec<Context
     let is_running = matches!(status, CommandStatus::Running);
     let has_finished = matches!(
         status,
-        CommandStatus::Success | CommandStatus::Failure(_) | CommandStatus::Error(_)
+        CommandStatus::Success
+            | CommandStatus::Failure(_)
+            | CommandStatus::Error(_)
+            | CommandStatus::Stopped
     );
     vec![
         if selected {

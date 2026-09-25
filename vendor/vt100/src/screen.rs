@@ -7,6 +7,8 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 
+const MAX_PENDING_REPLIES: usize = 4096;
+
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MouseProtocolMode {
@@ -80,6 +82,9 @@ pub struct Screen {
     visual_bell_count: usize,
 
     errors: usize,
+
+    last_printed: Option<char>,
+    replies: Vec<u8>,
 }
 
 impl Screen {
@@ -104,6 +109,9 @@ impl Screen {
             visual_bell_count: 0,
 
             errors: 0,
+
+            last_printed: None,
+            replies: Vec::new(),
         }
     }
 
@@ -116,6 +124,14 @@ impl Screen {
     pub(crate) fn clear(&mut self) {
         self.grid.clear();
         self.alternate_grid.clear();
+    }
+
+    pub(crate) fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.replies)
+    }
+
+    pub(crate) fn has_pending_replies(&self) -> bool {
+        !self.replies.is_empty()
     }
 
     /// Returns the current size of the terminal.
@@ -157,6 +173,21 @@ impl Screen {
 
     fn write_contents(&self, contents: &mut String) {
         self.grid().write_contents(contents);
+    }
+
+    /// Returns the text contents of the whole buffer: all of the scrollback
+    /// followed by the screen, whatever the current scrollback position.
+    ///
+    /// This will not include any formatting information, and will be in plain
+    /// text format. Wrapped rows are joined, including across the boundary
+    /// between scrollback and screen, and trailing empty rows are dropped.
+    /// The alternate screen has no scrollback, so while it is active this
+    /// returns only the screen.
+    #[must_use]
+    pub fn all_contents(&self) -> String {
+        let mut contents = String::new();
+        self.grid().write_all_contents(&mut contents);
+        contents
     }
 
     /// Returns the text contents of the terminal by row, restricted to the
@@ -479,9 +510,11 @@ impl Screen {
     /// * fgcolor
     /// * bgcolor
     /// * bold
+    /// * dim
     /// * italic
     /// * underline
     /// * inverse
+    /// * strikethrough
     ///
     /// This is not typically necessary, since `contents_formatted` will leave
     /// the current active drawing attributes in the correct state, but this
@@ -669,6 +702,13 @@ impl Screen {
         self.attrs.bold()
     }
 
+    /// Returns whether newly drawn text should be rendered with the dim
+    /// (faint) text attribute.
+    #[must_use]
+    pub fn dim(&self) -> bool {
+        self.attrs.dim()
+    }
+
     /// Returns whether newly drawn text should be rendered with the italic
     /// text attribute.
     #[must_use]
@@ -688,6 +728,13 @@ impl Screen {
     #[must_use]
     pub fn inverse(&self) -> bool {
         self.attrs.inverse()
+    }
+
+    /// Returns whether newly drawn text should be rendered with the
+    /// strikethrough text attribute.
+    #[must_use]
+    pub fn strikethrough(&self) -> bool {
+        self.attrs.strikethrough()
     }
 
     fn grid(&self) -> &crate::grid::Grid {
@@ -756,6 +803,16 @@ impl Screen {
         if self.mouse_protocol_encoding == encoding {
             self.mouse_protocol_encoding = MouseProtocolEncoding::default();
         }
+    }
+
+    fn push_reply(&mut self, reply: &[u8]) {
+        // drop whole replies once the host stops draining, so a program that
+        // floods queries can't grow memory or get a truncated sequence
+        if self.replies.len() + reply.len() > MAX_PENDING_REPLIES {
+            log::debug!("dropping reply, {} bytes pending", self.replies.len());
+            return;
+        }
+        self.replies.extend_from_slice(reply);
     }
 }
 
@@ -1063,6 +1120,7 @@ impl Screen {
         let audible_bell_count = self.audible_bell_count;
         let visual_bell_count = self.visual_bell_count;
         let errors = self.errors;
+        let replies = std::mem::take(&mut self.replies);
 
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
 
@@ -1071,6 +1129,7 @@ impl Screen {
         self.audible_bell_count = audible_bell_count;
         self.visual_bell_count = visual_bell_count;
         self.errors = errors;
+        self.replies = replies;
     }
 
     // ESC g
@@ -1183,6 +1242,31 @@ impl Screen {
     fn ech(&mut self, count: u16) {
         let attrs = self.attrs;
         self.grid_mut().erase_cells(count, attrs);
+    }
+
+    // CSI b
+    fn rep(&mut self, last_printed: Option<char>, count: u16) {
+        if let Some(c) = last_printed {
+            for _ in 0..count {
+                self.text(c);
+            }
+            self.last_printed = Some(c);
+        }
+    }
+
+    // CSI c
+    fn da1(&mut self, param: u16) {
+        if param == 0 {
+            // VT100 with advanced video option
+            self.push_reply(b"\x1b[?1;2c");
+        }
+    }
+
+    // CSI > c
+    fn da2(&mut self, param: u16) {
+        if param == 0 {
+            self.push_reply(b"\x1b[>0;0;0c");
+        }
     }
 
     // CSI d
@@ -1350,13 +1434,19 @@ impl Screen {
             match next_param!() {
                 &[0] => self.attrs = crate::attrs::Attrs::default(),
                 &[1] => self.attrs.set_bold(true),
+                &[2] => self.attrs.set_dim(true),
                 &[3] => self.attrs.set_italic(true),
                 &[4] => self.attrs.set_underline(true),
                 &[7] => self.attrs.set_inverse(true),
-                &[22] => self.attrs.set_bold(false),
+                &[9] => self.attrs.set_strikethrough(true),
+                &[22] => {
+                    self.attrs.set_bold(false);
+                    self.attrs.set_dim(false);
+                }
                 &[23] => self.attrs.set_italic(false),
                 &[24] => self.attrs.set_underline(false),
                 &[27] => self.attrs.set_inverse(false),
+                &[29] => self.attrs.set_strikethrough(false),
                 &[n] if (30..=37).contains(&n) => {
                     self.attrs.fgcolor = crate::attrs::Color::Idx(to_u8!(n) - 30);
                 }
@@ -1460,6 +1550,33 @@ impl Screen {
         }
     }
 
+    // CSI n
+    fn dsr(&mut self, mode: u16) {
+        match mode {
+            5 => self.push_reply(b"\x1b[0n"),
+            6 => {
+                let (row, col) = self.grid().cursor_report_position();
+                self.push_reply(format!("\x1b[{row};{col}R").as_bytes());
+            }
+            n => {
+                log::debug!("unhandled DSR mode: {n}");
+            }
+        }
+    }
+
+    // CSI ? n
+    fn decdsr(&mut self, mode: u16) {
+        match mode {
+            6 => {
+                let (row, col) = self.grid().cursor_report_position();
+                self.push_reply(format!("\x1b[?{row};{col}R").as_bytes());
+            }
+            n => {
+                log::debug!("unhandled DECDSR mode: {n}");
+            }
+        }
+    }
+
     // CSI r
     fn decstbm(&mut self, (top, bottom): (u16, u16)) {
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
@@ -1491,9 +1608,16 @@ impl vte::Perform for Screen {
             self.errors = self.errors.saturating_add(1);
         }
         self.text(c);
+        // combining characters leave the base character in place for REP
+        if c.width()
+            .map_or_else(|| u32::from(c) >= 256, |width| width > 0)
+        {
+            self.last_printed = Some(c);
+        }
     }
 
     fn execute(&mut self, b: u8) {
+        self.last_printed = None;
         match b {
             7 => self.bel(),
             8 => self.bs(),
@@ -1513,6 +1637,7 @@ impl vte::Perform for Screen {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, b: u8) {
+        self.last_printed = None;
         intermediates.first().map_or_else(
             || match b {
                 b'7' => self.decsc(),
@@ -1533,6 +1658,8 @@ impl vte::Perform for Screen {
     }
 
     fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, c: char) {
+        // only REP keeps the last printed character, and it puts it back
+        let last_printed = self.last_printed.take();
         match intermediates.first() {
             None => match c {
                 '@' => self.ich(canonicalize_params_1(params, 1)),
@@ -1550,10 +1677,13 @@ impl vte::Perform for Screen {
                 'S' => self.su(canonicalize_params_1(params, 1)),
                 'T' => self.sd(canonicalize_params_1(params, 1)),
                 'X' => self.ech(canonicalize_params_1(params, 1)),
+                'b' => self.rep(last_printed, canonicalize_params_1(params, 1)),
+                'c' => self.da1(canonicalize_params_1(params, 0)),
                 'd' => self.vpa(canonicalize_params_1(params, 1)),
                 'h' => self.sm(params),
                 'l' => self.rm(params),
                 'm' => self.sgr(params),
+                'n' => self.dsr(canonicalize_params_1(params, 0)),
                 'r' => self.decstbm(canonicalize_params_decstbm(params, self.grid().size())),
                 _ => {
                     if log::log_enabled!(log::Level::Debug) {
@@ -1566,12 +1696,14 @@ impl vte::Perform for Screen {
                 'K' => self.decsel(canonicalize_params_1(params, 0)),
                 'h' => self.decset(params),
                 'l' => self.decrst(params),
+                'n' => self.decdsr(canonicalize_params_1(params, 0)),
                 _ => {
                     if log::log_enabled!(log::Level::Debug) {
                         log::debug!("unhandled csi sequence: CSI ? {} {}", param_str(params), c);
                     }
                 }
             },
+            Some(b'>') if c == 'c' => self.da2(canonicalize_params_1(params, 0)),
             Some(i) => {
                 if log::log_enabled!(log::Level::Debug) {
                     log::debug!(
@@ -1586,6 +1718,7 @@ impl vte::Perform for Screen {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
+        self.last_printed = None;
         match (params.get(0), params.get(1)) {
             (Some(&b"0"), Some(s)) => self.osc0(s),
             (Some(&b"1"), Some(s)) => self.osc1(s),
@@ -1599,6 +1732,7 @@ impl vte::Perform for Screen {
     }
 
     fn hook(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
+        self.last_printed = None;
         if log::log_enabled!(log::Level::Debug) {
             intermediates.first().map_or_else(
                 || {

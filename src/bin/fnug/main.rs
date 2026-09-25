@@ -3,12 +3,14 @@ mod mcp;
 mod setup;
 mod tui;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use log::LevelFilter;
 
-use fnug::load_config;
+use fnug::{LoadOptions, LoadedConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "fnug", about = "TUI command runner based on git changes")]
@@ -29,6 +31,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_workspace: bool,
 
+    /// Resolve the config's paths and workspace against DIR instead of the config's directory
+    #[arg(long, global = true, value_name = "DIR")]
+    root: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -47,10 +53,25 @@ enum Commands {
     Setup(setup::SetupArgs),
     /// Start an MCP server over stdio
     Mcp,
+    /// Print the config file's JSON Schema
+    Schema,
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("Error: failed to start the async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(run());
+    // Don't wait for blocking tasks that can't be cancelled, such as an in-flight git scan
+    runtime.shutdown_timeout(Duration::from_millis(500));
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -59,21 +80,34 @@ fn main() -> ExitCode {
     }
 }
 
-#[tokio::main]
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    if let Some(Commands::Schema) = cli.command {
+        print!("{}", fnug::schema::config_schema_json());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let load_opts = LoadOptions {
+        config: cli.config.as_deref().map(PathBuf::from),
+        no_workspace: cli.no_workspace,
+        root_dir: cli.root.clone(),
+        trust: fnug::trust::TrustPolicy::from_env(),
+        ..LoadOptions::default()
+    };
+
     // Setup can work without a config file
     if let Some(Commands::Setup(ref args)) = cli.command {
-        let config_result = load_config(cli.config.as_deref(), cli.no_workspace);
-        let (config, cwd) = match config_result {
-            Ok((config, cwd)) => (Some(config), cwd),
+        let (config, cwd) = match fnug::load(&load_opts) {
+            Ok(loaded) => (Some(loaded.root), loaded.cwd),
             Err(_) => (None, std::env::current_dir()?),
         };
         return setup::run(args, &cwd, config.as_ref());
     }
 
-    let (config, cwd) = load_config(cli.config.as_deref(), cli.no_workspace)?;
+    let LoadedConfig {
+        root: config, cwd, ..
+    } = fnug::load(&load_opts)?;
 
     // Dispatch subcommands
     let check_result = match cli.command {
@@ -82,7 +116,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             check::CheckOutcome::OpenTui(result) => Some(result),
         },
         Some(Commands::Mcp) => return mcp::run(config, cwd).await,
-        Some(Commands::Setup(_)) => unreachable!(),
+        Some(Commands::Setup(_) | Commands::Schema) => unreachable!(),
         None => None,
     };
 

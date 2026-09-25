@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fnug.config import Auto, Command, CommandGroup, Config
+from fnug.config import Auto, Command, CommandGroup, Config, WorkspaceOptions
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -21,6 +22,7 @@ __all__ = [
     "Command",
     "CommandGroup",
     "Config",
+    "WorkspaceOptions",
     "check",
     "main",
     "run",
@@ -34,17 +36,8 @@ def _find_binary() -> str:
     Checks the Python scripts directory first (where maturin installs it),
     then falls back to PATH lookup.
     """
-    # Check in the scripts directory next to the Python executable
     if sys.executable:
-        bin_dir = Path(sys.executable).parent
-        for name in ("fnug", "fnug.exe"):
-            candidate = bin_dir / name
-            if candidate.is_file():
-                return str(candidate)
-
-    # Check in the Scripts directory on Windows
-    if sys.platform == "win32" and sys.prefix:
-        candidate = Path(sys.prefix) / "Scripts" / "fnug.exe"
+        candidate = Path(sys.executable).parent / "fnug"
         if candidate.is_file():
             return str(candidate)
 
@@ -70,40 +63,78 @@ def run(*args: str) -> subprocess.CompletedProcess[bytes]:
         The completed process result.
     """
     binary = _find_binary()
-    return subprocess.run(  # noqa: S603
-        [binary, *args],
-        env={**os.environ, "FNUG_PYTHON_WRAPPER": "1"},
-        check=False,
-    )
+    return subprocess.run([binary, *args], check=False)  # noqa: S603
 
 
 @contextmanager
 def _config_tempfile(config: Config) -> Iterator[str]:
-    """Write a Config to a temp file, yield its path, clean up after."""
-    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
-        mode="w",
-        suffix=".fnug.yaml",
-        delete=False,
-    )
+    """Write a Config to a temporary JSON file, yield its path, and delete it after.
+
+    fnug resolves the root ``cwd`` against the config file's directory, so the
+    written copy pins it to the caller's working directory: an unset ``cwd`` becomes
+    that directory and a relative one is resolved against it. ``config`` itself is
+    not modified.
+
+    Raises:
+        ValueError: If ``config.workspace`` is enabled. Workspace discovery would
+            search the temporary directory.
+    """
+    if config.workspace:
+        msg = (
+            "A Config with 'workspace' set can't be passed directly: fnug would "
+            "look for workspace packages next to its temporary file. Write it with "
+            "Config.write() and pass config_path instead."
+        )
+        raise ValueError(msg)
+    data = config.to_dict()
+    data["cwd"] = str((Path.cwd() / data.get("cwd", ".")).resolve())
+    # Outside the project, so the file itself never counts as a changed file.
+    fd, path = tempfile.mkstemp(suffix=".fnug.json")
     try:
-        tmp.write(config.to_yaml())
-        tmp.close()
-        yield tmp.name
+        with os.fdopen(fd, "w") as file:
+            json.dump(data, file)
+        yield path
     finally:
-        Path(tmp.name).unlink(missing_ok=True)
+        Path(path).unlink(missing_ok=True)
 
 
-def _resolve_config_args(
+def _global_args(
     config: Config | None,
     config_path: str | Path | None,
+    *,
+    log_file: str | Path | None,
+    no_workspace: bool,
 ) -> list[str]:
-    """Validate config arguments and return CLI args (without tempfile)."""
+    """Build the flags that go before any subcommand.
+
+    The ``--config`` flag for an in-memory ``config`` is not included; it is added
+    once the temporary file exists.
+
+    Raises:
+        ValueError: If both config and config_path are provided.
+    """
     if config is not None and config_path is not None:
         msg = "Cannot specify both 'config' and 'config_path'"
         raise ValueError(msg)
+    args: list[str] = []
     if config_path is not None:
-        return ["--config", str(config_path)]
-    return []
+        args.extend(["--config", str(config_path)])
+    if log_file is not None:
+        args.extend(["--log-file", str(log_file)])
+    if no_workspace:
+        args.append("--no-workspace")
+    return args
+
+
+def _run_with_config(
+    config: Config | None,
+    *args: str,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run fnug with ``args``, passing ``config`` through a temporary file if given."""
+    if config is None:
+        return run(*args)
+    with _config_tempfile(config) as path:
+        return run("--config", path, *args)
 
 
 def start(
@@ -111,28 +142,31 @@ def start(
     *,
     config_path: str | Path | None = None,
     log_file: str | Path | None = None,
+    no_workspace: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """Launch the fnug TUI.
 
     Args:
-        config: A Config dataclass to use (written to a temp file).
+        config: A Config to use. It is written to a temporary file, and its root
+            ``cwd`` is resolved against the caller's working directory (the default).
         config_path: Path to an existing .fnug.yaml file.
         log_file: Path for file logging.
+        no_workspace: Don't resolve upward to a parent workspace root.
 
     Returns:
         The completed process result.
 
     Raises:
-        ValueError: If both config and config_path are provided.
+        ValueError: If both config and config_path are provided, or config has
+            ``workspace`` enabled.
     """
-    args = _resolve_config_args(config, config_path)
-    if log_file is not None:
-        args.extend(["--log-file", str(log_file)])
-
-    if config is not None:
-        with _config_tempfile(config) as path:
-            return run("--config", path, *args)
-    return run(*args)
+    args = _global_args(
+        config,
+        config_path,
+        log_file=log_file,
+        no_workspace=no_workspace,
+    )
+    return _run_with_config(config, *args)
 
 
 def check(  # noqa: PLR0913
@@ -142,40 +176,46 @@ def check(  # noqa: PLR0913
     fail_fast: bool = False,
     no_tui: bool = False,
     mute_success: bool = False,
+    all_: bool = False,
+    no_workspace: bool = False,
     log_file: str | Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run fnug in headless check mode.
 
     Args:
-        config: A Config dataclass to use (written to a temp file).
+        config: A Config to use. It is written to a temporary file, and its root
+            ``cwd`` is resolved against the caller's working directory (the default).
         config_path: Path to an existing .fnug.yaml file.
         fail_fast: Stop on first failure.
         no_tui: Never prompt to open the TUI on failure.
         mute_success: Suppress output for commands that pass.
+        all_: Pass ``--all`` to ``fnug check``.
+        no_workspace: Don't resolve upward to a parent workspace root.
         log_file: Path for file logging.
 
     Returns:
         The completed process result.
 
     Raises:
-        ValueError: If both config and config_path are provided.
+        ValueError: If both config and config_path are provided, or config has
+            ``workspace`` enabled.
     """
-    args = _resolve_config_args(config, config_path)
-    if log_file is not None:
-        args.extend(["--log-file", str(log_file)])
-
-    check_args: list[str] = []
+    args = _global_args(
+        config,
+        config_path,
+        log_file=log_file,
+        no_workspace=no_workspace,
+    )
+    args.append("check")
     if fail_fast:
-        check_args.append("--fail-fast")
+        args.append("--fail-fast")
     if no_tui:
-        check_args.append("--no-tui")
+        args.append("--no-tui")
     if mute_success:
-        check_args.append("--mute-success")
-
-    if config is not None:
-        with _config_tempfile(config) as path:
-            return run("--config", path, *args, "check", *check_args)
-    return run(*args, "check", *check_args)
+        args.append("--mute-success")
+    if all_:
+        args.append("--all")
+    return _run_with_config(config, *args)
 
 
 def main() -> None:

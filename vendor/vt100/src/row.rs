@@ -75,6 +75,28 @@ impl Row {
         self.wrapped = false;
     }
 
+    /// Drops the trailing default cells of a row that is moving into
+    /// scrollback, so scrollback doesn't hold every row at full width.
+    ///
+    /// Wrapped rows are left alone, and at least one cell is always kept
+    /// because the formatted writers read the first cell of a row.
+    pub fn trim_for_scrollback(&mut self) {
+        if self.wrapped {
+            return;
+        }
+        let default_cell = crate::cell::Cell::default();
+        let keep = self
+            .cells
+            .iter()
+            .rposition(|cell| cell != &default_cell)
+            .map_or(1, |last| last + 1);
+        if keep < self.cells.len() {
+            // truncate + shrink_to_fit leaves heap holes that the next
+            // full-width row can't reuse, so copy into a fresh allocation
+            self.cells = self.cells[..keep].to_vec();
+        }
+    }
+
     pub fn wrap(&mut self, wrap: bool) {
         self.wrapped = wrap;
     }
@@ -159,7 +181,8 @@ impl Row {
         });
         let mut prev_attrs = prev_attrs.unwrap_or_default();
 
-        let first_cell = &self.cells[usize::from(start)];
+        // trimmed scrollback rows can end before `start`
+        let first_cell = self.cells.get(usize::from(start)).unwrap_or(&default_cell);
         if wrapping && first_cell == &default_cell {
             let default_attrs = default_cell.attrs();
             if &prev_attrs != default_attrs {
@@ -295,9 +318,12 @@ impl Row {
         mut prev_attrs: crate::attrs::Attrs,
     ) -> (crate::grid::Pos, crate::attrs::Attrs) {
         let mut prev_was_wide = false;
+        let default_cell = crate::cell::Cell::default();
 
-        let first_cell = &self.cells[usize::from(start)];
-        let prev_first_cell = &prev.cells[usize::from(start)];
+        // rows can be shorter than the screen (trimmed scrollback rows, or
+        // rows from before a resize), so missing cells read as default
+        let first_cell = self.cells.get(usize::from(start)).unwrap_or(&default_cell);
+        let prev_first_cell = prev.cells.get(usize::from(start)).unwrap_or(&default_cell);
         if wrapping
             && !prev_wrapping
             && first_cell == prev_first_cell
@@ -330,13 +356,10 @@ impl Row {
         }
 
         let mut erase: Option<(u16, &crate::attrs::Attrs)> = None;
-        for (col, (cell, prev_cell)) in self
-            .cells()
-            .zip(prev.cells())
-            .enumerate()
-            .skip(usize::from(start))
-            .take(usize::from(width))
-        {
+        let len = self.cells.len().max(prev.cells.len());
+        for col in (usize::from(start)..len).take(usize::from(width)) {
+            let cell = self.cells.get(col).unwrap_or(&default_cell);
+            let prev_cell = prev.cells.get(col).unwrap_or(&default_cell);
             if prev_was_wide {
                 prev_was_wide = false;
                 continue;

@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.16.0] - Unreleased
+
+fnug-vt100 0.16 is not API-compatible with upstream vt100 0.16. It keeps the
+0.15 API and adds to it; upstream 0.16's `Callbacks` trait, generic `Parser`
+and `screen_mut` are not part of this fork.
+
+### Added
+
+* `Screen::all_contents` to get the text of the whole buffer, scrollback
+  included, whatever the current scrollback position
+* `Cell::chars` to iterate over a cell's characters (a base character followed
+  by any combining characters) without allocating
+* Dim (`SGR 2`) and strikethrough (`SGR 9`) attributes, read with `Cell::dim`,
+  `Cell::strikethrough`, `Screen::dim` and `Screen::strikethrough`. `SGR 22`
+  now clears dim as well as bold, `SGR 29` clears strikethrough, and the
+  formatted output reproduces both attributes
+* `REP` (`CSI Ps b`), which repeats the last printed character
+* Replies to device status and device attributes queries (`CSI 5 n`,
+  `CSI 6 n`, `CSI ? 6 n`, `CSI c` and `CSI > c`). They are queued for the host
+  to collect with `Parser::take_replies` and write back to the program;
+  `Parser::has_pending_replies` says whether any are waiting. At most 4096
+  bytes are kept, and replies that don't fit are dropped
+
+### Changed
+
+* Shrinking the screen now scrolls the rows above the cursor into scrollback,
+  as xterm does, instead of cutting off the rows at the bottom. The newest
+  output and the cursor's row stay on screen, and the saved cursor moves with
+  its row. While a scroll region is set, the rows at the bottom are still cut
+  off
+* Rows moving into scrollback drop their trailing blank cells, which makes
+  scrollback of mostly short lines about 15 times smaller at 200 columns.
+  `Screen::cell` returns `None` for columns past the end of such a row
+
+### Fixed
+
+* `contents_formatted`, `rows_formatted`, `contents_diff` and `rows_diff` no
+  longer panic or leave stale cells behind when a row is shorter than the
+  screen, as trimmed scrollback rows and rows kept from before a resize can be
+
 ## [0.15.3] - Unreleased
 
 First changelog entry for the `fnug-vt100` fork. It also records the fork's

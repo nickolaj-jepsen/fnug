@@ -70,6 +70,17 @@ impl Grid {
             }
         }
 
+        // like xterm, scroll the rows above the cursor into scrollback
+        // instead of cutting off the rows at the bottom
+        if !self.scroll_region_active() {
+            let excess = (self.pos.row + 1).saturating_sub(size.rows);
+            if excess > 0 {
+                self.scroll_up(excess);
+                self.pos.row -= excess;
+                self.saved_pos.row = self.saved_pos.row.saturating_sub(excess);
+            }
+        }
+
         if self.scroll_bottom == self.size.rows - 1 {
             self.scroll_bottom = size.rows - 1;
         }
@@ -101,6 +112,18 @@ impl Grid {
 
     pub fn pos(&self) -> Pos {
         self.pos
+    }
+
+    /// The cursor position as a cursor position report gives it: 1-based,
+    /// relative to the scroll region in origin mode, and on the last column
+    /// while a wrap is pending.
+    pub fn cursor_report_position(&self) -> (u16, u16) {
+        let row = if self.origin_mode {
+            self.pos.row.saturating_sub(self.scroll_top)
+        } else {
+            self.pos.row
+        };
+        (row + 1, self.pos.col.min(self.size.cols - 1) + 1)
     }
 
     pub fn set_pos(&mut self, mut pos: Pos) {
@@ -193,18 +216,16 @@ impl Grid {
     }
 
     pub fn write_contents(&self, contents: &mut String) {
-        let mut wrapping = false;
-        for row in self.visible_rows() {
-            row.write_contents(contents, 0, self.size.cols, wrapping);
-            if !row.wrapped() {
-                contents.push('\n');
-            }
-            wrapping = row.wrapped();
-        }
+        write_rows_contents(contents, self.visible_rows(), self.size.cols);
+    }
 
-        while contents.ends_with('\n') {
-            contents.truncate(contents.len() - 1);
-        }
+    pub fn write_all_contents(&self, contents: &mut String) {
+        // scrollback rows from before a resize can be wider than the screen
+        write_rows_contents(
+            contents,
+            self.scrollback.iter().chain(self.rows.iter()),
+            u16::MAX,
+        );
     }
 
     pub fn write_contents_formatted(&self, contents: &mut Vec<u8>) -> crate::attrs::Attrs {
@@ -520,8 +541,9 @@ impl Grid {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
-            let removed = self.rows.remove(usize::from(self.scroll_top));
+            let mut removed = self.rows.remove(usize::from(self.scroll_top));
             if self.scrollback_len > 0 && !self.scroll_region_active() {
+                removed.trim_for_scrollback();
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -687,6 +709,25 @@ impl Grid {
         if self.pos.col > self.size.cols - 1 {
             self.pos.col = self.size.cols - 1;
         }
+    }
+}
+
+fn write_rows_contents<'a>(
+    contents: &mut String,
+    rows: impl Iterator<Item = &'a crate::row::Row>,
+    width: u16,
+) {
+    let mut wrapping = false;
+    for row in rows {
+        row.write_contents(contents, 0, width, wrapping);
+        if !row.wrapped() {
+            contents.push('\n');
+        }
+        wrapping = row.wrapped();
+    }
+
+    while contents.ends_with('\n') {
+        contents.truncate(contents.len() - 1);
     }
 }
 

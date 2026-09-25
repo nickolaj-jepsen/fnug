@@ -23,6 +23,8 @@ const TEXT_MODE_BOLD: u8 = 0b0000_0001;
 const TEXT_MODE_ITALIC: u8 = 0b0000_0010;
 const TEXT_MODE_UNDERLINE: u8 = 0b0000_0100;
 const TEXT_MODE_INVERSE: u8 = 0b0000_1000;
+const TEXT_MODE_DIM: u8 = 0b0001_0000;
+const TEXT_MODE_STRIKETHROUGH: u8 = 0b0010_0000;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Attrs {
@@ -80,6 +82,30 @@ impl Attrs {
         }
     }
 
+    pub fn dim(&self) -> bool {
+        self.mode & TEXT_MODE_DIM != 0
+    }
+
+    pub fn set_dim(&mut self, dim: bool) {
+        if dim {
+            self.mode |= TEXT_MODE_DIM;
+        } else {
+            self.mode &= !TEXT_MODE_DIM;
+        }
+    }
+
+    pub fn strikethrough(&self) -> bool {
+        self.mode & TEXT_MODE_STRIKETHROUGH != 0
+    }
+
+    pub fn set_strikethrough(&mut self, strikethrough: bool) {
+        if strikethrough {
+            self.mode |= TEXT_MODE_STRIKETHROUGH;
+        } else {
+            self.mode &= !TEXT_MODE_STRIKETHROUGH;
+        }
+    }
+
     pub fn write_escape_code_diff(
         &self,
         contents: &mut Vec<u8>,
@@ -102,10 +128,21 @@ impl Attrs {
         } else {
             attrs.bgcolor(self.bgcolor)
         };
-        let attrs = if self.bold() == other.bold() {
-            attrs
+        // SGR 22 turns off both bold and dim, so turning either one off has
+        // to restate the other
+        let attrs = if (other.bold() && !self.bold()) || (other.dim() && !self.dim()) {
+            attrs.bold(self.bold()).dim(self.dim())
         } else {
-            attrs.bold(self.bold())
+            let attrs = if self.bold() && !other.bold() {
+                attrs.bold(true)
+            } else {
+                attrs
+            };
+            if self.dim() && !other.dim() {
+                attrs.dim(true)
+            } else {
+                attrs
+            }
         };
         let attrs = if self.italic() == other.italic() {
             attrs
@@ -121,6 +158,11 @@ impl Attrs {
             attrs
         } else {
             attrs.inverse(self.inverse())
+        };
+        let attrs = if self.strikethrough() == other.strikethrough() {
+            attrs
+        } else {
+            attrs.strikethrough(self.strikethrough())
         };
 
         attrs.write_buf(contents);

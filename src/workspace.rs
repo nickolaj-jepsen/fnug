@@ -10,54 +10,105 @@ use log::{debug, warn};
 use crate::config_file::{
     Config, ConfigCommandGroup, ConfigError, WorkspaceConfig, find_config_in_dir,
 };
+use crate::trust::TrustPolicy;
 
-/// Discover workspace configs and append them as children of the root config group.
+/// How the directory walk treats a root that is not inside a git repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutsideGit {
+    /// Walk without gitignore filtering (the loaded config's own workspace).
+    Walk,
+    /// Fail, so a non-git parent directory never claims configs below it.
+    Fail,
+}
+
+/// Find the package configs `ws` selects below `root_dir`, as paths with canonical directories.
 ///
 /// # Errors
 ///
-/// Returns `ConfigError` if discovery fails or a sub-config cannot be parsed.
-pub fn discover_and_merge(
+/// Returns `ConfigError::Workspace` if `root_dir` can't be resolved, a glob pattern is invalid,
+/// or a directory walk fails (including when `root_dir` is not in a git repository and
+/// `outside_git` is [`OutsideGit::Fail`]).
+pub fn discover(
     ws: &WorkspaceConfig,
     root_dir: &Path,
-    root: &mut ConfigCommandGroup,
+    outside_git: OutsideGit,
 ) -> Result<Vec<PathBuf>, ConfigError> {
     const DEFAULT_MAX_DEPTH: usize = 5;
 
+    let root_dir = root_dir.canonicalize().map_err(|e| {
+        ConfigError::Workspace(format!("Failed to resolve {}: {e}", root_dir.display()))
+    })?;
     let paths = match ws {
         WorkspaceConfig::Enabled(false) => return Ok(vec![]),
-        WorkspaceConfig::Enabled(true) => discover_git(root_dir, DEFAULT_MAX_DEPTH)?,
+        WorkspaceConfig::Enabled(true) => discover_walk(&root_dir, DEFAULT_MAX_DEPTH, outside_git)?,
         WorkspaceConfig::Options(opts) => {
             let max_depth = opts.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
             if let Some(patterns) = &opts.paths {
-                discover_glob(root_dir, patterns)?
+                discover_glob(&root_dir, patterns)?
             } else {
-                discover_git(root_dir, max_depth)?
+                discover_walk(&root_dir, max_depth, outside_git)?
             }
         }
     };
-
     debug!("Discovered {} workspace config(s)", paths.len());
-
-    let children = root.children.get_or_insert_with(Vec::new);
-    for path in &paths {
-        let sub = load_sub_config(path, root_dir)?;
-        children.push(sub);
-    }
-
     Ok(paths)
 }
 
+/// Load each package config that `trust` accepts and append it to `root`'s children. Refused
+/// packages are skipped with a warning. Returns the loaded paths.
+///
+/// # Errors
+///
+/// Returns `ConfigError` if a package config can't be read or parsed.
+pub fn merge(
+    root: &mut ConfigCommandGroup,
+    packages: &[PathBuf],
+    trust: &TrustPolicy,
+) -> Result<Vec<PathBuf>, ConfigError> {
+    let children = root.children.get_or_insert_with(Vec::new);
+    let mut loaded = Vec::new();
+    for path in packages {
+        if let Err(untrusted) = trust.check(path) {
+            warn!(
+                "Skipping workspace package: {}",
+                ConfigError::from(untrusted)
+            );
+            continue;
+        }
+        children.push(load_sub_config(path)?);
+        loaded.push(path.clone());
+    }
+    Ok(loaded)
+}
+
 /// Discover config files by walking the filesystem, skipping `.gitignore`'d paths.
-fn discover_git(root_dir: &Path, max_depth: usize) -> Result<Vec<PathBuf>, ConfigError> {
-    let repo = git2::Repository::discover(root_dir)
-        .map_err(|e| ConfigError::Workspace(format!("Failed to discover git repository: {e}")))?;
+fn discover_walk(
+    root_dir: &Path,
+    max_depth: usize,
+    outside_git: OutsideGit,
+) -> Result<Vec<PathBuf>, ConfigError> {
+    let repo = match git2::Repository::discover(root_dir) {
+        Ok(repo) => Some(repo),
+        Err(e) if outside_git == OutsideGit::Walk => {
+            debug!(
+                "No git repository at {} ({e}); walking without gitignore",
+                root_dir.display()
+            );
+            None
+        }
+        Err(e) => {
+            return Err(ConfigError::Workspace(format!(
+                "Failed to discover git repository: {e}"
+            )));
+        }
+    };
 
     let mut seen_dirs = HashSet::new();
     let mut results = Vec::new();
     walk_dir(
         root_dir,
         root_dir,
-        &repo,
+        repo.as_ref(),
         max_depth,
         0,
         &mut seen_dirs,
@@ -70,7 +121,7 @@ fn discover_git(root_dir: &Path, max_depth: usize) -> Result<Vec<PathBuf>, Confi
 fn walk_dir(
     dir: &Path,
     root_dir: &Path,
-    repo: &git2::Repository,
+    repo: Option<&git2::Repository>,
     max_depth: usize,
     current_depth: usize,
     seen_dirs: &mut HashSet<PathBuf>,
@@ -105,7 +156,7 @@ fn walk_dir(
         }
 
         // Skip gitignored directories
-        if repo.is_path_ignored(&path).unwrap_or(false) {
+        if repo.is_some_and(|repo| repo.is_path_ignored(&path).unwrap_or(false)) {
             continue;
         }
 
@@ -115,7 +166,8 @@ fn walk_dir(
         }
 
         if let Some(config_path) = find_config_in_dir(&path) {
-            if seen_dirs.insert(path.clone()) {
+            let config_path = canonical_config(&config_path)?;
+            if seen_dirs.insert(config_path.clone()) {
                 debug!("Found workspace config: {}", config_path.display());
                 results.push(config_path);
             }
@@ -154,6 +206,9 @@ fn discover_glob(root_dir: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, C
             if !dir.is_dir() {
                 continue;
             }
+            let dir = dir.canonicalize().map_err(|e| {
+                ConfigError::Workspace(format!("Failed to resolve {}: {e}", dir.display()))
+            })?;
 
             // Skip the root directory itself
             if dir == root_dir {
@@ -172,11 +227,29 @@ fn discover_glob(root_dir: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, C
     Ok(results)
 }
 
-/// Load a sub-config file and prepare it as a `ConfigCommandGroup`.
-fn load_sub_config(config_path: &Path, root_dir: &Path) -> Result<ConfigCommandGroup, ConfigError> {
-    let config = Config::from_file(config_path)?;
+/// `config_path` with its directory canonicalized, so it compares equal to other spellings.
+fn canonical_config(config_path: &Path) -> Result<PathBuf, ConfigError> {
+    let resolve = || {
+        Some(
+            config_path
+                .parent()?
+                .canonicalize()
+                .ok()?
+                .join(config_path.file_name()?),
+        )
+    };
+    resolve().ok_or_else(|| {
+        ConfigError::Workspace(format!("Failed to resolve {}", config_path.display()))
+    })
+}
 
-    if config.workspace.is_some() {
+/// Load a sub-config file and prepare it as a `ConfigCommandGroup`.
+fn load_sub_config(config_path: &Path) -> Result<ConfigCommandGroup, ConfigError> {
+    let config = Config::from_file(config_path)?;
+    crate::check_version(config.fnug_version.as_deref(), config_path);
+    let (mut group, workspace) = config.into_root();
+
+    if workspace.is_some() {
         warn!(
             "Workspace config '{}' has a 'workspace' field which will be ignored (no recursive discovery)",
             config_path.display()
@@ -185,15 +258,19 @@ fn load_sub_config(config_path: &Path, root_dir: &Path) -> Result<ConfigCommandG
 
     let sub_dir = config_path
         .parent()
-        .ok_or_else(|| ConfigError::Workspace("Config path has no parent directory".into()))?;
+        .ok_or_else(|| ConfigError::Workspace("Config path has no parent directory".into()))?
+        .canonicalize()
+        .map_err(|source| ConfigError::Io {
+            path: config_path.to_path_buf(),
+            source,
+        })?;
 
-    let mut group = config.root;
-
-    // Set cwd to the sub-config's directory relative to root, if not already set
-    if group.cwd.is_none() {
-        let relative = sub_dir.strip_prefix(root_dir).unwrap_or(sub_dir);
-        group.cwd = Some(relative.to_path_buf());
-    }
+    // An absolute cwd, so the package resolves paths exactly as it does standalone.
+    group.cwd = Some(match group.cwd {
+        Some(cwd) => sub_dir.join(cwd),
+        None => sub_dir,
+    });
+    group.source = Some(config_path.to_path_buf());
 
     Ok(group)
 }

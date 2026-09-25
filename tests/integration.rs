@@ -35,7 +35,7 @@ commands:
     assert_eq!(config.name, "root");
     assert_eq!(config.commands.len(), 1);
     assert_eq!(config.commands[0].name, "test");
-    assert_eq!(cwd, dir.path());
+    assert_eq!(cwd, dir.path().canonicalize().unwrap());
 }
 
 #[test]
@@ -89,7 +89,7 @@ children:
     let result = load_config(Some(&path), false);
     assert!(result.is_err());
     match result.unwrap_err() {
-        ConfigError::DuplicateId(id) => assert_eq!(id, "dup"),
+        ConfigError::DuplicateId { id, .. } => assert_eq!(id, "dup"),
         other => panic!("Expected DuplicateId, got: {other:?}"),
     }
 }
@@ -723,11 +723,14 @@ commands:
     let (config, _) = load_config(Some(&path), false).unwrap();
 
     let sub_group = &config.children[0];
-    assert_eq!(sub_group.cwd, dir.path().join("packages/foo"));
+    assert_eq!(
+        sub_group.cwd,
+        dir.path().canonicalize().unwrap().join("packages/foo")
+    );
 }
 
 #[test]
-fn test_workspace_duplicate_ids_rejected() {
+fn test_workspace_package_ids_namespaced() {
     let dir = tempfile::tempdir().unwrap();
     let root_config = r#"
 fnug_version: "0.0.27"
@@ -755,12 +758,13 @@ commands:
     std::fs::write(dir.path().join("packages/foo/.fnug.yaml"), sub_config).unwrap();
 
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
-    let result = load_config(Some(&path), false);
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        ConfigError::DuplicateId(id) => assert_eq!(id, "dup-id"),
-        other => panic!("Expected DuplicateId, got: {other:?}"),
-    }
+    let (config, _) = load_config(Some(&path), false).unwrap();
+    let ids: Vec<&str> = config
+        .all_commands()
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(ids, ["dup-id", "sub/dup-id"]);
 }
 
 #[test]

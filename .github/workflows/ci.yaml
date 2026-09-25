@@ -5,20 +5,78 @@ on:
   push:
     branches:
       - main
+  # The release workflow runs this as its gate.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # No toolchain input: rust-toolchain.toml picks the version and components.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+          rustflags: ""
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo test --manifest-path vendor/vt100/Cargo.toml --locked
+
+  rust-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: cargo test
+      - run: cargo test --manifest-path vendor/vt100/Cargo.toml --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.88" # keep in sync with rust-version in Cargo.toml
+          rustflags: ""
+      - run: cargo +1.88 check --locked --all-targets
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  vt100-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Require a fnug-vt100 version bump when the fork changes
+        run: |
+          if ! tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null); then
+            echo "No release tag yet"
+            exit 0
+          fi
+          if git diff --quiet "$tag" HEAD -- vendor/vt100/src vendor/vt100/Cargo.toml; then
+            echo "vendor/vt100 unchanged since $tag"
+            exit 0
+          fi
+          version() { python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'; }
+          old=$(git show "$tag:vendor/vt100/Cargo.toml" | version)
+          new=$(version < vendor/vt100/Cargo.toml)
+          if [ "$old" = "$new" ]; then
+            echo "::error file=vendor/vt100/Cargo.toml::vendor/vt100 changed since $tag, but fnug-vt100 is still $new. Bump its version."
+            exit 1
+          fi
+          echo "fnug-vt100 $old -> $new since $tag"
 
   python:
     runs-on: ubuntu-latest
@@ -35,13 +93,29 @@ jobs:
           args: format --check
           src: python/
 
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: astral-sh/setup-uv@v7
+      # The oldest Python that pyproject.toml supports.
+      - run: uv venv --python 3.10
+      - run: uv pip install maturin pytest pyyaml
+      # --no-project: plain `uv run` would lock and rebuild the project on every call.
+      - run: uv run --no-project maturin develop --uv
+      - run: uv run --no-project pytest python/tests
+
   nix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v30
         with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          github_access_token: ${{ github.token }}
       - run: nix run nixpkgs#alejandra -- --check .
       - run: nix run nixpkgs#statix -- check .
       - run: nix run nixpkgs#deadnix -- --fail .
+      - run: nix build -L .#default

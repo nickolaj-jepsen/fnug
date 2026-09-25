@@ -5,60 +5,50 @@ on:
     branches: [main]
     paths:
       - "Cargo.toml"
+  # Retries a failed release; registries that already have the version are skipped.
+  workflow_dispatch:
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  check-version:
+  detect:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      changed: ${{ steps.version.outputs.changed }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 2
 
-      - name: Check if version changed
+      # The tag is created last, so a missing tag means this version isn't fully released.
+      - name: Release unless the version is already tagged
         id: version
         run: |
-          current=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          previous=$(git show HEAD~1:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "current=$current previous=$previous"
-          if [ "$current" != "$previous" ]; then
-            if git ls-remote --tags origin "refs/tags/v$current" | grep -q .; then
-              echo "::error::Tag v$current already exists on remote"
-              exit 1
-            fi
-            echo "version=$current" >> "$GITHUB_OUTPUT"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "v$version is already tagged, nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ $? -eq 2 ]; then
+            echo "Releasing v$version"
+            echo "release=true" >> "$GITHUB_OUTPUT"
           else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Could not list the remote tags"
+            exit 1
           fi
 
-      - name: Create and push tag
-        if: steps.version.outputs.changed == 'true'
-        run: |
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
-
-  test:
-    needs: check-version
-    if: needs.check-version.outputs.changed == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+  ci:
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    uses: ./.github/workflows/ci.yaml
 
   build:
-    needs: [check-version, test]
+    needs: ci
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -77,19 +67,14 @@ jobs:
           - runner: macos-latest
             target: aarch64-apple-darwin
             artifact: fnug-macos-aarch64
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: fnug-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+          cache-key: ${{ matrix.target }}
+          rustflags: ""
 
       - name: Install cross
         if: matrix.cross
@@ -102,61 +87,19 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }}
           fi
-        shell: bash
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           cp target/${{ matrix.target }}/release/fnug ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        run: cp target/${{ matrix.target }}/release/fnug.exe ${{ matrix.artifact }}
-        shell: bash
 
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-  publish:
-    needs: [check-version, test]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish fnug-vt100
-        run: cargo publish --manifest-path vendor/vt100/Cargo.toml || echo "fnug-vt100 already published, skipping"
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io propagation
-        run: sleep 30
-
-      - name: Publish fnug
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  release:
-    needs: [check-version, build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          merge-multiple: true
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.check-version.outputs.version }}
-          generate_release_notes: true
-          files: fnug-*
-
   pypi-build:
-    needs: [check-version, test]
+    needs: ci
     name: PyPI Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -165,15 +108,22 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             manylinux: manylinux_2_28
+            smoke: true
           - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             manylinux: manylinux_2_28
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            smoke: true
           - runner: macos-latest
             target: aarch64-apple-darwin
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
+            smoke: true
     steps:
       - uses: actions/checkout@v5
 
@@ -188,13 +138,22 @@ jobs:
           args: --release --out dist
           manylinux: ${{ matrix.manylinux || 'auto' }}
 
+      # Only where the runner can install the wheel it just built.
+      - name: Smoke test the wheel
+        if: matrix.smoke
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install dist/*.whl
+          "$RUNNER_TEMP/smoke/bin/fnug" --help
+          "$RUNNER_TEMP/smoke/bin/python" -c "import sys, fnug; sys.exit(fnug.run('--help').returncode)"
+
       - uses: actions/upload-artifact@v5
         with:
           name: pypi-wheels-${{ matrix.target }}
           path: dist/*.whl
 
   pypi-sdist:
-    needs: [check-version, test]
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -205,13 +164,52 @@ jobs:
           command: sdist
           args: --out dist
 
+      # Builds outside the checkout, with the runner's default toolchain, like a user would.
+      - name: Smoke test the sdist
+        run: |
+          python3 -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install dist/*.tar.gz
+          "$RUNNER_TEMP/smoke/bin/fnug" --help
+          "$RUNNER_TEMP/smoke/bin/python" -c "import sys, fnug; sys.exit(fnug.run('--help').returncode)"
+
       - uses: actions/upload-artifact@v5
         with:
           name: pypi-sdist
           path: dist/*.tar.gz
 
-  pypi-publish:
-    needs: [pypi-build, pypi-sdist]
+  publish-crates:
+    needs: [detect, build, pypi-build, pypi-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+
+      # cargo publish waits for the index itself, and a failure is never skipped.
+      - name: Publish the crates that crates.io doesn't have yet
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          published() {
+            curl -sf "https://index.crates.io/fn/ug/$1" | jq -e --arg v "$2" 'select(.vers == $v)' > /dev/null
+          }
+          vt100=$(python3 -c 'import tomllib; print(tomllib.load(open("vendor/vt100/Cargo.toml", "rb"))["package"]["version"])')
+          if published fnug-vt100 "$vt100"; then
+            echo "fnug-vt100 $vt100 is already on crates.io"
+          else
+            cargo publish --manifest-path vendor/vt100/Cargo.toml
+          fi
+          if published fnug "$VERSION"; then
+            echo "fnug $VERSION is already on crates.io"
+          else
+            cargo publish
+          fi
+
+  publish-pypi:
+    needs: publish-crates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5
@@ -227,3 +225,27 @@ jobs:
           args: --non-interactive --skip-existing dist/*
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+  release:
+    needs: [detect, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: fnug-*
+          merge-multiple: true
+
+      - name: Write checksums
+        run: sha256sum fnug-* > SHA256SUMS
+
+      - name: Tag and publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.detect.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            fnug-*
+            SHA256SUMS

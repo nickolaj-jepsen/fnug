@@ -2,6 +2,7 @@
 name = "fnug"
 version = "0.1.0-alpha.13"
 edition = "2024"
+rust-version = "1.88"
 description = "A TUI command runner based on git changes"
 license = "GPL-3.0-only"
 repository = "https://github.com/nickolaj-jepsen/fnug"
@@ -9,7 +10,16 @@ homepage = "https://github.com/nickolaj-jepsen/fnug"
 readme = "README.md"
 keywords = ["tui", "terminal", "git", "lint", "test-runner"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["vendor/", ".agents/", ".claude/", ".envrc", ".fnug.yaml", "flake.*", "skills-lock.json", "python/", "pyproject.toml"]
+include = [
+    "src/**/*",
+    "tests/**/*",
+    # read by tests
+    ".fnug.yaml",
+    "docs/.fnug.yaml",
+    "schema/fnug.schema.json",
+    "LICENSE",
+    "README.md",
+]
 
 [dependencies]
 git2 = { version = "0.20.4", default-features = false }
@@ -21,11 +31,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9.34"
 thiserror = "2.0.18"
-uuid = { version = "1.21.0", features = ["v4"] }
+strsim = "0.11"
+libc = "0.2"
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
 portable-pty = "0.9.0"
-vt100 = { version = "0.15.3", package = "fnug-vt100", path = "./vendor/vt100" }
+vt100 = { version = "0.16.0", package = "fnug-vt100", path = "./vendor/vt100" }
 tokio = { version = "1.49.0", features = ["macros", "sync", "rt-multi-thread", "signal", "time"] }
 anstyle = "1.0.13"
 parking_lot = "0.12.3"

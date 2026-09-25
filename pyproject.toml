@@ -14,6 +14,8 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
     "Typing :: Typed",
@@ -29,6 +31,8 @@ Repository = "https://github.com/nickolaj-jepsen/fnug"
 bindings = "bin"
 python-source = "python"
 strip = true
+# The pin is for development; sdist builds use whatever toolchain the user has.
+exclude = [{ path = "rust-toolchain.toml", format = "sdist" }]
 
 [tool.ruff]
 target-version = "py310"
@@ -45,3 +49,16 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "python/fnug/__init__.py" = ["F401"]  # re-exports
+"python/tests/**" = [
+    "S101",    # assert is how pytest checks
+    "PLR2004", # magic values in expectations
+    "INP001",  # tests are not a package
+    "ANN",     # fixtures and tests go unannotated
+    "S603",    # subprocess calls with trusted input
+]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+pythonpath = ["python"]
+addopts = ["--strict-markers"]
+markers = ["integration: runs the real fnug binary; skipped when it is not installed"]
