@@ -228,7 +228,9 @@ mod tests {
                 assert_eq!(paths[1], "./apps/*/");
                 assert!(opts.max_depth.is_none());
             }
-            other => panic!("Expected Options variant, got: {other:?}"),
+            WorkspaceConfig::Enabled(enabled) => {
+                panic!("Expected Options variant, got: Enabled({enabled})")
+            }
         }
     }
 
@@ -241,7 +243,9 @@ mod tests {
                 assert!(opts.paths.is_none());
                 assert_eq!(opts.max_depth, Some(2));
             }
-            other => panic!("Expected Options variant, got: {other:?}"),
+            WorkspaceConfig::Enabled(enabled) => {
+                panic!("Expected Options variant, got: Enabled({enabled})")
+            }
         }
     }
 
@@ -254,7 +258,9 @@ mod tests {
                 assert_eq!(opts.paths.unwrap().len(), 1);
                 assert_eq!(opts.max_depth, Some(10));
             }
-            other => panic!("Expected Options variant, got: {other:?}"),
+            WorkspaceConfig::Enabled(enabled) => {
+                panic!("Expected Options variant, got: Enabled({enabled})")
+            }
         }
     }
 }

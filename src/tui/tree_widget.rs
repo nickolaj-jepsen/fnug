@@ -368,6 +368,7 @@ mod tests {
             .join("\n")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn group_node_with_status(
         id: &str,
         name: &str,
@@ -398,6 +399,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn cmd_node_with_duration(
         id: &str,
         name: &str,
