@@ -126,7 +126,7 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         config_path.display(),
         cwd.display()
     );
-    check_version(parsed.fnug_version.as_deref());
+    check_version(parsed.fnug_version.as_deref(), &config_path);
     let (mut root, workspace) = parsed.into_root();
     root.source = Some(config_path.clone());
 
@@ -242,12 +242,13 @@ fn find_workspace_root(
     None
 }
 
-/// Warn if the config's `fnug_version` doesn't fit this binary (see [`version_warning`]).
-fn check_version(config_version: Option<&str>) {
+/// Warn if the `fnug_version` of the config at `path` doesn't fit this binary (see
+/// [`version_warning`]).
+pub(crate) fn check_version(config_version: Option<&str>, path: &Path) {
     if let Some(message) =
         config_version.and_then(|v| version_warning(v, env!("CARGO_PKG_VERSION")))
     {
-        warn!("{message}");
+        warn!("{}: {message}", path.display());
     }
 }
 
