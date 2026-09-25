@@ -21,6 +21,9 @@ const DEFAULT_SCROLLBACK_SIZE: usize = 3500;
 const MAX_UPDATES_PER_LOCK: usize = 64;
 /// How long output may keep draining after the command exits before its exit is published
 const DRAIN_DEADLINE: Duration = Duration::from_millis(200);
+/// How much longer the PTY may stay open after `DRAIN_DEADLINE` before whatever still holds it
+/// is warned about; under load, a plain command can miss the deadline too
+const HOLDER_WARN_AFTER: Duration = Duration::from_secs(2);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -283,9 +286,14 @@ fn spawn_waiter(
                     reader_done.recv_timeout(DRAIN_DEADLINE),
                     Err(RecvTimeoutError::Timeout)
                 ) {
-                    warn!("'{name}' exited but background processes still hold its terminal");
                     status_tx.send_replace(Some(exit));
-                    let _ = reader_done.recv();
+                    if matches!(
+                        reader_done.recv_timeout(HOLDER_WARN_AFTER),
+                        Err(RecvTimeoutError::Timeout)
+                    ) {
+                        warn!("'{name}' exited but background processes still hold its terminal");
+                        let _ = reader_done.recv();
+                    }
                     reap();
                 } else {
                     reap();
