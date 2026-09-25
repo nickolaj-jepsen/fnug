@@ -887,6 +887,8 @@ mod tests {
         let exit = waited.expect("wait() blocked on a background PTY holder");
         assert!(exit.unwrap().success());
         assert!(!term.0.is_running());
+        // macOS revokes the terminal when the session leader exits, so nothing holds it there
+        #[cfg(target_os = "linux")]
         assert!(
             !term.0.handle.is_reaped(),
             "reaped while the PTY was still held"
@@ -969,6 +971,9 @@ mod tests {
         assert!(exit.stop_requested);
     }
 
+    // Linux only: macOS revokes the terminal when the session leader exits, so the leader is
+    // reaped at once and, as in any terminal, background processes ignoring SIGHUP outlive it
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stop_kills_lingering_member_after_leader_exit() {
         if !pty_available() {
