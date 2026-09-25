@@ -10,7 +10,16 @@ homepage = "https://github.com/nickolaj-jepsen/fnug"
 readme = "README.md"
 keywords = ["tui", "terminal", "git", "lint", "test-runner"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["src/**/*", "tests/**/*", "LICENSE", "README.md"]
+include = [
+    "src/**/*",
+    "tests/**/*",
+    # read by tests
+    ".fnug.yaml",
+    "docs/.fnug.yaml",
+    "schema/fnug.schema.json",
+    "LICENSE",
+    "README.md",
+]
 
 [dependencies]
 git2 = { version = "0.20.4", default-features = false }
