@@ -1,11 +1,13 @@
-//! The global `log` implementation: an in-memory ring buffer (shown in the TUI's log panel) and
-//! an optional log file.
+//! The global `log` implementation: an in-memory ring buffer (shown in the TUI's log panel), an
+//! optional log file, and stderr until the TUI takes over the terminal. Nothing is written to
+//! stdout, which `fnug mcp` uses for the protocol.
 
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
@@ -80,10 +82,13 @@ type NotifierSlot = Arc<Mutex<Option<Notifier>>>;
 /// Settings for [`init`].
 #[derive(Debug, Clone, Default)]
 pub struct LoggerConfig {
-    /// Most verbose level recorded. Defaults to `FNUG_LOG`, then info.
+    /// Most verbose level recorded. Defaults to `FNUG_LOG`, then info for the buffer and file
+    /// and warn for stderr.
     pub level: Option<LevelFilter>,
     /// File to create (truncating it) and write every record to.
     pub file: Option<PathBuf>,
+    /// Whether records also go to stderr until [`LoggerHandle::set_stderr`] turns it off.
+    pub stderr: bool,
 }
 
 #[derive(Error, Debug)]
@@ -103,6 +108,7 @@ pub enum LoggerInitError {
 pub struct LoggerHandle {
     buffer: LogBuffer,
     notifier: NotifierSlot,
+    stderr: Arc<AtomicBool>,
 }
 
 impl LoggerHandle {
@@ -112,9 +118,14 @@ impl LoggerHandle {
         self.buffer.clone()
     }
 
-    /// Call `notify` after each record, replacing any earlier notifier.
+    /// Call `notify` after each record that reaches the buffer, replacing any earlier notifier.
     pub fn set_notifier(&self, notify: Box<dyn Fn() + Send + Sync>) {
         *self.notifier.lock() = Some(Arc::from(notify));
+    }
+
+    /// Start or stop writing records to stderr. Turn it off before a TUI takes over the terminal.
+    pub fn set_stderr(&self, on: bool) {
+        self.stderr.store(on, Ordering::Relaxed);
     }
 }
 
@@ -124,15 +135,36 @@ struct FnugLogger {
     filter: LevelFilter,
     start: Instant,
     notifier: NotifierSlot,
+    stderr: Mutex<Box<dyn Write + Send>>,
+    stderr_on: Arc<AtomicBool>,
+    stderr_filter: LevelFilter,
+}
+
+impl FnugLogger {
+    fn to_stderr(&self, level: Level) -> bool {
+        level <= self.stderr_filter && self.stderr_on.load(Ordering::Relaxed)
+    }
+
+    fn write_stderr(&self, record: &Record) {
+        let mut stderr = self.stderr.lock();
+        let _ = match record.level() {
+            Level::Error => writeln!(stderr, "error: {}", record.args()),
+            Level::Warn => writeln!(stderr, "warning: {}", record.args()),
+            level => writeln!(stderr, "[{level} {}] {}", record.target(), record.args()),
+        };
+    }
 }
 
 impl Log for FnugLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.filter
+        metadata.level() <= self.filter || self.to_stderr(metadata.level())
     }
 
     fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
+        if self.to_stderr(record.level()) {
+            self.write_stderr(record);
+        }
+        if record.level() > self.filter {
             return;
         }
 
@@ -166,6 +198,7 @@ impl Log for FnugLogger {
         if let Some(ref file) = self.file {
             let _ = file.lock().flush();
         }
+        let _ = self.stderr.lock().flush();
     }
 }
 
@@ -180,10 +213,9 @@ fn level_from_env() -> Option<LevelFilter> {
 /// Returns `LoggerInitError::File` if the log file can't be created, and
 /// `LoggerInitError::AlreadyInitialized` if a logger is already installed.
 pub fn init(config: LoggerConfig) -> Result<LoggerHandle, LoggerInitError> {
-    let filter = config
-        .level
-        .or_else(level_from_env)
-        .unwrap_or(LevelFilter::Info);
+    let level = config.level.or_else(level_from_env);
+    let filter = level.unwrap_or(LevelFilter::Info);
+    let stderr_filter = level.unwrap_or(LevelFilter::Warn);
     let file = config
         .file
         .map(|path| File::create(&path).map_err(|source| LoggerInitError::File { path, source }))
@@ -192,6 +224,7 @@ pub fn init(config: LoggerConfig) -> Result<LoggerHandle, LoggerInitError> {
     let handle = LoggerHandle {
         buffer: LogBuffer::new(),
         notifier: Arc::default(),
+        stderr: Arc::new(AtomicBool::new(config.stderr)),
     };
     let logger = FnugLogger {
         buffer: handle.buffer(),
@@ -199,9 +232,12 @@ pub fn init(config: LoggerConfig) -> Result<LoggerHandle, LoggerInitError> {
         filter,
         start: Instant::now(),
         notifier: handle.notifier.clone(),
+        stderr: Mutex::new(Box::new(std::io::stderr())),
+        stderr_on: handle.stderr.clone(),
+        stderr_filter,
     };
     log::set_boxed_logger(Box::new(logger)).map_err(|_| LoggerInitError::AlreadyInitialized)?;
-    log::set_max_level(filter);
+    log::set_max_level(filter.max(stderr_filter));
     Ok(handle)
 }
 
@@ -211,6 +247,26 @@ mod tests {
 
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().clone()).unwrap()
+        }
+    }
+
     fn logger(filter: LevelFilter) -> FnugLogger {
         FnugLogger {
             buffer: LogBuffer::new(),
@@ -218,7 +274,24 @@ mod tests {
             filter,
             start: Instant::now(),
             notifier: NotifierSlot::default(),
+            stderr: Mutex::new(Box::new(std::io::sink())),
+            stderr_on: Arc::new(AtomicBool::new(false)),
+            stderr_filter: LevelFilter::Off,
         }
+    }
+
+    fn logger_with_stderr(
+        filter: LevelFilter,
+        stderr_filter: LevelFilter,
+    ) -> (FnugLogger, Captured) {
+        let captured = Captured::default();
+        let logger = FnugLogger {
+            stderr: Mutex::new(Box::new(captured.clone())),
+            stderr_on: Arc::new(AtomicBool::new(true)),
+            stderr_filter,
+            ..logger(filter)
+        };
+        (logger, captured)
     }
 
     fn log_at(logger: &FnugLogger, level: Level, message: &str) {
@@ -292,11 +365,46 @@ mod tests {
     }
 
     #[test]
+    fn stderr_uses_its_own_threshold_and_format() {
+        let (logger, stderr) = logger_with_stderr(LevelFilter::Info, LevelFilter::Warn);
+        log_at(&logger, Level::Error, "broken");
+        log_at(&logger, Level::Warn, "careful");
+        log_at(&logger, Level::Info, "fyi");
+
+        assert_eq!(stderr.text(), "error: broken\nwarning: careful\n");
+        assert_eq!(logger.buffer.len(), 3);
+
+        let (logger, stderr) = logger_with_stderr(LevelFilter::Info, LevelFilter::Debug);
+        log_at(&logger, Level::Debug, "detail");
+        assert_eq!(stderr.text(), "[DEBUG test_target] detail\n");
+        assert!(
+            logger.buffer.is_empty(),
+            "debug is below the buffer's level"
+        );
+    }
+
+    #[test]
+    fn stderr_off_still_fills_the_buffer() {
+        let (logger, stderr) = logger_with_stderr(LevelFilter::Info, LevelFilter::Warn);
+        let handle = LoggerHandle {
+            buffer: logger.buffer.clone(),
+            notifier: logger.notifier.clone(),
+            stderr: logger.stderr_on.clone(),
+        };
+        handle.set_stderr(false);
+        log_at(&logger, Level::Warn, "hidden from stderr");
+
+        assert_eq!(stderr.text(), "");
+        assert_eq!(handle.buffer().entries()[0].message, "hidden from stderr");
+    }
+
+    #[test]
     fn notifier_runs_after_each_logged_record() {
         let logger = logger(LevelFilter::Info);
         let handle = LoggerHandle {
             buffer: logger.buffer.clone(),
             notifier: logger.notifier.clone(),
+            stderr: logger.stderr_on.clone(),
         };
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();

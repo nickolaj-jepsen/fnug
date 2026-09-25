@@ -10,7 +10,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use log::LevelFilter;
 
-use fnug::{LoadOptions, LoadedConfig};
+use fnug::LoadOptions;
+use fnug::logger::{LoggerConfig, LoggerHandle};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -25,11 +26,11 @@ struct Cli {
     #[arg(short, long, global = true)]
     config: Option<String>,
 
-    /// Log file path (enables file logging in addition to TUI log panel)
+    /// Also write logs to this file
     #[arg(long, global = true)]
     log_file: Option<String>,
 
-    /// Log level [default: info]
+    /// Log level [default: info, and warn for stderr]
     #[arg(long, global = true, value_parser = parse_level_filter)]
     log_level: Option<LevelFilter>,
 
@@ -64,6 +65,20 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
+    let cli = Cli::parse();
+    // Before anything else, so config loading's warnings reach stderr and the log file
+    let logger = match fnug::logger::init(LoggerConfig {
+        level: cli.log_level,
+        file: cli.log_file.as_deref().map(PathBuf::from),
+        stderr: true,
+    }) {
+        Ok(logger) => logger,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -74,7 +89,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = runtime.block_on(run());
+    let result = runtime.block_on(run(cli, logger));
     // Don't wait for blocking tasks that can't be cancelled, such as an in-flight git scan
     runtime.shutdown_timeout(Duration::from_millis(500));
     match result {
@@ -86,14 +101,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-
-    if let Some(Commands::Schema) = cli.command {
-        print!("{}", fnug::schema::config_schema_json());
-        return Ok(ExitCode::SUCCESS);
-    }
-
+async fn run(cli: Cli, logger: LoggerHandle) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let load_opts = LoadOptions {
         config: cli.config.as_deref().map(PathBuf::from),
         no_workspace: cli.no_workspace,
@@ -102,32 +110,30 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         ..LoadOptions::default()
     };
 
-    // Setup can work without a config file
-    if let Some(Commands::Setup(ref args)) = cli.command {
-        let (config, cwd) = match fnug::load(&load_opts) {
-            Ok(loaded) => (Some(loaded.root), loaded.cwd),
-            Err(_) => (None, std::env::current_dir()?),
-        };
-        return setup::run(args, &cwd, config.as_ref());
-    }
-
-    let LoadedConfig {
-        root: config, cwd, ..
-    } = fnug::load(&load_opts)?;
-
-    // Dispatch subcommands
-    let check_result = match cli.command {
-        Some(Commands::Check(ref args)) => match check::run(args, &config, &cwd)? {
-            check::CheckOutcome::Done(code) => return Ok(code),
-            check::CheckOutcome::OpenTui(result) => Some(result),
-        },
-        Some(Commands::Mcp) => return mcp::run(config, cwd).await,
-        Some(Commands::Setup(_) | Commands::Schema) => unreachable!(),
-        None => None,
+    let (loaded, check_result) = match cli.command {
+        // Commands that run without a config
+        Some(Commands::Schema) => {
+            print!("{}", fnug::schema::config_schema_json());
+            return Ok(ExitCode::SUCCESS);
+        }
+        Some(Commands::Setup(ref args)) => return setup::run(args, &load_opts),
+        // Commands that need one
+        Some(Commands::Mcp) => {
+            let loaded = fnug::load(&load_opts)?;
+            return mcp::run(loaded.root, loaded.cwd).await;
+        }
+        Some(Commands::Check(ref args)) => {
+            let loaded = fnug::load(&load_opts)?;
+            match check::run(args, &loaded.root, &loaded.cwd)? {
+                check::CheckOutcome::Done(code) => return Ok(code),
+                check::CheckOutcome::OpenTui(result) => (loaded, Some(result)),
+            }
+        }
+        None => (fnug::load(&load_opts)?, None),
     };
 
     let check_failed = check_result.is_some();
-    let tui_code = tui::run(config, cwd, cli.log_file, cli.log_level, check_result).await?;
+    let tui_code = tui::run(loaded.root, loaded.cwd, logger, check_result).await?;
     Ok(handoff_exit_code(check_failed, tui_code))
 }
 
