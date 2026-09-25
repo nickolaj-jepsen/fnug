@@ -494,9 +494,11 @@ impl Screen {
     /// * fgcolor
     /// * bgcolor
     /// * bold
+    /// * dim
     /// * italic
     /// * underline
     /// * inverse
+    /// * strikethrough
     ///
     /// This is not typically necessary, since `contents_formatted` will leave
     /// the current active drawing attributes in the correct state, but this
@@ -684,6 +686,13 @@ impl Screen {
         self.attrs.bold()
     }
 
+    /// Returns whether newly drawn text should be rendered with the dim
+    /// (faint) text attribute.
+    #[must_use]
+    pub fn dim(&self) -> bool {
+        self.attrs.dim()
+    }
+
     /// Returns whether newly drawn text should be rendered with the italic
     /// text attribute.
     #[must_use]
@@ -703,6 +712,13 @@ impl Screen {
     #[must_use]
     pub fn inverse(&self) -> bool {
         self.attrs.inverse()
+    }
+
+    /// Returns whether newly drawn text should be rendered with the
+    /// strikethrough text attribute.
+    #[must_use]
+    pub fn strikethrough(&self) -> bool {
+        self.attrs.strikethrough()
     }
 
     fn grid(&self) -> &crate::grid::Grid {
@@ -1365,13 +1381,19 @@ impl Screen {
             match next_param!() {
                 &[0] => self.attrs = crate::attrs::Attrs::default(),
                 &[1] => self.attrs.set_bold(true),
+                &[2] => self.attrs.set_dim(true),
                 &[3] => self.attrs.set_italic(true),
                 &[4] => self.attrs.set_underline(true),
                 &[7] => self.attrs.set_inverse(true),
-                &[22] => self.attrs.set_bold(false),
+                &[9] => self.attrs.set_strikethrough(true),
+                &[22] => {
+                    self.attrs.set_bold(false);
+                    self.attrs.set_dim(false);
+                }
                 &[23] => self.attrs.set_italic(false),
                 &[24] => self.attrs.set_underline(false),
                 &[27] => self.attrs.set_inverse(false),
+                &[29] => self.attrs.set_strikethrough(false),
                 &[n] if (30..=37).contains(&n) => {
                     self.attrs.fgcolor = crate::attrs::Color::Idx(to_u8!(n) - 30);
                 }
