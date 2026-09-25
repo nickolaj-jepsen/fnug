@@ -6,8 +6,8 @@ use std::time::Instant;
 use log::{debug, error, info, warn};
 use ratatui::layout::Rect;
 
-use crate::pty::terminal::{Terminal, TerminalSize};
-use crate::pty::{format_failure_message, format_start_message, format_success_message};
+use crate::pty::terminal::{Terminal, TerminalOptions, TerminalSize};
+use crate::pty::{format_exit_message, format_start_message};
 
 use super::app::{App, AppEvent, CommandStatus, ProcessInstance};
 use super::tree_state::find_group_in_group;
@@ -71,14 +71,11 @@ impl App {
         let id = cmd_id.to_string();
         tokio::spawn(async move {
             match term.wait().await {
-                Ok(code) => {
-                    if code == 0 {
-                        if let Err(e) = term.echo(format_success_message()) {
-                            debug!("Failed to echo success message: {e}");
-                        }
-                    } else if let Err(e) = term.echo(format_failure_message(code)) {
-                        debug!("Failed to echo failure message: {e}");
+                Ok(exit) => {
+                    if let Err(e) = term.echo(format_exit_message(&exit)) {
+                        debug!("Failed to echo exit message: {e}");
                     }
+                    let code = exit.shell_code();
                     if let Err(e) = tx.send(AppEvent::ProcessExited(id, code)).await {
                         debug!("Failed to send process exit event: {e}");
                     }
@@ -149,11 +146,14 @@ impl App {
 
         let cols = terminal_area.width.max(2);
         let rows = terminal_area.height.max(2);
-        let scrollback = cmd
-            .scrollback
-            .unwrap_or_else(Terminal::default_scrollback_size);
+        let opts = TerminalOptions {
+            scrollback: cmd
+                .scrollback
+                .unwrap_or_else(Terminal::default_scrollback_size),
+            output_notify: None,
+        };
 
-        match Terminal::new(&cmd, TerminalSize::new(cols, rows), scrollback) {
+        match Terminal::new(&cmd, TerminalSize::new(cols, rows), opts) {
             Ok(terminal) => {
                 if let Err(e) = terminal.echo(format_start_message(&cmd.cmd)) {
                     warn!("Failed to echo start message: {e}");
