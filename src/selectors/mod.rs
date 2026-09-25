@@ -32,9 +32,12 @@ pub trait RunnableSelector {
 
 /// Runs all selectors and returns the selected commands.
 ///
+/// A path outside any git work tree, or a repo that fails to scan, is logged and selects
+/// nothing; always-selected commands are returned regardless.
+///
 /// # Errors
 ///
-/// Returns `SelectorError::Git` if git operations fail during selection.
+/// Returns `SelectorError` if a selector fails as a whole.
 pub fn get_selected_commands(commands: Vec<Command>) -> Result<Vec<Command>, SelectorError> {
     let (always_commands, unselected) = always::AlwaysSelector::split_active_commands(commands)?;
     let (git_commands, _) = git::GitSelector::split_active_commands(unselected)?;

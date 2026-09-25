@@ -2,7 +2,7 @@ use std::path::Path;
 
 use fnug::load_config;
 use fnug::selectors::{SelectorError, get_selected_commands};
-use git2::{IndexAddOption, Repository, RepositoryInitOptions, Signature};
+use git2::{IndexAddOption, Repository, RepositoryInitOptions, RepositoryOpenFlags, Signature};
 
 const GIT_CONFIG: &str = r"
 fnug_version: 0.1.0
@@ -118,7 +118,7 @@ fn git_selection_with_separate_git_dir() {
 }
 
 #[test]
-fn git_selection_in_bare_repo_errors() {
+fn git_selection_in_bare_repo_is_skipped() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     Repository::init_bare(root.join("bare")).unwrap();
@@ -128,10 +128,71 @@ fn git_selection_in_bare_repo_errors() {
     )
     .unwrap();
 
-    let err = select(&root.join(".fnug.yaml")).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("bare repository has no working tree"),
-        "{err}"
-    );
+    assert!(selected(&root.join(".fnug.yaml")).is_empty());
+}
+
+fn outside_any_repo(dir: &Path) -> bool {
+    Repository::open_ext(dir, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]).is_err()
+}
+
+#[test]
+fn always_survives_git_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    if !outside_any_repo(&root) {
+        eprintln!("skipping: the temp dir is inside a git repo");
+        return;
+    }
+    std::fs::write(
+        root.join(".fnug.yaml"),
+        r"
+name: root
+commands:
+  - name: always
+    cmd: 'true'
+    auto:
+      always: true
+  - name: lint
+    cmd: 'true'
+    auto:
+      git: true
+",
+    )
+    .unwrap();
+
+    assert_eq!(selected(&root.join(".fnug.yaml")), ["always"]);
+}
+
+#[test]
+fn git_error_in_one_path_keeps_other_repos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    if !outside_any_repo(&root) {
+        eprintln!("skipping: the temp dir is inside a git repo");
+        return;
+    }
+    std::fs::create_dir(root.join("a")).unwrap();
+    std::fs::create_dir(root.join("b")).unwrap();
+    Repository::init(root.join("a")).unwrap();
+    std::fs::write(root.join("a/new.txt"), "untracked\n").unwrap();
+    std::fs::write(
+        root.join(".fnug.yaml"),
+        r"
+name: root
+commands:
+  - name: a-lint
+    cmd: 'true'
+    cwd: a
+    auto:
+      git: true
+  - name: b-lint
+    cmd: 'true'
+    cwd: b
+    auto:
+      git: true
+",
+    )
+    .unwrap();
+
+    assert_eq!(selected(&root.join(".fnug.yaml")), ["a-lint"]);
 }
