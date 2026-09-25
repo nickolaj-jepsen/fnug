@@ -594,98 +594,145 @@ mod tests {
     use super::*;
     use crate::commands::auto::Auto;
 
-    /// Like a loaded config: absolute cwd and paths, as notify reports absolute event paths.
-    const ROOT: &str = "/project";
-
-    fn abs(path: &str) -> PathBuf {
-        Path::new(ROOT).join(path)
+    /// A project directory named `project` in a temp dir. Like a loaded config, commands get
+    /// absolute paths, as notify reports absolute event paths.
+    struct Project {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
     }
 
-    fn create_test_command(name: &str, paths: Vec<&str>, patterns: Vec<&str>) -> Command {
-        Command {
-            id: name.to_string(),
-            name: name.to_string(),
-            cmd: "test".to_string(),
-            cwd: PathBuf::from(ROOT),
-
-            auto: Auto::create(
-                Some(true),
-                None,
-                paths.into_iter().map(abs).collect(),
-                patterns.into_iter().map(String::from).collect(),
-                None,
-                None,
-            )
-            .unwrap(),
-            ..Default::default()
+    impl Project {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().canonicalize().unwrap().join("project");
+            std::fs::create_dir(&root).unwrap();
+            Project { _tmp: tmp, root }
         }
-    }
 
-    /// Ids of the `commands` that the `changed` paths (relative to [`ROOT`]) select.
-    fn matched_ids(commands: Vec<Command>, changed: &[&str]) -> Vec<String> {
-        let changed: Vec<PathBuf> = changed.iter().map(|path| abs(path)).collect();
-        Matcher::new(commands)
-            .matches(&changed)
-            .into_iter()
-            .map(|m| m.id)
-            .collect()
+        fn command(&self, name: &str, paths: Vec<&str>, patterns: Vec<&str>) -> Command {
+            Command {
+                id: name.to_string(),
+                name: name.to_string(),
+                cmd: "test".to_string(),
+                cwd: self.root.clone(),
+                auto: Auto::create(
+                    Some(true),
+                    None,
+                    paths.into_iter().map(|path| self.root.join(path)).collect(),
+                    patterns.into_iter().map(String::from).collect(),
+                    None,
+                    None,
+                )
+                .unwrap(),
+                ..Default::default()
+            }
+        }
+
+        /// Ids of the `commands` that the `changed` paths (relative to the root) select.
+        fn matched_ids(&self, commands: Vec<Command>, changed: &[&str]) -> Vec<String> {
+            let changed: Vec<PathBuf> = changed.iter().map(|path| self.root.join(path)).collect();
+            Matcher::new(commands)
+                .matches(&changed)
+                .into_iter()
+                .map(|m| m.id)
+                .collect()
+        }
     }
 
     #[test]
     fn matches_basic_match() {
-        let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
-        assert_eq!(matched_ids(vec![cmd], &["src/main.rs"]), ["test1"]);
+        let project = Project::new();
+        let cmd = project.command("test1", vec!["src"], vec![r".*\.rs$"]);
+        assert_eq!(project.matched_ids(vec![cmd], &["src/main.rs"]), ["test1"]);
     }
 
     #[test]
     fn matches_no_match() {
-        let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
-        assert!(matched_ids(vec![cmd], &["src/main.txt", "other/main.rs"]).is_empty());
+        let project = Project::new();
+        let cmd = project.command("test1", vec!["src"], vec![r".*\.rs$"]);
+        let changed = ["src/main.txt", "other/main.rs"];
+        assert!(project.matched_ids(vec![cmd], &changed).is_empty());
     }
 
     #[test]
     fn matches_multiple_commands() {
-        let cmd1 = create_test_command("test1", vec!["src"], vec![r".*\.rs$"]);
-        let cmd2 = create_test_command("test2", vec!["src"], vec![r".*\.rs$"]);
+        let project = Project::new();
+        let cmd1 = project.command("test1", vec!["src"], vec![r".*\.rs$"]);
+        let cmd2 = project.command("test2", vec!["src"], vec![r".*\.rs$"]);
         assert_eq!(
-            matched_ids(vec![cmd1, cmd2], &["src/main.rs"]),
+            project.matched_ids(vec![cmd1, cmd2], &["src/main.rs"]),
             ["test1", "test2"]
         );
     }
 
     #[test]
     fn matches_multiple_patterns() {
-        let cmd = create_test_command("test1", vec!["src"], vec![r".*\.rs$", r".*\.toml$"]);
+        let project = Project::new();
+        let cmd = project.command("test1", vec!["src"], vec![r".*\.rs$", r".*\.toml$"]);
         let changed = ["src/main.rs", "src/Cargo.toml", "src/README.md"];
-        assert_eq!(matched_ids(vec![cmd], &changed), ["test1"]);
+        assert_eq!(project.matched_ids(vec![cmd], &changed), ["test1"]);
     }
 
     #[test]
     fn matches_empty_regex_matches_all() {
-        let cmd = create_test_command("test1", vec!["docs"], vec![]);
-        assert_eq!(matched_ids(vec![cmd], &["docs/demo.tape"]), ["test1"]);
+        let project = Project::new();
+        let cmd = project.command("test1", vec!["docs"], vec![]);
+        assert_eq!(
+            project.matched_ids(vec![cmd], &["docs/demo.tape"]),
+            ["test1"]
+        );
     }
 
     #[test]
     fn matches_regex_relative_to_cwd() {
-        let anchored = create_test_command("anchored", vec!["."], vec![r"^src/.*\.rs$"]);
-        let parent_name = create_test_command("parent", vec!["."], vec!["project"]);
+        let project = Project::new();
+        let anchored = project.command("anchored", vec!["."], vec![r"^src/.*\.rs$"]);
+        let parent_name = project.command("parent", vec!["."], vec!["project"]);
         let changed = ["src/main.rs", "nested/src/lib.rs"];
         assert_eq!(
-            matched_ids(vec![anchored, parent_name], &changed),
+            project.matched_ids(vec![anchored, parent_name], &changed),
             ["anchored"]
         );
     }
 
     #[test]
     fn matches_follow_config_order_and_skip_unwatched() {
-        let mut unwatched = create_test_command("unwatched", vec!["src"], vec![]);
+        let project = Project::new();
+        let mut unwatched = project.command("unwatched", vec!["src"], vec![]);
         unwatched.auto.watch = Some(false);
-        let second = create_test_command("second", vec!["src/b"], vec![]);
-        let first = create_test_command("first", vec!["src", "src/b"], vec![]);
+        let second = project.command("second", vec!["src/b"], vec![]);
+        let first = project.command("first", vec!["src", "src/b"], vec![]);
         assert_eq!(
-            matched_ids(vec![unwatched, first, second], &["src/b/x.rs"]),
+            project.matched_ids(vec![unwatched, first, second], &["src/b/x.rs"]),
             ["first", "second"]
         );
+    }
+
+    #[test]
+    fn matches_skip_git_dirs_below_the_watch_path() {
+        let project = Project::new();
+        let root = project.command("root", vec!["."], vec![]);
+        let hooks = project.command("hooks", vec![".git/hooks"], vec![]);
+        let changed = [".git/index", "sub/.git/HEAD", ".git/hooks/pre-commit"];
+        assert_eq!(project.matched_ids(vec![root, hooks], &changed), ["hooks"]);
+    }
+
+    #[test]
+    fn matches_skip_gitignored_paths() {
+        let project = Project::new();
+        git2::Repository::init(&project.root).unwrap();
+        std::fs::write(project.root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        std::fs::create_dir_all(project.root.join("target/debug")).unwrap();
+        for file in ["target/debug/out", "debug.log", "main.rs"] {
+            std::fs::write(project.root.join(file), "").unwrap();
+        }
+        let any = || vec![project.command("any", vec!["."], vec![])];
+        for ignored in ["target", "target/debug/out", "debug.log"] {
+            assert!(
+                project.matched_ids(any(), &[ignored]).is_empty(),
+                "{ignored}"
+            );
+        }
+        assert_eq!(project.matched_ids(any(), &["main.rs"]), ["any"]);
     }
 }
