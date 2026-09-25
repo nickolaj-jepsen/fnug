@@ -59,9 +59,10 @@ fn run_notify_watcher(
     sender: mpsc::Sender<Vec<PathBuf>>,
 ) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, WatchError> {
     info!("Starting file watcher");
+    // `timeout` is how long every event is held back, not a quiet period.
     let mut notify_watcher = new_debouncer(
-        Duration::from_secs(5),
-        Some(Duration::from_millis(500)),
+        Duration::from_millis(500),
+        Some(Duration::from_millis(100)),
         move |res: DebounceEventResult| match res {
             Ok(events) => {
                 let files: Vec<PathBuf> = events
