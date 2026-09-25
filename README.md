@@ -246,7 +246,7 @@ See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
 
 | Field          | Type              | Description                                                       |
 | -------------- | ----------------- | ----------------------------------------------------------------- |
-| `fnug_version` | string            | Expected fnug version — warns on mismatch                         |
+| `fnug_version` | string            | Optional. fnug version the config targets (see below)             |
 | `name`         | string            | Display name for the root group                                   |
 | `workspace`    | bool / object     | Enable workspace mode (see [Workspace](#workspace))               |
 | `commands`     | list              | Top-level commands                                                |
@@ -255,6 +255,8 @@ See this project's [`.fnug.yaml`](.fnug.yaml) for a full example.
 | `env`          | map               | Environment variables (inherited by children)                     |
 | `auto`         | object            | Default auto rules (inherited by children)                        |
 | `$schema`      | string            | JSON Schema URL for editors (mainly for `.fnug.json`); ignored    |
+
+`fnug_version` compares only the `major.minor.patch` numbers, so `0.1.0` matches `0.1.0-alpha.13`. fnug warns when the config needs a newer fnug, when it was written for an older release series (a different minor version before 1.0, a different major version after), or when the version can't be parsed.
 
 #### Command fields
 
