@@ -9,6 +9,7 @@ import pytest
 
 import fnug
 from fnug import Auto, Command, Config
+from fnug.config import WorkspaceOptions
 
 
 def demo_config(**kwargs):
@@ -91,3 +92,50 @@ def test_config_object_not_mutated(fake_fnug):
 
     assert config == before
     assert fake_fnug.calls()
+
+
+def test_temp_config_is_json(fake_fnug):
+    fnug.check(demo_config())
+
+    assert fake_fnug.last()["config"]["path"].endswith(".fnug.json")
+
+
+def test_temp_config_root_cwd_is_caller_cwd(fake_fnug, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    fnug.check(demo_config())
+
+    assert fake_fnug.last_config()["cwd"] == str(tmp_path.resolve())
+
+
+def test_relative_cwd_resolved_against_caller(fake_fnug, tmp_path, monkeypatch):
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    fnug.start(demo_config(cwd="sub"))
+
+    assert fake_fnug.last_config()["cwd"] == str((tmp_path / "sub").resolve())
+
+
+def test_absolute_cwd_kept(fake_fnug, tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    fnug.check(demo_config(cwd=str(project)))
+
+    assert fake_fnug.last_config()["cwd"] == str(project.resolve())
+
+
+@pytest.mark.parametrize("workspace", [True, WorkspaceOptions(paths=["crates/*"])])
+def test_workspace_with_config_object_raises(fake_fnug, workspace):
+    with pytest.raises(ValueError, match="workspace"):
+        fnug.check(demo_config(workspace=workspace))
+
+    assert fake_fnug.calls() == []
+
+
+def test_disabled_workspace_is_allowed(fake_fnug):
+    fnug.check(demo_config(workspace=False))
+
+    assert fake_fnug.last_config()["workspace"] is False
