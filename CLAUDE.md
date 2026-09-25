@@ -46,7 +46,7 @@ The project dogfoods itself — see `.fnug.yaml` for the lint/test config. The f
 | `workspace.rs` | Workspace discovery: filesystem walk or glob expansion, merges sub-configs |
 | `check.rs` | Headless runner: dependency resolution (topological sort), sequential execution, exit codes |
 | `mcp.rs` | MCP server (rmcp): exposes `list_lints`, `run_all`, `run_lint` tools over stdio |
-| `setup/` | Interactive wizard: git hook install/remove, MCP editor config (nvim, vscode, zed, cursor) |
+| `setup/` | Interactive wizard: git hook install/remove, MCP editor config (Claude Code, VS Code, Cursor) |
 | `commands/` | Data model: `Command`, `CommandGroup`, `Auto` rules, `Inheritable` trait |
 | `selectors/` | Auto-selection logic: `git.rs` (git2 diff matching), `watch.rs` (notify), `always.rs` |
 | `pty/` | PTY management: spawns commands via portable-pty, reader/writer threads, vt100 parser |
