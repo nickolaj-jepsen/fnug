@@ -204,18 +204,16 @@ impl Grid {
     }
 
     pub fn write_contents(&self, contents: &mut String) {
-        let mut wrapping = false;
-        for row in self.visible_rows() {
-            row.write_contents(contents, 0, self.size.cols, wrapping);
-            if !row.wrapped() {
-                contents.push('\n');
-            }
-            wrapping = row.wrapped();
-        }
+        write_rows_contents(contents, self.visible_rows(), self.size.cols);
+    }
 
-        while contents.ends_with('\n') {
-            contents.truncate(contents.len() - 1);
-        }
+    pub fn write_all_contents(&self, contents: &mut String) {
+        // scrollback rows from before a resize can be wider than the screen
+        write_rows_contents(
+            contents,
+            self.scrollback.iter().chain(self.rows.iter()),
+            u16::MAX,
+        );
     }
 
     pub fn write_contents_formatted(&self, contents: &mut Vec<u8>) -> crate::attrs::Attrs {
@@ -699,6 +697,25 @@ impl Grid {
         if self.pos.col > self.size.cols - 1 {
             self.pos.col = self.size.cols - 1;
         }
+    }
+}
+
+fn write_rows_contents<'a>(
+    contents: &mut String,
+    rows: impl Iterator<Item = &'a crate::row::Row>,
+    width: u16,
+) {
+    let mut wrapping = false;
+    for row in rows {
+        row.write_contents(contents, 0, width, wrapping);
+        if !row.wrapped() {
+            contents.push('\n');
+        }
+        wrapping = row.wrapped();
+    }
+
+    while contents.ends_with('\n') {
+        contents.truncate(contents.len() - 1);
     }
 }
 
