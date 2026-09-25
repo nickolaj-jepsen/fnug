@@ -28,19 +28,24 @@ pub mod workspace;
 
 /// Load configuration from a file (or auto-detect), returning the root `CommandGroup` and cwd.
 ///
+/// A relative `config_file` is resolved against the process working directory.
+///
 /// # Errors
 ///
-/// Returns `ConfigError` if the config file is not found, cannot be parsed,
-/// contains invalid values, or references non-existent directories.
+/// Returns `ConfigError::ConfigFileMissing` if `config_file` doesn't exist, and another
+/// `ConfigError` if no config file is found, it cannot be parsed, contains invalid values,
+/// or references non-existent directories.
 pub fn load_config(
     config_file: Option<&str>,
     no_workspace: bool,
 ) -> Result<(CommandGroup, PathBuf), ConfigError> {
     let config_path = match config_file {
         Some(file) => {
-            let config_path = PathBuf::from(file);
+            // A bare filename has an empty parent, which breaks cwd and workspace resolution.
+            let config_path = std::path::absolute(file)
+                .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
             if !config_path.exists() {
-                return Err(ConfigError::ConfigNotFound(config_path));
+                return Err(ConfigError::ConfigFileMissing(config_path));
             }
             config_path
         }
