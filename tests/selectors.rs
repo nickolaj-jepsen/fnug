@@ -1,7 +1,11 @@
-use std::path::Path;
+//! Tests for auto-selection: git scopes, path and regex matching, and selection issues.
+
+use std::path::{Path, PathBuf};
 
 use fnug::load_config;
-use fnug::selectors::{SelectorError, get_selected_commands};
+use fnug::selectors::{
+    SelectOptions, SelectedBy, SelectionIssue, SelectorOutput, get_selected_commands, select,
+};
 use git2::{IndexAddOption, Repository, RepositoryInitOptions, RepositoryOpenFlags, Signature};
 
 const GIT_CONFIG: &str = r"
@@ -37,18 +41,25 @@ fn init_gitlink_repo(gitdir: &Path, workdir: &Path) -> Repository {
     .unwrap()
 }
 
-/// Names of the commands selected for the config at `config_path`.
-fn select(config_path: &Path) -> Result<Vec<String>, SelectorError> {
-    let (config, _) = load_config(Some(config_path.to_str().unwrap()), true).unwrap();
-    let commands = config.all_commands().into_iter().cloned().collect();
-    Ok(get_selected_commands(commands)?
-        .into_iter()
-        .map(|c| c.name)
-        .collect())
+/// Write `yaml` as the config in `dir`, returning its path.
+fn write_config(dir: &Path, yaml: &str) -> PathBuf {
+    let path = dir.join(".fnug.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    path
 }
 
+/// Run selection with `opts` on the config at `config_path`.
+fn select_with(config_path: &Path, opts: &SelectOptions) -> SelectorOutput {
+    let (config, _) = load_config(Some(config_path.to_str().unwrap()), true).unwrap();
+    select(&config.all_commands(), opts)
+}
+
+/// Ids of the commands selected in the working tree for the config at `config_path`.
 fn selected(config_path: &Path) -> Vec<String> {
-    select(config_path).unwrap_or_else(|e| panic!("selection failed: {e}"))
+    select_with(config_path, &SelectOptions::default())
+        .ids()
+        .map(String::from)
+        .collect()
 }
 
 #[test]
@@ -118,17 +129,35 @@ fn git_selection_with_separate_git_dir() {
 }
 
 #[test]
-fn git_selection_in_bare_repo_is_skipped() {
+fn git_selection_in_bare_repo_reports_path() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     Repository::init_bare(root.join("bare")).unwrap();
-    std::fs::write(
-        root.join(".fnug.yaml"),
-        GIT_CONFIG.replace("    auto:", "    cwd: bare\n    auto:"),
-    )
-    .unwrap();
+    let config = write_config(
+        &root,
+        &GIT_CONFIG.replace("    auto:", "    cwd: bare\n    auto:"),
+    );
 
-    assert!(selected(&root.join(".fnug.yaml")).is_empty());
+    let output = select_with(&config, &SelectOptions::default());
+    assert!(output.commands.is_empty());
+    let [issue] = output.issues.as_slice() else {
+        panic!("{:?}", output.issues);
+    };
+    assert!(!issue.is_fatal());
+    let SelectionIssue::NotInRepo {
+        path, command_ids, ..
+    } = issue
+    else {
+        panic!("{issue:?}");
+    };
+    assert_eq!(path, &root.join("bare"));
+    assert_eq!(command_ids, &["lint"]);
+    let message = issue.to_string();
+    assert!(message.contains("bare repository"), "{message}");
+    assert!(
+        message.contains(&root.join("bare").display().to_string()),
+        "{message}"
+    );
 }
 
 fn outside_any_repo(dir: &Path) -> bool {
@@ -143,8 +172,8 @@ fn always_survives_git_error() {
         eprintln!("skipping: the temp dir is inside a git repo");
         return;
     }
-    std::fs::write(
-        root.join(".fnug.yaml"),
+    let config = write_config(
+        &root,
         r"
 name: root
 commands:
@@ -157,10 +186,30 @@ commands:
     auto:
       git: true
 ",
-    )
-    .unwrap();
+    );
 
-    assert_eq!(selected(&root.join(".fnug.yaml")), ["always"]);
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["always"]);
+    assert!(!output.has_fatal());
+    assert!(
+        matches!(
+            output.issues.as_slice(),
+            [SelectionIssue::NotInRepo { path, command_ids, .. }]
+                if path == &root && command_ids == &["lint"]
+        ),
+        "{:?}",
+        output.issues
+    );
+
+    // The compatibility wrapper logs the issue instead of failing.
+    let (loaded, _) = load_config(Some(config.to_str().unwrap()), true).unwrap();
+    let commands = loaded.all_commands().into_iter().cloned().collect();
+    let names: Vec<String> = get_selected_commands(commands)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(names, ["always"]);
 }
 
 #[test]
@@ -175,8 +224,8 @@ fn git_error_in_one_path_keeps_other_repos() {
     std::fs::create_dir(root.join("b")).unwrap();
     Repository::init(root.join("a")).unwrap();
     std::fs::write(root.join("a/new.txt"), "untracked\n").unwrap();
-    std::fs::write(
-        root.join(".fnug.yaml"),
+    let config = write_config(
+        &root,
         r"
 name: root
 commands:
@@ -191,8 +240,183 @@ commands:
     auto:
       git: true
 ",
-    )
-    .unwrap();
+    );
 
-    assert_eq!(selected(&root.join(".fnug.yaml")), ["a-lint"]);
+    assert_eq!(selected(&config), ["a-lint"]);
+}
+
+#[test]
+fn unreadable_index_is_scan_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for name in ["good", "broken"] {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        commit_all(&repo);
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+    }
+    std::fs::write(root.join("broken/.git/index"), "not an index").unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  git: true
+commands:
+  - name: good-lint
+    cmd: 'true'
+    cwd: good
+  - name: broken-lint
+    cmd: 'true'
+    cwd: broken
+",
+    );
+
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["good-lint"]);
+    assert!(
+        matches!(
+            output.issues.as_slice(),
+            [SelectionIssue::ScanFailed { repo, .. }] if repo == &root.join("broken")
+        ),
+        "{:?}",
+        output.issues
+    );
+    assert!(!output.has_fatal());
+}
+
+#[test]
+fn files_lists_existing_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("src/modified.rs"), "one\n").unwrap();
+    std::fs::write(root.join("src/deleted.rs"), "one\n").unwrap();
+    std::fs::write(root.join("src/clean.rs"), "one\n").unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+    auto:
+      git: true
+      path: [src]
+",
+    );
+    commit_all(&repo);
+    std::fs::write(root.join("src/modified.rs"), "two\n").unwrap();
+    std::fs::write(root.join("src/untracked.rs"), "new\n").unwrap();
+    std::fs::remove_file(root.join("src/deleted.rs")).unwrap();
+
+    let output = select_with(&config, &SelectOptions::default());
+    let lint = output.get("lint").expect("lint is selected");
+    assert_eq!(lint.by, SelectedBy::Git);
+    assert_eq!(
+        lint.files,
+        [root.join("src/modified.rs"), root.join("src/untracked.rs")]
+    );
+    assert_eq!(output.changed_files, 3);
+    assert!(output.issues.is_empty(), "{:?}", output.issues);
+}
+
+#[test]
+fn files_leave_out_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(&root, GIT_CONFIG);
+    commit_all(&repo);
+    // Git reports an untracked nested repo as one directory entry.
+    Repository::init(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/inner.rs"), "new\n").unwrap();
+
+    let output = select_with(&config, &SelectOptions::default());
+    let lint = output.get("lint").expect("the nested repo selects lint");
+    assert!(lint.files.is_empty(), "{:?}", lint.files);
+
+    std::fs::write(root.join("new.rs"), "new\n").unwrap();
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(output.get("lint").unwrap().files, [root.join("new.rs")]);
+}
+
+#[test]
+fn worktree_scope_kinds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    for dir in ["modified", "deleted", "untracked", "clean"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+        std::fs::write(root.join(dir).join("keep.txt"), "one\n").unwrap();
+    }
+    std::fs::write(root.join("deleted/gone.txt"), "one\n").unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  git: true
+commands:
+  - name: modified
+    cmd: 'true'
+    cwd: modified
+  - name: deleted
+    cmd: 'true'
+    cwd: deleted
+  - name: untracked
+    cmd: 'true'
+    cwd: untracked
+  - name: clean
+    cmd: 'true'
+    cwd: clean
+",
+    );
+    commit_all(&repo);
+    std::fs::write(root.join("modified/keep.txt"), "two\n").unwrap();
+    std::fs::remove_file(root.join("deleted/gone.txt")).unwrap();
+    std::fs::write(root.join("untracked/new.txt"), "new\n").unwrap();
+
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(
+        output.ids().collect::<Vec<_>>(),
+        ["modified", "deleted", "untracked"]
+    );
+    assert!(output.get("deleted").unwrap().files.is_empty());
+}
+
+#[test]
+fn always_wins_and_keeps_git_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+commands:
+  - name: both
+    cmd: 'true'
+    auto:
+      always: true
+      git: true
+  - name: always
+    cmd: 'true'
+    auto:
+      always: true
+",
+    );
+    commit_all(&repo);
+    std::fs::write(root.join("new.txt"), "new\n").unwrap();
+
+    let output = select_with(&config, &SelectOptions::default());
+    let both = output.get("both").unwrap();
+    assert_eq!(both.by, SelectedBy::Always);
+    assert_eq!(both.files, [root.join("new.txt")]);
+    let always = output.get("always").unwrap();
+    assert_eq!(always.by, SelectedBy::Always);
+    assert!(always.files.is_empty());
 }
