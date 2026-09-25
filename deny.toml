@@ -1,0 +1,9 @@
+# CI runs only `cargo deny check advisories`. Every ignore needs a reason.
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0189", reason = "rmcp: only the streamable-http transport is affected, and that feature is not enabled (fnug serves MCP over stdio)" },
+    { id = "RUSTSEC-2026-0183", reason = "git2: unsound Remote::list(); fnug never lists remotes. The fix needs the git2 0.21 upgrade" },
+    { id = "RUSTSEC-2026-0184", reason = "git2: unsound BlameHunk from Blame::blame_buffer(); fnug never blames. The fix needs the git2 0.21 upgrade" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained, not vulnerable; it comes in through inquire 0.7 and has no maintained upgrade yet" },
+]
