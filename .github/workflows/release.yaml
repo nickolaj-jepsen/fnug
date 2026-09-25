@@ -77,9 +77,6 @@ jobs:
           - runner: macos-latest
             target: aarch64-apple-darwin
             artifact: fnug-macos-aarch64
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: fnug-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v5
 
@@ -104,16 +101,10 @@ jobs:
           fi
         shell: bash
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           cp target/${{ matrix.target }}/release/fnug ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        run: cp target/${{ matrix.target }}/release/fnug.exe ${{ matrix.artifact }}
-        shell: bash
 
       - uses: actions/upload-artifact@v5
         with:
@@ -172,8 +163,6 @@ jobs:
             target: x86_64-apple-darwin
           - runner: macos-latest
             target: aarch64-apple-darwin
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
 
