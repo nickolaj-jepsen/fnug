@@ -738,6 +738,81 @@ children:
 }
 
 #[test]
+fn depends_on_root_command_does_not_shadow_sibling() {
+    let content = r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+children:
+  - name: backend
+    commands:
+      - name: lint
+        cmd: 'true'
+      - name: test
+        cmd: 'true'
+        depends_on: [DEP]
+";
+    let err = load_err(&content.replace("DEP", "lint"));
+    assert!(err.contains("root > backend > test"), "{err}");
+    assert!(err.contains("'lint' (root > lint)"), "{err}");
+    assert!(
+        err.contains("'backend/lint' (root > backend > lint)"),
+        "{err}"
+    );
+
+    let (_dir, config) = load(&content.replace("DEP", "backend/lint"));
+    assert_eq!(config.children[0].commands[1].depends_on, ["backend/lint"]);
+}
+
+#[test]
+fn depends_on_own_name_is_not_a_sibling() {
+    let (_dir, config) = load(
+        r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+children:
+  - name: backend
+    commands:
+      - name: lint
+        cmd: 'true'
+        depends_on: [lint]
+",
+    );
+    assert_eq!(config.children[0].commands[0].depends_on, ["lint"]);
+}
+
+#[test]
+fn depends_on_explicit_id_does_not_shadow_sibling() {
+    let err = load_err(
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: build
+        id: build
+        cmd: 'true'
+  - name: frontend
+    commands:
+      - name: build
+        cmd: 'true'
+      - name: test
+        cmd: 'true'
+        depends_on: [build]
+",
+    );
+    assert!(err.contains("root > frontend > test"), "{err}");
+    assert!(err.contains("'build' (root > backend > build)"), "{err}");
+    assert!(
+        err.contains("'frontend/build' (root > frontend > build)"),
+        "{err}"
+    );
+}
+
+#[test]
 fn depends_on_ambiguous_lists_candidates() {
     let err = load_err(
         r"

@@ -247,7 +247,14 @@ commands:
 
 Every command and group has an id, which `depends_on` and the MCP tools use. It defaults to the name, with `/` replaced by `-`. When several commands or groups would get the same default id, each of them gets its group path instead, such as `backend/test` and `frontend/test`. Set `id` to choose one yourself; explicit ids must be unique and can't contain `/`.
 
-A `depends_on` entry is an id, a group path like `backend/test`, or a name that is unique among the command's siblings or in the whole config:
+fnug resolves a `depends_on` entry within the command's config file, using the first of these that matches:
+
+1. an id, or the name of one of the command's siblings;
+2. a group path like `backend/test`;
+3. a name that is unique in the file;
+4. the full id of a command in another workspace package or the root, like `api/build`.
+
+If an entry is the id of one command and also the name of a sibling, fnug reports an error rather than guessing. Use the sibling's group path, or give the other command a different `id`.
 
 ```yaml
 fnug_version: 0.1.0
