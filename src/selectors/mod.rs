@@ -9,7 +9,10 @@ use thiserror::Error;
 
 pub(crate) mod always;
 mod git;
+mod matching;
 pub mod watch;
+
+pub use matching::{match_subject, relative_to};
 
 /// Errors that can occur during selector operations
 #[derive(Error, Debug)]
@@ -134,7 +137,8 @@ impl SelectorOutput {
 
 /// Select the commands whose `auto` rules apply: `always`, or `git` with a changed file under
 /// one of its `auto.path` prefixes that matches one of its `auto.regex` patterns (any file, if
-/// none are set).
+/// none are set). Patterns see the file's path relative to the command's `cwd`, see
+/// [`match_subject`].
 ///
 /// Never fails as a whole: a path outside any git work tree or a repo that can't be scanned
 /// selects nothing and is reported in `issues`.

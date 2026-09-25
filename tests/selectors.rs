@@ -558,3 +558,95 @@ commands:
         [root.join("new/sub/a.txt")]
     );
 }
+
+#[test]
+fn regex_anchored_to_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  git: true
+  regex: ['^src/.*\.rs$']
+commands:
+  - name: root-src
+    cmd: 'true'
+  - name: app-src
+    cmd: 'true'
+    cwd: app
+",
+    );
+    std::fs::create_dir_all(root.join("app/src")).unwrap();
+    std::fs::write(root.join("app/keep"), "").unwrap();
+    commit_all(&repo);
+
+    std::fs::write(root.join("app/src/lib.rs"), "").unwrap();
+    assert_eq!(selected(&config), ["app-src"]);
+
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "").unwrap();
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["root-src", "app-src"]);
+    assert_eq!(
+        output.get("root-src").unwrap().files,
+        [root.join("src/main.rs")]
+    );
+}
+
+#[test]
+fn regex_ignores_parent_dir_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap().join("selectors");
+    std::fs::create_dir(&root).unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+    auto:
+      git: true
+      regex: [selectors]
+",
+    );
+    commit_all(&repo);
+    std::fs::write(root.join("a.txt"), "").unwrap();
+
+    assert!(selected(&config).is_empty());
+}
+
+#[test]
+fn regex_outside_cwd_uses_dotdot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+    cwd: app
+    auto:
+      git: true
+      path: [., ../shared]
+      regex: ['^\.\./shared/.*\.rs$']
+",
+    );
+    for dir in ["app", "shared"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+        std::fs::write(root.join(dir).join("keep"), "").unwrap();
+    }
+    commit_all(&repo);
+    std::fs::write(root.join("app/x.rs"), "").unwrap();
+    assert!(selected(&config).is_empty());
+
+    std::fs::write(root.join("shared/x.rs"), "").unwrap();
+    assert_eq!(selected(&config), ["lint"]);
+}
