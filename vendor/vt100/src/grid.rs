@@ -70,6 +70,17 @@ impl Grid {
             }
         }
 
+        // like xterm, scroll the rows above the cursor into scrollback
+        // instead of cutting off the rows at the bottom
+        if !self.scroll_region_active() {
+            let excess = (self.pos.row + 1).saturating_sub(size.rows);
+            if excess > 0 {
+                self.scroll_up(excess);
+                self.pos.row -= excess;
+                self.saved_pos.row = self.saved_pos.row.saturating_sub(excess);
+            }
+        }
+
         if self.scroll_bottom == self.size.rows - 1 {
             self.scroll_bottom = size.rows - 1;
         }
