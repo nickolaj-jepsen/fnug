@@ -1,7 +1,9 @@
 use crate::commands::auto::Auto;
 use crate::commands::command::Command;
+use crate::commands::env;
 use crate::commands::group::CommandGroup;
 use crate::config_file::ConfigError;
+use log::warn;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -204,12 +206,30 @@ fn calculate_common_inheritance(
     env: &HashMap<String, String>,
     inheritance: &Inheritance,
 ) -> Inheritance {
+    let entry_path = inheritance.merge_entry_path(name);
+    // Values see the parent's env, then the process env, but not their siblings.
+    let lookup = |var: &str| {
+        inheritance
+            .env
+            .get(var)
+            .cloned()
+            .or_else(|| std::env::var_os(var).map(|value| value.to_string_lossy().into_owned()))
+    };
     let mut merged_env = inheritance.env.clone();
-    merged_env.extend(env.clone());
+    for (key, value) in env {
+        let (expanded, undefined) = env::expand(value, lookup);
+        for var in undefined {
+            warn!(
+                "{}: env {key} uses ${var}, which is not set, so it expands to nothing",
+                entry_path.join(" > ")
+            );
+        }
+        merged_env.insert(key.clone(), expanded);
+    }
     Inheritance {
         cwd: inherit_path(&inheritance.cwd, cwd.to_path_buf()),
         auto: auto.merge(&inheritance.auto),
-        entry_path: inheritance.merge_entry_path(name),
+        entry_path,
         env: merged_env,
     }
 }

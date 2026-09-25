@@ -1427,3 +1427,79 @@ fn safe_directories_trust_everything_below() {
     let loaded = load_trusting(&dir.path().join("victim"), &trust).unwrap();
     assert_eq!(names(&loaded.root), ["planted", "victim-cmd"]);
 }
+
+// ─── env ───
+
+#[test]
+fn env_expands_parent_then_process() {
+    let (_dir, config) = load(
+        r"
+name: root
+env:
+  FOO: foo
+  HOME: /custom-home
+  BIN: './bin:$PATH'
+children:
+  - name: child
+    env:
+      FNUG_TEST_SIBLING_A: a
+      FNUG_TEST_SIBLING_B: '$FNUG_TEST_SIBLING_A'
+      BRACED: '${FOO}-x'
+      PARENT_WINS: '$HOME/x'
+      LITERAL: '$$HOME and $1 and ${ and $'
+      UNDEFINED: '[$FNUG_TEST_UNDEFINED_VAR]'
+      PATH: '/extra:$PATH'
+    commands:
+      - name: cmd
+        cmd: 'true'
+        env:
+          FOO: '$FOO$FOO'
+",
+    );
+    let env = &command(&config, "cmd").env;
+    let path = std::env::var("PATH").unwrap();
+    assert_eq!(env["BIN"], format!("./bin:{path}"));
+    assert_eq!(env["PATH"], format!("/extra:{path}"));
+    assert_eq!(env["BRACED"], "foo-x");
+    assert_eq!(env["PARENT_WINS"], "/custom-home/x");
+    assert_eq!(env["LITERAL"], "$HOME and $1 and ${ and $");
+    assert_eq!(env["UNDEFINED"], "[]");
+    assert_eq!(env["FNUG_TEST_SIBLING_B"], "");
+    assert_eq!(env["FOO"], "foofoo");
+}
+
+#[test]
+fn env_path_prepend_check_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r"
+name: root
+env:
+  PATH: './node_modules/.bin:$PATH'
+commands:
+  - name: show
+    cmd: 'true'
+    auto:
+      always: true
+",
+    );
+    let (config, cwd) = load_config(Some(&path), true).unwrap();
+    let result = fnug::check::run(&config, &cwd, false, true, false).unwrap();
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn workspace_package_env_expands_against_process_only() {
+    let dir = workspace(
+        &format!("{GLOB_ROOT}env:\n  FNUG_TEST_ROOT_VAR: root\n"),
+        &[(
+            "packages/a",
+            "name: a\nenv:\n  SEEN: '[$FNUG_TEST_ROOT_VAR]'\n  P: '$PATH'\ncommands:\n  - name: a-cmd\n    cmd: 'true'\n",
+        )],
+    );
+    let config = load_workspace(dir.path());
+    let env = &command(&config, "a-cmd").env;
+    assert_eq!(env["SEEN"], "[]");
+    assert_eq!(env["P"], std::env::var("PATH").unwrap());
+}

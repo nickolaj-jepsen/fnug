@@ -226,6 +226,22 @@ children:
           regex: []
 ```
 
+### Environment variables
+
+`env` adds environment variables to every command in a group, or to one command, on top of the ones it inherits. In a value, `$VAR` and `${VAR}` expand to the inherited value of `VAR`, or else to fnug's own environment; an unset variable expands to nothing, with a warning. Write `$$` for a literal `$`. Variables in the same `env` map don't see each other.
+
+```yaml
+fnug_version: 0.1.0
+name: my-project
+env:
+  PATH: "./node_modules/.bin:$PATH"
+commands:
+  - name: lint
+    cmd: eslint .
+    env:
+      ESLINT_CACHE: "${HOME}/.cache/eslint"
+```
+
 ### Ids and dependencies
 
 Every command and group has an id, which `depends_on` and the MCP tools use. It defaults to the name, with `/` replaced by `-`. When several commands or groups would get the same default id, each of them gets its group path instead, such as `backend/test` and `frontend/test`. Set `id` to choose one yourself; explicit ids must be unique and can't contain `/`.
@@ -320,7 +336,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `commands`     | list              | Top-level commands                                                |
 | `children`     | list              | Nested command groups                                             |
 | `cwd`          | string            | Working directory (inherited by children)                         |
-| `env`          | map               | Environment variables (inherited by children)                     |
+| `env`          | map               | Environment variables (inherited by children, `$VAR` expanded)    |
 | `auto`         | object            | Default auto rules (inherited by children)                        |
 | `$schema`      | string            | JSON Schema URL for editors (mainly for `.fnug.json`); ignored    |
 
@@ -334,7 +350,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `cmd`        | string            | Shell command to run (required)                                     |
 | `id`         | string            | Identifier — defaults to the name ([Ids](#ids-and-dependencies))    |
 | `cwd`        | string            | Working directory override                                          |
-| `env`        | map               | Extra environment variables                                         |
+| `env`        | map               | Extra environment variables (`$VAR` expanded)                       |
 | `auto`       | object            | Auto-selection rules (see below)                                    |
 | `depends_on` | list of strings   | Commands that must finish first, by id or unique name               |
 | `scrollback` | integer           | PTY scrollback buffer size (number of lines)                        |
@@ -346,7 +362,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `name`     | string            | Display name (required)                                               |
 | `id`       | string            | Identifier — defaults to the name ([Ids](#ids-and-dependencies))      |
 | `cwd`      | string            | Working directory (inherited by children)                             |
-| `env`      | map               | Environment variables (inherited by children)                         |
+| `env`      | map               | Environment variables (inherited by children, `$VAR` expanded)        |
 | `auto`     | object            | Default auto rules (inherited by children)                            |
 | `commands` | list              | Commands in this group                                                |
 | `children` | list              | Nested child groups                                                   |
@@ -402,3 +418,4 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 - Workspace packages no longer inherit `cwd`, `auto` or `env` from the root config, and a package's `cwd` is relative to its own directory, so it behaves the same merged or standalone. Package ids are prefixed with the package id (`api/build`); update `depends_on` entries that point into another package.
 - `-c`/`--config` loads the given file as the root and no longer switches to a parent workspace root. Without `-c`, a parent workspace root is used only when its discovery includes the nearest config, and parent configs that fail to parse are skipped instead of failing the run.
 - fnug refuses a config it finds by itself that is owned by another user (other than root). Pass the file with `-c`, or set `FNUG_SAFE_DIRECTORIES` to the directories to trust (`*` trusts all, e.g. in CI containers where the checkout has a different owner).
+- `$` in `env` values now expands variables (`$VAR`, `${VAR}`). Write `$$` for a literal `$`.

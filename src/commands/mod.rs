@@ -9,6 +9,7 @@
 
 pub mod auto;
 pub mod command;
+pub(crate) mod env;
 pub mod group;
 pub mod ids;
 pub mod inherit;
