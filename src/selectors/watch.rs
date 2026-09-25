@@ -33,8 +33,8 @@ fn commands_for_paths<'a>(
                 .flat_map(move |(_, cmds)| {
                     let path_str = path.to_string_lossy();
                     cmds.iter().filter(move |cmd| {
-                        cmd.auto.regex.is_empty()
-                            || cmd.auto.regex.iter().any(|re| re.is_match(&path_str))
+                        let regexes = cmd.auto.regexes();
+                        regexes.is_empty() || regexes.iter().any(|re| re.is_match(&path_str))
                     })
                 })
         })
@@ -48,8 +48,8 @@ fn path_lookup_table(commands: Vec<Command>) -> HashMap<PathBuf, Vec<Command>> {
         .filter(|cmd| cmd.auto.watch.unwrap_or(false))
         .flat_map(|cmd| {
             cmd.auto
-                .path
-                .clone()
+                .paths()
+                .to_vec()
                 .into_iter()
                 .map(move |p| (p, cmd.clone()))
         })
@@ -152,7 +152,6 @@ pub fn watch_commands(commands: Vec<Command>) -> Result<WatchHandle, WatchError>
 mod tests {
     use super::*;
     use crate::commands::auto::Auto;
-    use regex_cache::LazyRegex;
 
     fn create_test_command(name: &str, paths: Vec<&str>, patterns: Vec<&str>) -> Command {
         Command {
@@ -161,17 +160,15 @@ mod tests {
             cmd: "test".to_string(),
             cwd: PathBuf::new(),
 
-            auto: Auto {
-                watch: Some(true),
-                path: paths.into_iter().map(PathBuf::from).collect(),
-                regex: patterns
-                    .into_iter()
-                    .map(|p| LazyRegex::new(p).unwrap())
-                    .collect(),
-                git: None,
-                always: None,
-                check: None,
-            },
+            auto: Auto::create(
+                Some(true),
+                None,
+                paths.into_iter().map(PathBuf::from).collect(),
+                patterns.into_iter().map(String::from).collect(),
+                None,
+                None,
+            )
+            .unwrap(),
             ..Default::default()
         }
     }
@@ -179,7 +176,7 @@ mod tests {
     fn create_path_map(commands: Vec<Command>) -> HashMap<PathBuf, Vec<Command>> {
         let mut map: HashMap<PathBuf, Vec<Command>> = HashMap::new();
         for cmd in commands {
-            for path in &cmd.auto.path {
+            for path in cmd.auto.paths() {
                 map.entry(path.clone()).or_default().push(cmd.clone());
             }
         }
