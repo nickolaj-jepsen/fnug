@@ -420,3 +420,37 @@ commands:
     assert_eq!(always.by, SelectedBy::Always);
     assert!(always.files.is_empty());
 }
+
+#[test]
+fn non_utf8_path_selected() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+    auto:
+      git: true
+      path: [data]
+",
+    );
+    commit_all(&repo);
+    std::fs::create_dir(root.join("data")).unwrap();
+    let latin1 = root
+        .join("data")
+        .join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+    if std::fs::write(&latin1, "x\n").is_err() {
+        eprintln!("skipping: the file system rejects non-UTF-8 names");
+        return;
+    }
+
+    let output = select_with(&config, &SelectOptions::default());
+    let lint = output.get("lint").expect("lint is selected");
+    assert_eq!(lint.files, [latin1]);
+}

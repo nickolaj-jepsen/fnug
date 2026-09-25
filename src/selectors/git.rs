@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use git2::{Repository, RepositoryOpenFlags};
@@ -29,6 +31,18 @@ struct Change {
     is_file: bool,
 }
 
+impl Change {
+    /// A change git reports as `rel`, a path relative to `workdir` in raw bytes: git doesn't
+    /// require names to be UTF-8.
+    fn new(workdir: &Path, rel: &[u8]) -> Self {
+        let path = workdir.join(OsStr::from_bytes(rel));
+        Change {
+            is_file: path.symlink_metadata().is_ok_and(|meta| !meta.is_dir()),
+            path,
+        }
+    }
+}
+
 /// Open the repo whose work tree contains `path`, with its canonical work tree root.
 /// Fails if no repo contains `path` or the repo is bare.
 fn discover(path: &Path) -> Result<RepoEntry, String> {
@@ -56,11 +70,7 @@ fn scan(entry: &RepoEntry) -> Result<Vec<Change>, git2::Error> {
         .statuses(None)?
         .iter()
         .filter(|status| !status.status().is_ignored())
-        .filter_map(|status| status.path().map(|p| entry.workdir.join(p)))
-        .map(|path| Change {
-            is_file: path.symlink_metadata().is_ok_and(|meta| !meta.is_dir()),
-            path,
-        })
+        .map(|status| Change::new(&entry.workdir, status.path_bytes()))
         .collect();
     debug!(
         "Found {} changed files in {}",
