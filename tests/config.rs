@@ -563,6 +563,7 @@ fn relative_config_resolves_against_start_dir() {
         config: Some("sub/ci.yaml".into()),
         start_dir: Some(dir.path().to_path_buf()),
         no_workspace: true,
+        ..LoadOptions::default()
     })
     .unwrap();
     assert_eq!(loaded.root.name, "ci");
@@ -1348,4 +1349,81 @@ fn non_git_ancestor_workspace_skipped() {
     git2::Repository::init(dir.path().join("repo")).unwrap();
     let loaded = load_from(&dir.path().join("repo"));
     assert_eq!(names(&loaded.root), ["repo-cmd"]);
+}
+
+// ─── trust ───
+
+/// A parent config that would take over `victim` (its workspace includes every subdirectory),
+/// and a policy under which only `victim` is trusted, as if another user owned the rest.
+fn planted_parent() -> (tempfile::TempDir, fnug::trust::TrustPolicy) {
+    let dir = workspace(
+        "name: parent\nworkspace:\n  paths: ['*']\ncommands:\n  - name: planted\n    cmd: 'true'\n",
+        &[("victim", &one_command("victim"))],
+    );
+    std::fs::create_dir(dir.path().join("victim-no-config")).unwrap();
+    let trust = fnug::trust::TrustPolicy {
+        uid: Some(u32::MAX - 1),
+        safe_dirs: vec![dir.path().join("victim")],
+        trust_all: false,
+    };
+    (dir, trust)
+}
+
+fn load_trusting(
+    start: &Path,
+    trust: &fnug::trust::TrustPolicy,
+) -> Result<fnug::LoadedConfig, fnug::config_file::ConfigError> {
+    fnug::load(&LoadOptions {
+        start_dir: Some(start.to_path_buf()),
+        trust: trust.clone(),
+        ..LoadOptions::default()
+    })
+}
+
+#[test]
+fn untrusted_ancestor_skipped() {
+    let (dir, trust) = planted_parent();
+    let loaded = load_trusting(&dir.path().join("victim"), &trust).unwrap();
+    assert_eq!(names(&loaded.root), ["victim-cmd"]);
+}
+
+#[test]
+fn untrusted_nearest_config_errors() {
+    let (dir, trust) = planted_parent();
+    let err = load_trusting(&dir.path().join("victim-no-config"), &trust).unwrap_err();
+    assert!(
+        matches!(err, fnug::config_file::ConfigError::UntrustedConfig { .. }),
+        "{err:?}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("FNUG_SAFE_DIRECTORIES"), "{msg}");
+    assert!(msg.contains("-c"), "{msg}");
+}
+
+#[test]
+fn explicit_config_bypasses_trust() {
+    let (dir, trust) = planted_parent();
+    let loaded = fnug::load(&LoadOptions {
+        config: Some(dir.path().join(".fnug.yaml")),
+        trust: fnug::trust::TrustPolicy {
+            safe_dirs: vec![],
+            ..trust
+        },
+        ..LoadOptions::default()
+    })
+    .unwrap();
+    // The explicit root loads; its untrusted package is skipped.
+    assert_eq!(names(&loaded.root), ["planted"]);
+    assert_eq!(loaded.sources.len(), 1);
+}
+
+#[test]
+fn safe_directories_trust_everything_below() {
+    let (dir, trust) = planted_parent();
+    let trust = fnug::trust::TrustPolicy {
+        safe_dirs: vec![dir.path().to_path_buf()],
+        ..trust
+    };
+    let loaded = load_trusting(&dir.path().join("victim"), &trust).unwrap();
+    assert_eq!(names(&loaded.root), ["planted", "victim-cmd"]);
 }

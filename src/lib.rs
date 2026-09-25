@@ -12,6 +12,7 @@ use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::commands::inherit::{Inheritable, Inheritance};
 use crate::config_file::{Config, ConfigError};
+use crate::trust::TrustPolicy;
 
 pub mod check;
 pub mod commands;
@@ -23,6 +24,7 @@ pub mod schema;
 pub mod selectors;
 pub mod setup;
 pub mod theme;
+pub mod trust;
 pub mod tui;
 pub mod workspace;
 
@@ -37,6 +39,10 @@ pub struct LoadOptions {
     /// Directory to act from: the config search starts here and a relative `config` resolves
     /// against it. Defaults to the process working directory.
     pub start_dir: Option<PathBuf>,
+    /// Which configs may be loaded without being passed as `config`: the one found by
+    /// searching, a parent workspace root, and workspace packages. The default ignores
+    /// `FNUG_SAFE_DIRECTORIES`; pass [`TrustPolicy::from_env`] to honour it like the CLI does.
+    pub trust: TrustPolicy,
 }
 
 /// A loaded, validated config with inheritance applied.
@@ -57,8 +63,10 @@ pub struct LoadedConfig {
 /// # Errors
 ///
 /// Returns `ConfigError::ConfigFileMissing` if `opts.config` doesn't exist,
-/// `ConfigError::ConfigNotFound` if no config file is found, and another `ConfigError` if a
+/// `ConfigError::ConfigNotFound` if no config file is found, `ConfigError::UntrustedConfig` if
+/// the config found by searching is refused by `opts.trust`, and another `ConfigError` if a
 /// config cannot be parsed, contains invalid values, or references non-existent directories.
+/// Untrusted parent workspace roots and packages are skipped with a warning.
 pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     let start_dir = match &opts.start_dir {
         Some(dir) => dir.canonicalize(),
@@ -69,14 +77,14 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     let found = match &opts.config {
         Some(file) if opts.start_dir.is_some() => resolve_config_arg(&start_dir.join(file))?,
         Some(file) => resolve_config_arg(file)?,
-        None => config_file::find_config_from(&start_dir)?,
+        None => config_file::find_config_from(&start_dir, &opts.trust)?,
     };
 
     // An explicit config is always the root; a found one may belong to a parent workspace.
     let promoted = if opts.no_workspace || opts.config.is_some() {
         None
     } else {
-        find_workspace_root(&found)
+        find_workspace_root(&found, &opts.trust)
     };
     let (config_path, parsed, packages) = if let Some((path, parsed, packages)) = promoted {
         (path, parsed, Some(packages))
@@ -104,7 +112,7 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         (None, None) => Vec::new(),
     };
     let mut sources = vec![config_path.clone()];
-    sources.extend(workspace::merge(&mut root, &packages)?);
+    sources.extend(workspace::merge(&mut root, &packages, &opts.trust)?);
 
     commands::ids::assign_ids(&mut root)?;
     let mut config: CommandGroup = root.try_into()?;
@@ -132,6 +140,7 @@ pub fn load_config(
     let loaded = load(&LoadOptions {
         config: config_file.map(PathBuf::from),
         no_workspace,
+        trust: TrustPolicy::from_env(),
         ..LoadOptions::default()
     })?;
     Ok((loaded.root, loaded.cwd))
@@ -161,12 +170,20 @@ fn resolve_config_arg(file: &Path) -> Result<PathBuf, ConfigError> {
 /// The nearest ancestor config whose workspace discovery includes `start` (a config path with a
 /// canonical directory), with its parsed config and discovered packages.
 ///
-/// Ancestors that fail to parse or whose discovery fails are skipped with a warning.
-fn find_workspace_root(start: &Path) -> Option<(PathBuf, Config, Vec<PathBuf>)> {
+/// Ancestors that `trust` refuses, that fail to parse, or whose discovery fails are skipped
+/// with a warning.
+fn find_workspace_root(
+    start: &Path,
+    trust: &TrustPolicy,
+) -> Option<(PathBuf, Config, Vec<PathBuf>)> {
     for dir in start.parent()?.ancestors().skip(1) {
         let Some(candidate) = config_file::find_config_in_dir(dir) else {
             continue;
         };
+        if let Err(untrusted) = trust.check(&candidate) {
+            warn!("Ignoring parent config: {}", ConfigError::from(untrusted));
+            continue;
+        }
         let parsed = match Config::from_file(&candidate) {
             Ok(parsed) => parsed,
             Err(e) => {

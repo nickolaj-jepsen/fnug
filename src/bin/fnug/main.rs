@@ -74,6 +74,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let load_opts = LoadOptions {
         config: cli.config.as_deref().map(PathBuf::from),
         no_workspace: cli.no_workspace,
+        trust: fnug::trust::TrustPolicy::from_env(),
         ..LoadOptions::default()
     };
 
