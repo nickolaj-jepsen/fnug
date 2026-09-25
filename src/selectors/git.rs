@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use git2::{Repository, RepositoryOpenFlags};
+use git2::{Repository, RepositoryOpenFlags, StatusOptions};
 use log::debug;
 
 use crate::commands::command::Command;
@@ -22,6 +22,28 @@ pub(super) struct GitSelection {
 struct RepoEntry {
     workdir: PathBuf,
     repo: Repository,
+    /// The auto paths in this repo, relative to `workdir`; `None` scans the whole work tree.
+    pathspecs: Option<Vec<PathBuf>>,
+}
+
+impl RepoEntry {
+    /// Include `path` in the scan. The work tree root, or a path that isn't under it, lifts
+    /// the limit altogether.
+    fn add_path(&mut self, path: &Path) {
+        let rel = path
+            .strip_prefix(&self.workdir)
+            .ok()
+            .filter(|rel| !rel.as_os_str().is_empty());
+        match (rel, &mut self.pathspecs) {
+            (Some(rel), Some(specs)) => {
+                if !specs.iter().any(|spec| spec == rel) {
+                    specs.push(rel.to_path_buf());
+                }
+            }
+            (None, specs) => *specs = None,
+            (Some(_), None) => {}
+        }
+    }
 }
 
 /// A changed path in a scanned repo.
@@ -60,16 +82,31 @@ fn discover(path: &Path) -> Result<RepoEntry, String> {
         .canonicalize()
         .unwrap_or_else(|_| workdir.to_path_buf());
     debug!("Discovered git repo at {}", workdir.display());
-    Ok(RepoEntry { workdir, repo })
+    Ok(RepoEntry {
+        workdir,
+        repo,
+        pathspecs: Some(Vec::new()),
+    })
 }
 
-/// Collect the non-ignored changed files in a repo's work tree.
+/// Collect the non-ignored changed files under a repo's pathspecs.
 fn scan(entry: &RepoEntry) -> Result<Vec<Change>, git2::Error> {
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+    if let Some(specs) = &entry.pathspecs {
+        // Literal prefixes: as globs, names with `[` or `*` would misfire, and disjoint specs
+        // wouldn't narrow the walk.
+        opts.disable_pathspec_match(true);
+        for spec in specs {
+            opts.pathspec(spec.as_path());
+        }
+    }
     let changes: Vec<Change> = entry
         .repo
-        .statuses(None)?
+        .statuses(Some(&mut opts))?
         .iter()
-        .filter(|status| !status.status().is_ignored())
         .map(|status| Change::new(&entry.workdir, status.path_bytes()))
         .collect();
     debug!(
@@ -123,6 +160,7 @@ fn discover_repos<'a>(
                         repos.push(entry);
                         repos.len() - 1
                     });
+                repos[index].add_path(path);
                 path_repo.insert(path, index);
             }
             Err(message) => issues.push(SelectionIssue::NotInRepo {
