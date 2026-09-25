@@ -6,12 +6,12 @@ pub mod workspace;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use inquire::MultiSelect;
+use inquire::{Confirm, MultiSelect};
 use thiserror::Error;
 
 use crate::LoadedConfig;
-use crate::commands::group::CommandGroup;
-use mcp::Editor;
+use hooks::{ForeignPolicy, HookError, HookPlan, HookStatus, HookTarget, InstallOutcome};
+use mcp::{Editor, FileChange};
 
 #[derive(Error, Debug)]
 pub enum SetupError {
@@ -31,91 +31,13 @@ pub enum SetupError {
     Prompt(#[from] inquire::InquireError),
 }
 
-/// An action to be taken during setup.
-enum Action {
-    InstallHook { path: PathBuf, no_workspace: bool },
-    RemoveHook { path: PathBuf },
-    InstallMcp { editor: Editor, cwd: PathBuf },
-    RemoveMcp { editor: Editor, cwd: PathBuf },
-}
-
-impl Action {
-    fn execute(&self) -> Result<(), SetupError> {
-        match self {
-            Self::InstallHook { path, no_workspace } => {
-                let opts = hooks::InstallOptions {
-                    no_workspace: *no_workspace,
-                    foreign: hooks::ForeignPolicy::Refuse,
-                    fallback_exe: std::env::current_exe().ok(),
-                };
-                hooks::install_with(&hooks::resolve(path)?, &opts)?;
-                println!("Installed pre-commit hook {}", hook_path(path).display());
-            }
-            Self::RemoveHook { path } => {
-                hooks::remove(path)?;
-                println!("Removed pre-commit hook {}", hook_path(path).display());
-            }
-            Self::InstallMcp { editor, cwd } => {
-                editor.install(cwd)?;
-                println!("Configured MCP for {editor}");
-                // The entry runs plain `fnug`: the file is shared, so no machine's path goes in
-                if fsutil::find_on_path("fnug").is_none() {
-                    println!("  warning: fnug isn't on PATH, so {editor} can't start it yet");
-                }
-            }
-            Self::RemoveMcp { editor, cwd } => {
-                editor.remove(cwd)?;
-                println!("Removed MCP from {editor}");
-            }
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for Action {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InstallHook { path, .. } => {
-                write!(
-                    f,
-                    "  + Install pre-commit hook ({})",
-                    hook_path(path).display()
-                )
-            }
-            Self::RemoveHook { path, .. } => {
-                write!(
-                    f,
-                    "  - Remove pre-commit hook ({})",
-                    hook_path(path).display()
-                )
-            }
-            Self::InstallMcp { editor, cwd } => {
-                write!(
-                    f,
-                    "  + Configure MCP for {editor} ({})",
-                    editor.config_path(cwd).display()
-                )
-            }
-            Self::RemoveMcp { editor, cwd } => {
-                write!(
-                    f,
-                    "  - Remove MCP from {editor} ({})",
-                    editor.config_path(cwd).display()
-                )
-            }
-        }
-    }
-}
-
-fn hook_path(config_dir: &Path) -> PathBuf {
-    hooks::resolve(config_dir).map_or_else(|_| config_dir.to_path_buf(), |t| t.hook_path)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Feature {
     GitHooks,
     McpServer,
 }
+
+const FEATURES: [Feature; 2] = [Feature::GitHooks, Feature::McpServer];
 
 impl fmt::Display for Feature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -126,147 +48,352 @@ impl fmt::Display for Feature {
     }
 }
 
-/// Prompt the user for which features/editors/sub-repos they want, then build
-/// the list of actions to apply.
-#[allow(clippy::too_many_lines)]
-fn gather_actions(
-    cwd: &Path,
-    config_dir: &Path,
-    config: Option<&CommandGroup>,
-) -> Result<Vec<Action>, SetupError> {
-    // Detect current state
-    let hooks_installed = hooks::is_installed(config_dir);
-    let editors_installed: Vec<(Editor, bool)> = Editor::ALL
-        .iter()
-        .map(|&e| (e, e.is_installed(cwd)))
-        .collect();
-    let any_mcp_installed = editors_installed.iter().any(|(_, installed)| *installed);
-
-    // Select features
-    let features = vec![Feature::GitHooks, Feature::McpServer];
-    let mut default_indices: Vec<usize> = Vec::new();
-    if hooks_installed {
-        default_indices.push(0);
-    }
-    if any_mcp_installed {
-        default_indices.push(1);
-    }
-    if default_indices.is_empty() {
-        default_indices.push(0);
-    }
-
-    let selected_features = MultiSelect::new("What would you like to set up?", features)
-        .with_default(&default_indices)
-        .prompt()?;
-
-    if selected_features.is_empty() {
-        println!("Nothing selected.");
-        return Ok(vec![]);
-    }
-
-    let wants_hooks = selected_features.contains(&Feature::GitHooks);
-    let wants_mcp = selected_features.contains(&Feature::McpServer);
-
-    // Select editors for MCP
-    let selected_editors = if wants_mcp {
-        let editor_options: Vec<Editor> = Editor::ALL.to_vec();
-        let default_editor_indices: Vec<usize> = editors_installed
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, installed))| *installed)
-            .map(|(i, _)| i)
-            .collect();
-
-        MultiSelect::new("Which editors?", editor_options)
-            .with_default(&default_editor_indices)
-            .prompt()?
-    } else {
-        vec![]
-    };
-
-    // Find sub-repos for hook installation
-    let sub_repos = if wants_hooks {
-        config
-            .map(|c| workspace::find_sub_repos(config_dir, c))
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
-
-    let selected_sub_repo_indices = if sub_repos.is_empty() {
-        vec![]
-    } else {
-        let sub_repo_names: Vec<String> = sub_repos.iter().map(|r| r.name.clone()).collect();
-        let mut defaults: Vec<usize> = sub_repos
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| hooks::is_installed(&r.path))
-            .map(|(i, _)| i)
-            .collect();
-        if defaults.is_empty() {
-            defaults = (0..sub_repos.len()).collect();
-        }
-
-        MultiSelect::new("Which sub-repos to install hooks in?", sub_repo_names)
-            .with_default(&defaults)
-            .prompt()?
-            .iter()
-            .filter_map(|name| sub_repos.iter().position(|r| &r.name == name))
-            .collect::<Vec<_>>()
-    };
-
-    // Build action list (diff desired vs current state)
-    let mut actions: Vec<Action> = Vec::new();
-
-    // Root hook
-    if wants_hooks && !hooks_installed {
-        actions.push(Action::InstallHook {
-            path: config_dir.to_path_buf(),
-            no_workspace: false,
-        });
-    } else if !wants_hooks && hooks_installed {
-        actions.push(Action::RemoveHook {
-            path: config_dir.to_path_buf(),
-        });
-    }
-
-    // Sub-repo hooks
-    for (i, sub_repo) in sub_repos.iter().enumerate() {
-        let wanted = selected_sub_repo_indices.contains(&i);
-        let installed = hooks::is_installed(&sub_repo.path);
-        if wanted && !installed {
-            actions.push(Action::InstallHook {
-                path: sub_repo.path.clone(),
-                no_workspace: true,
-            });
-        } else if !wanted && installed {
-            actions.push(Action::RemoveHook {
-                path: sub_repo.path.clone(),
-            });
-        }
-    }
-
-    // MCP editors
-    for &editor in &Editor::ALL {
-        let wanted = selected_editors.contains(&editor);
-        let installed = editor.is_installed(cwd);
-        if wanted && !installed {
-            actions.push(Action::InstallMcp {
-                editor,
-                cwd: cwd.to_path_buf(),
-            });
-        } else if !wanted && installed {
-            actions.push(Action::RemoveMcp {
-                editor,
-                cwd: cwd.to_path_buf(),
-            });
-        }
-    }
-
-    Ok(actions)
+/// A repository's pre-commit hook and whether it runs fnug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoHook {
+    name: String,
+    target: HookTarget,
+    status: HookStatus,
+    /// Whether the hook should pass `--no-workspace`, for a repository inside the workspace.
+    no_workspace: bool,
 }
 
-/// Run the interactive setup wizard.
+impl RepoHook {
+    fn is_installed(&self) -> bool {
+        matches!(self.status, HookStatus::Installed | HookStatus::Outdated)
+    }
+}
+
+/// What is set up now.
+#[derive(Debug, Default)]
+struct Detected {
+    has_config: bool,
+    /// Where the editors' MCP configs go.
+    cwd: PathBuf,
+    root_hook: Option<RepoHook>,
+    sub_repo_hooks: Vec<RepoHook>,
+    /// The editors whose config could be read, and whether it runs fnug.
+    editors: Vec<(Editor, bool)>,
+}
+
+/// What the user picked.
+#[derive(Debug, Default)]
+struct Choice {
+    features: Vec<Feature>,
+    editors: Vec<Editor>,
+    /// Indices into [`Detected::sub_repo_hooks`].
+    sub_repos: Vec<usize>,
+}
+
+/// Indices into [`FEATURES`] to preselect: whatever is installed, and the hook when nothing is
+/// and there is a config for it to run.
+fn default_features(detected: &Detected) -> Vec<usize> {
+    let hook_installed = detected
+        .root_hook
+        .as_ref()
+        .is_some_and(RepoHook::is_installed);
+    let mcp_installed = detected.editors.iter().any(|(_, installed)| *installed);
+    let mut defaults = Vec::new();
+    if hook_installed || (detected.has_config && !mcp_installed) {
+        defaults.push(0);
+    }
+    if mcp_installed {
+        defaults.push(1);
+    }
+    defaults
+}
+
+/// A change setup can make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Action {
+    InstallHook { hook: RepoHook },
+    RemoveHook { hook: RepoHook },
+    InstallMcp { editor: Editor, cwd: PathBuf },
+    RemoveMcp { editor: Editor, cwd: PathBuf },
+}
+
+impl fmt::Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InstallHook { hook } if hook.status == HookStatus::Outdated => {
+                write!(
+                    f,
+                    "~ Update pre-commit hook ({})",
+                    hook.target.hook_path.display()
+                )
+            }
+            Self::InstallHook { hook } => write!(
+                f,
+                "+ Install pre-commit hook ({})",
+                hook.target.hook_path.display()
+            ),
+            Self::RemoveHook { hook } => write!(
+                f,
+                "- Remove pre-commit hook ({})",
+                hook.target.hook_path.display()
+            ),
+            Self::InstallMcp { editor, cwd } => write!(
+                f,
+                "+ Configure MCP for {editor} ({})",
+                editor.config_path(cwd).display()
+            ),
+            Self::RemoveMcp { editor, cwd } => write!(
+                f,
+                "- Remove MCP from {editor} ({})",
+                editor.config_path(cwd).display()
+            ),
+        }
+    }
+}
+
+/// The actions that turn what is set up into what the user picked. Deselecting something removes
+/// it.
+fn plan_actions(detected: &Detected, choice: &Choice) -> Vec<Action> {
+    let wants_hooks = choice.features.contains(&Feature::GitHooks);
+    let wants_mcp = choice.features.contains(&Feature::McpServer);
+    let mut actions = Vec::new();
+
+    let hooks = detected
+        .root_hook
+        .iter()
+        .map(|hook| (hook, wants_hooks))
+        .chain(
+            detected
+                .sub_repo_hooks
+                .iter()
+                .enumerate()
+                .map(|(i, hook)| (hook, wants_hooks && choice.sub_repos.contains(&i))),
+        );
+    for (hook, wanted) in hooks {
+        let hook = hook.clone();
+        match (hook.status, wanted) {
+            (HookStatus::Installed, true)
+            | (HookStatus::NotInstalled | HookStatus::Foreign, false) => {}
+            (_, true) => actions.push(Action::InstallHook { hook }),
+            (_, false) => actions.push(Action::RemoveHook { hook }),
+        }
+    }
+
+    for &(editor, installed) in &detected.editors {
+        let cwd = detected.cwd.clone();
+        match (installed, wants_mcp && choice.editors.contains(&editor)) {
+            (false, true) => actions.push(Action::InstallMcp { editor, cwd }),
+            (true, false) => actions.push(Action::RemoveMcp { editor, cwd }),
+            _ => {}
+        }
+    }
+    actions
+}
+
+/// An action with its changes worked out and checked, ready to apply.
+struct Prepared {
+    action: Action,
+    change: Change,
+    notes: Vec<String>,
+}
+
+enum Change {
+    Hook(HookPlan),
+    Mcp {
+        editor: Editor,
+        cwd: PathBuf,
+        change: FileChange,
+    },
+}
+
+impl Action {
+    /// Work out the action's changes without making any, or `None` if nothing needs changing.
+    fn prepare(&self, foreign: ForeignPolicy) -> Result<Option<Prepared>, SetupError> {
+        let mut notes = Vec::new();
+        let change = match self {
+            Self::InstallHook { hook } => {
+                let opts = hooks::InstallOptions {
+                    no_workspace: hook.no_workspace,
+                    foreign,
+                    fallback_exe: std::env::current_exe().ok(),
+                };
+                let (plan, outcome) = hooks::plan_install(&hook.target, &opts)?;
+                if let InstallOutcome::Chained { original } = outcome {
+                    notes.push(format!(
+                        "the existing hook moves to {} and runs after fnug",
+                        original.display()
+                    ));
+                }
+                notes.extend(plan.note().map(str::to_string));
+                Change::Hook(plan)
+            }
+            Self::RemoveHook { hook } => Change::Hook(hooks::plan_remove(&hook.target)?),
+            Self::InstallMcp { editor, cwd } => {
+                let Some(content) = editor.plan_install(cwd, &["mcp".to_string()])? else {
+                    return Ok(None);
+                };
+                // The entry runs plain `fnug`: the file is shared, so no machine's path goes in
+                if fsutil::find_on_path("fnug").is_none() {
+                    notes.push(format!(
+                        "fnug isn't on PATH, so {editor} can't start it until it is"
+                    ));
+                }
+                Change::Mcp {
+                    editor: *editor,
+                    cwd: cwd.clone(),
+                    change: FileChange::Write(content),
+                }
+            }
+            Self::RemoveMcp { editor, cwd } => match editor.plan_remove(cwd)? {
+                Some(change) => Change::Mcp {
+                    editor: *editor,
+                    cwd: cwd.clone(),
+                    change,
+                },
+                None => return Ok(None),
+            },
+        };
+        if let Change::Hook(plan) = &change
+            && plan.is_empty()
+        {
+            return Ok(None);
+        }
+        Ok(Some(Prepared {
+            action: self.clone(),
+            change,
+            notes,
+        }))
+    }
+}
+
+impl Prepared {
+    fn apply(&self) -> Result<(), SetupError> {
+        match &self.change {
+            Change::Hook(plan) => plan.apply()?,
+            Change::Mcp {
+                editor,
+                cwd,
+                change,
+            } => editor.apply(cwd, change)?,
+        }
+        Ok(())
+    }
+}
+
+/// Find the hooks and editor configs, printing why any of them can't be set up.
+fn detect(cwd: &Path, config_dir: &Path, config: Option<&LoadedConfig>) -> Detected {
+    let repo_hook = |name: String, dir: &Path, no_workspace| match hooks::resolve(dir) {
+        Ok(target) => Some(RepoHook {
+            name,
+            status: hooks::status(&target),
+            target,
+            no_workspace,
+        }),
+        Err(e) => {
+            println!(
+                "warning: can't set up a git hook for {}: {e}",
+                dir.display()
+            );
+            None
+        }
+    };
+    let root_hook = repo_hook(String::new(), config_dir, false);
+    let sub_repo_hooks = config
+        .map(|c| workspace::find_sub_repos(config_dir, &c.root))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|sub| repo_hook(sub.name, &sub.path, true))
+        .collect();
+    let editors = Editor::ALL
+        .into_iter()
+        .filter_map(|editor| match editor.status(cwd) {
+            Ok(installed) => Some((editor, installed)),
+            Err(e) => {
+                println!("warning: leaving {editor}'s MCP config alone: {e}");
+                None
+            }
+        })
+        .collect();
+    Detected {
+        has_config: config.is_some(),
+        cwd: cwd.to_path_buf(),
+        root_hook,
+        sub_repo_hooks,
+        editors,
+    }
+}
+
+fn prompt(detected: &Detected) -> Result<Choice, SetupError> {
+    let features = MultiSelect::new("What would you like to set up?", FEATURES.to_vec())
+        .with_default(&default_features(detected))
+        .prompt()?;
+
+    let editors = if features.contains(&Feature::McpServer) && !detected.editors.is_empty() {
+        let options = detected.editors.iter().map(|(e, _)| *e).collect();
+        let installed = indices(detected.editors.iter().map(|(_, i)| *i));
+        MultiSelect::new("Which editors?", options)
+            .with_default(&installed)
+            .prompt()?
+    } else {
+        Vec::new()
+    };
+
+    let hooks = &detected.sub_repo_hooks;
+    let sub_repos = if features.contains(&Feature::GitHooks) && !hooks.is_empty() {
+        let mut defaults = indices(hooks.iter().map(RepoHook::is_installed));
+        if defaults.is_empty() {
+            defaults = (0..hooks.len()).collect();
+        }
+        let names = hooks.iter().map(|h| h.name.clone()).collect();
+        MultiSelect::new("Which sub-repos to install hooks in?", names)
+            .with_default(&defaults)
+            .raw_prompt()?
+            .into_iter()
+            .map(|option| option.index)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Choice {
+        features,
+        editors,
+        sub_repos,
+    })
+}
+
+fn indices(flags: impl Iterator<Item = bool>) -> Vec<usize> {
+    flags
+        .enumerate()
+        .filter_map(|(i, set)| set.then_some(i))
+        .collect()
+}
+
+/// Prepare every action, so refusals and unreadable files show up before anything changes. A
+/// hook that isn't a shell script is chained if the user agrees.
+fn prepare_all(actions: &[Action]) -> Result<Vec<Prepared>, SetupError> {
+    let mut prepared = Vec::new();
+    for action in actions {
+        let result = match action.prepare(ForeignPolicy::Refuse) {
+            Err(SetupError::Hook(HookError::ForeignHook {
+                path, interpreter, ..
+            })) if confirm_chain(&path, &interpreter)? => action.prepare(ForeignPolicy::Chain),
+            result => result,
+        };
+        match result {
+            Ok(Some(ready)) => prepared.push(ready),
+            Ok(None) => {}
+            Err(e) => println!("Skipping \"{action}\": {e}"),
+        }
+    }
+    Ok(prepared)
+}
+
+fn confirm_chain(hook: &Path, interpreter: &str) -> Result<bool, SetupError> {
+    let question = format!(
+        "{} is a {interpreter} script. Move it to pre-commit.local and run it after fnug?",
+        hook.display()
+    );
+    Ok(Confirm::new(&question).with_default(false).prompt()?)
+}
+
+/// Run the interactive setup wizard: it asks what to set up, shows every change it will make,
+/// and makes them only once the user confirms.
 ///
 /// # Errors
 ///
@@ -275,34 +402,180 @@ pub fn run(cwd: &Path, config: Option<&LoadedConfig>) -> Result<(), SetupError> 
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(SetupError::NotInteractive);
     }
+    if config.is_none() {
+        println!(
+            "warning: no fnug config loaded. The pre-commit hook and the MCP server run the commands in one, so add a .fnug.yaml before relying on them."
+        );
+    }
 
     // The hook runs fnug from the config's directory, so it finds the config there
     let config_dir = config.and_then(|c| c.config_path.parent()).unwrap_or(cwd);
-    let actions = gather_actions(cwd, config_dir, config.map(|c| &c.root))?;
+    let detected = detect(cwd, config_dir, config);
+    let choice = prompt(&detected)?;
+    let prepared = prepare_all(&plan_actions(&detected, &choice))?;
 
-    if actions.is_empty() {
-        println!("Everything is already configured. No changes needed.");
+    if prepared.is_empty() {
+        println!("Nothing to change.");
         return Ok(());
     }
-
-    // Display and confirm
     println!("\nChanges:");
-    for action in &actions {
-        println!("{action}");
+    for ready in &prepared {
+        println!("  {}", ready.action);
+        for note in &ready.notes {
+            println!("      note: {note}");
+        }
     }
     println!();
-
-    let confirmed = inquire::Confirm::new("Apply?")
-        .with_default(false)
-        .prompt()?;
-
-    if !confirmed {
+    if !Confirm::new("Apply?").with_default(false).prompt()? {
         return Err(SetupError::Cancelled);
     }
 
-    for action in &actions {
-        action.execute()?;
+    for ready in &prepared {
+        ready.apply()?;
     }
-    println!("\nDone!");
+    println!("Done!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hook(name: &str, status: HookStatus) -> RepoHook {
+        let dir = PathBuf::from("/repo").join(name);
+        RepoHook {
+            name: name.to_string(),
+            target: HookTarget {
+                hooks_dir: dir.join(".git/hooks"),
+                hook_path: dir.join(".git/hooks/pre-commit"),
+                workdir: dir,
+                location: hooks::HookLocation::Local,
+                config_rel: PathBuf::new(),
+            },
+            status,
+            no_workspace: !name.is_empty(),
+        }
+    }
+
+    fn detected(hook_status: HookStatus, editors: &[(Editor, bool)]) -> Detected {
+        Detected {
+            has_config: true,
+            cwd: PathBuf::from("/repo"),
+            root_hook: Some(hook("", hook_status)),
+            sub_repo_hooks: Vec::new(),
+            editors: editors.to_vec(),
+        }
+    }
+
+    #[test]
+    fn default_features_follow_what_is_installed() {
+        let cases = [
+            (HookStatus::NotInstalled, false, true, vec![0]),
+            (HookStatus::NotInstalled, false, false, vec![]),
+            (HookStatus::Installed, false, false, vec![0]),
+            (HookStatus::Outdated, true, true, vec![0, 1]),
+            (HookStatus::NotInstalled, true, true, vec![1]),
+            (HookStatus::Foreign, false, true, vec![0]),
+        ];
+        for (status, mcp, has_config, expected) in cases {
+            let detected = Detected {
+                has_config,
+                ..detected(status, &[(Editor::VsCode, mcp)])
+            };
+            assert_eq!(
+                default_features(&detected),
+                expected,
+                "{status:?}, mcp {mcp}, config {has_config}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_selection_removes_everything_installed() {
+        let detected = Detected {
+            sub_repo_hooks: vec![
+                hook("lib", HookStatus::Outdated),
+                hook("docs", HookStatus::NotInstalled),
+            ],
+            ..detected(
+                HookStatus::Installed,
+                &[(Editor::ClaudeCode, true), (Editor::VsCode, false)],
+            )
+        };
+
+        let actions = plan_actions(&detected, &Choice::default());
+
+        assert_eq!(
+            actions,
+            [
+                Action::RemoveHook {
+                    hook: hook("", HookStatus::Installed)
+                },
+                Action::RemoveHook {
+                    hook: hook("lib", HookStatus::Outdated)
+                },
+                Action::RemoveMcp {
+                    editor: Editor::ClaudeCode,
+                    cwd: PathBuf::from("/repo")
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn kept_selection_installs_missing_and_updates_outdated() {
+        let detected = Detected {
+            sub_repo_hooks: vec![
+                hook("lib", HookStatus::Installed),
+                hook("docs", HookStatus::NotInstalled),
+            ],
+            ..detected(HookStatus::Outdated, &[(Editor::Cursor, false)])
+        };
+        let choice = Choice {
+            features: FEATURES.to_vec(),
+            editors: vec![Editor::Cursor],
+            sub_repos: vec![0, 1],
+        };
+
+        let actions = plan_actions(&detected, &choice);
+
+        assert_eq!(
+            actions,
+            [
+                Action::InstallHook {
+                    hook: hook("", HookStatus::Outdated)
+                },
+                Action::InstallHook {
+                    hook: hook("docs", HookStatus::NotInstalled)
+                },
+                Action::InstallMcp {
+                    editor: Editor::Cursor,
+                    cwd: PathBuf::from("/repo")
+                },
+            ]
+        );
+        assert!(actions[0].to_string().starts_with("~ Update"));
+    }
+
+    #[test]
+    fn prepare_finds_refusals_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Editor::VsCode.config_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ not json").unwrap();
+        let action = Action::InstallMcp {
+            editor: Editor::VsCode,
+            cwd: dir.path().to_path_buf(),
+        };
+
+        let prepared = prepare_all(std::slice::from_ref(&action))
+            .map(|prepared| prepared.len())
+            .unwrap();
+        assert_eq!(prepared, 0, "the unreadable config is skipped");
+        assert!(matches!(
+            action.prepare(ForeignPolicy::Refuse),
+            Err(SetupError::Mcp(mcp::McpError::Parse { .. }))
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
 }
