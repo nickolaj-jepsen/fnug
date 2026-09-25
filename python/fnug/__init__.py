@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fnug.config import Auto, Command, CommandGroup, Config
+from fnug.config import Auto, Command, CommandGroup, Config, WorkspaceOptions
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -22,6 +22,7 @@ __all__ = [
     "Command",
     "CommandGroup",
     "Config",
+    "WorkspaceOptions",
     "check",
     "main",
     "run",
@@ -62,11 +63,7 @@ def run(*args: str) -> subprocess.CompletedProcess[bytes]:
         The completed process result.
     """
     binary = _find_binary()
-    return subprocess.run(  # noqa: S603
-        [binary, *args],
-        env={**os.environ, "FNUG_PYTHON_WRAPPER": "1"},
-        check=False,
-    )
+    return subprocess.run([binary, *args], check=False)  # noqa: S603
 
 
 @contextmanager
@@ -101,17 +98,43 @@ def _config_tempfile(config: Config) -> Iterator[str]:
         Path(path).unlink(missing_ok=True)
 
 
-def _resolve_config_args(
+def _global_args(
     config: Config | None,
     config_path: str | Path | None,
+    *,
+    log_file: str | Path | None,
+    no_workspace: bool,
 ) -> list[str]:
-    """Validate config arguments and return CLI args (without tempfile)."""
+    """Build the flags that go before any subcommand.
+
+    The ``--config`` flag for an in-memory ``config`` is not included; it is added
+    once the temporary file exists.
+
+    Raises:
+        ValueError: If both config and config_path are provided.
+    """
     if config is not None and config_path is not None:
         msg = "Cannot specify both 'config' and 'config_path'"
         raise ValueError(msg)
+    args: list[str] = []
     if config_path is not None:
-        return ["--config", str(config_path)]
-    return []
+        args.extend(["--config", str(config_path)])
+    if log_file is not None:
+        args.extend(["--log-file", str(log_file)])
+    if no_workspace:
+        args.append("--no-workspace")
+    return args
+
+
+def _run_with_config(
+    config: Config | None,
+    *args: str,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run fnug with ``args``, passing ``config`` through a temporary file if given."""
+    if config is None:
+        return run(*args)
+    with _config_tempfile(config) as path:
+        return run("--config", path, *args)
 
 
 def start(
@@ -119,6 +142,7 @@ def start(
     *,
     config_path: str | Path | None = None,
     log_file: str | Path | None = None,
+    no_workspace: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """Launch the fnug TUI.
 
@@ -127,6 +151,7 @@ def start(
             ``cwd`` is resolved against the caller's working directory (the default).
         config_path: Path to an existing .fnug.yaml file.
         log_file: Path for file logging.
+        no_workspace: Don't resolve upward to a parent workspace root.
 
     Returns:
         The completed process result.
@@ -135,14 +160,13 @@ def start(
         ValueError: If both config and config_path are provided, or config has
             ``workspace`` enabled.
     """
-    args = _resolve_config_args(config, config_path)
-    if log_file is not None:
-        args.extend(["--log-file", str(log_file)])
-
-    if config is not None:
-        with _config_tempfile(config) as path:
-            return run("--config", path, *args)
-    return run(*args)
+    args = _global_args(
+        config,
+        config_path,
+        log_file=log_file,
+        no_workspace=no_workspace,
+    )
+    return _run_with_config(config, *args)
 
 
 def check(  # noqa: PLR0913
@@ -152,6 +176,8 @@ def check(  # noqa: PLR0913
     fail_fast: bool = False,
     no_tui: bool = False,
     mute_success: bool = False,
+    all_: bool = False,
+    no_workspace: bool = False,
     log_file: str | Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run fnug in headless check mode.
@@ -163,6 +189,8 @@ def check(  # noqa: PLR0913
         fail_fast: Stop on first failure.
         no_tui: Never prompt to open the TUI on failure.
         mute_success: Suppress output for commands that pass.
+        all_: Pass ``--all`` to ``fnug check``.
+        no_workspace: Don't resolve upward to a parent workspace root.
         log_file: Path for file logging.
 
     Returns:
@@ -172,22 +200,22 @@ def check(  # noqa: PLR0913
         ValueError: If both config and config_path are provided, or config has
             ``workspace`` enabled.
     """
-    args = _resolve_config_args(config, config_path)
-    if log_file is not None:
-        args.extend(["--log-file", str(log_file)])
-
-    check_args: list[str] = []
+    args = _global_args(
+        config,
+        config_path,
+        log_file=log_file,
+        no_workspace=no_workspace,
+    )
+    args.append("check")
     if fail_fast:
-        check_args.append("--fail-fast")
+        args.append("--fail-fast")
     if no_tui:
-        check_args.append("--no-tui")
+        args.append("--no-tui")
     if mute_success:
-        check_args.append("--mute-success")
-
-    if config is not None:
-        with _config_tempfile(config) as path:
-            return run("--config", path, *args, "check", *check_args)
-    return run(*args, "check", *check_args)
+        args.append("--mute-success")
+    if all_:
+        args.append("--all")
+    return _run_with_config(config, *args)
 
 
 def main() -> None:
