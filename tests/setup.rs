@@ -484,6 +484,10 @@ fn python_hook_refused_then_chained() {
     assert_eq!(read(&local), original);
     assert_eq!(hooks::status(&target), HookStatus::Installed);
     assert_eq!(
+        hooks::status_with(&target, &options(ForeignPolicy::Refuse)),
+        HookStatus::Installed
+    );
+    assert_eq!(
         shim.run(&hook, &root, 0),
         4,
         "the original's status passes through"
@@ -592,6 +596,32 @@ fn legacy_block_migrated_in_place() {
         );
         assert_eq!(hooks::status(&target), HookStatus::Installed);
     }
+}
+
+#[test]
+fn block_that_differs_from_the_options_is_outdated() {
+    let (_tmp, root, _) = repo();
+    let target = hooks::resolve(&root).unwrap();
+    let opts = options(ForeignPolicy::Refuse);
+    hooks::install_with(&target, &opts).unwrap();
+    assert_eq!(hooks::status_with(&target, &opts), HookStatus::Installed);
+
+    let no_workspace = InstallOptions {
+        no_workspace: true,
+        ..opts.clone()
+    };
+    assert_eq!(
+        hooks::status_with(&target, &no_workspace),
+        HookStatus::Outdated
+    );
+
+    // The config moved to a subdirectory, so the hook must cd there
+    std::fs::create_dir(root.join("app")).unwrap();
+    let moved = hooks::resolve(&root.join("app")).unwrap();
+    assert_eq!(hooks::status(&moved), HookStatus::Installed);
+    assert_eq!(hooks::status_with(&moved, &opts), HookStatus::Outdated);
+    hooks::install_with(&moved, &opts).unwrap();
+    assert_eq!(hooks::status_with(&moved, &opts), HookStatus::Installed);
 }
 
 #[test]
