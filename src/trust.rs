@@ -11,7 +11,7 @@ pub const SAFE_DIRECTORIES_ENV: &str = "FNUG_SAFE_DIRECTORIES";
 /// workspace root, or as a workspace package) may be loaded.
 ///
 /// A config is trusted if both the file and, for a symlink, its target are owned by `uid` or
-/// root, or if it is under one of `safe_dirs`. On non-unix platforms every config is trusted.
+/// root, or if it is under one of `safe_dirs`.
 #[derive(Debug, Clone, Default)]
 pub struct TrustPolicy {
     /// The user configs must belong to; `None` means this process's effective user.
@@ -77,7 +77,6 @@ impl TrustPolicy {
         })
     }
 
-    #[cfg(unix)]
     fn check_owner(&self, path: &Path) -> Result<(), Untrusted> {
         use std::os::unix::fs::MetadataExt;
 
@@ -96,11 +95,6 @@ impl TrustPolicy {
                 });
             }
         }
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn check_owner(&self, _path: &Path) -> Result<(), Untrusted> {
         Ok(())
     }
 }
@@ -122,7 +116,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn own_files_trusted_foreign_refused() {
         let dir = tempfile::tempdir().unwrap();
