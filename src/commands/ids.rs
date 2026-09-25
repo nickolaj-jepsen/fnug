@@ -81,9 +81,10 @@ fn in_file(file: Option<&Path>) -> String {
 /// Validate names and explicit ids, give every group and command its final id, and rewrite
 /// each `depends_on` entry to the id of the command it refers to.
 ///
-/// A `depends_on` entry resolves to the first match of, within the command's scope: an id; a
-/// path of local ids (`backend/test`); a unique local id among the command's siblings; a unique
-/// local id anywhere. Failing those, it may name any command's full id (`api/build`).
+/// A `depends_on` entry resolves to the first match of, within the command's scope: an id or a
+/// local id among the command's siblings; a path of local ids (`backend/test`); a unique local
+/// id anywhere. Failing those, it may name any command's full id (`api/build`). An entry that
+/// is one command's id and a different sibling's local id is ambiguous.
 ///
 /// # Errors
 ///
@@ -327,14 +328,20 @@ fn resolve_dependency(nodes: &[Node], from: usize, reference: &str) -> Result<us
             .filter(|(_, node)| node.kind == Kind::Command)
     };
     let (scope, parent) = (nodes[from].scope, nodes[from].parent);
-    let steps: [&dyn Fn(&Node) -> bool; 5] = [
-        &|node| node.scope == scope && node.scoped == reference,
+    let own_id = &nodes[from].id;
+    let steps: [&dyn Fn(&Node) -> bool; 4] = [
+        // An id must not silently shadow a sibling's local id, so either matches here and both
+        // together are ambiguous. Local ids never contain the separator.
+        &|node| {
+            node.scope == scope
+                && (node.scoped == reference
+                    || node.parent == parent && node.local == reference && node.id != *own_id)
+        },
         &|node| {
             node.scope == scope
                 && reference.contains(SEPARATOR)
                 && node.path.join(SEPARATOR) == reference
         },
-        &|node| node.scope == scope && node.parent == parent && node.local == reference,
         &|node| node.scope == scope && node.local == reference,
         &|node| node.id == reference,
     ];
@@ -346,18 +353,7 @@ fn resolve_dependency(nodes: &[Node], from: usize, reference: &str) -> Result<us
         match found.as_slice() {
             [] => {}
             [j] => return Ok(*j),
-            _ => {
-                let candidates: Vec<String> = found
-                    .iter()
-                    .map(|&j| format!("{} ({})", nodes[j].id, nodes[j].entry))
-                    .collect();
-                return Err(ConfigError::Validation(format!(
-                    "The {} depends on '{reference}', which matches several commands: {}; use \
-                     one of these ids",
-                    nodes[from].location(),
-                    candidates.join(", ")
-                )));
-            }
+            _ => return Err(ambiguous_dependency(nodes, from, reference, &found)),
         }
     }
 
@@ -383,6 +379,38 @@ fn resolve_dependency(nodes: &[Node], from: usize, reference: &str) -> Result<us
         );
     }
     Err(ConfigError::Validation(message))
+}
+
+fn ambiguous_dependency(
+    nodes: &[Node],
+    from: usize,
+    reference: &str,
+    found: &[usize],
+) -> ConfigError {
+    let listed = |j: usize| format!("'{}' ({})", nodes[j].id, nodes[j].entry);
+    let owner = found.iter().find(|&&j| nodes[j].scoped == reference);
+    let sibling = found.iter().find(|&&j| nodes[j].scoped != reference);
+    let message = if let (Some(&owner), Some(&sibling)) = (owner, sibling) {
+        // Repeating the reference can't pick the owner, so point at renaming instead.
+        format!(
+            "The {} depends on '{reference}', which is the id of {} but also the name of its \
+             sibling {}; use '{}' for the sibling, or give '{}' another id",
+            nodes[from].location(),
+            listed(owner),
+            listed(sibling),
+            nodes[sibling].id,
+            nodes[owner].entry,
+        )
+    } else {
+        let candidates: Vec<String> = found.iter().map(|&j| listed(j)).collect();
+        format!(
+            "The {} depends on '{reference}', which matches several commands: {}; use one of \
+             these ids",
+            nodes[from].location(),
+            candidates.join(", ")
+        )
+    };
+    ConfigError::Validation(message)
 }
 
 fn check_cycles(nodes: &[Node], edges: &[Vec<usize>]) -> Result<(), ConfigError> {
@@ -516,6 +544,10 @@ pub enum ResolveError {
 
 /// Find the command `reference` names: the command with that exact id, or else the only
 /// command whose name matches it case-insensitively.
+///
+/// An exact id always wins, so a reference that is one command's id is never `Ambiguous`, even
+/// when other commands have it as their name (a root-level `lint` keeps the id `lint` while a
+/// nested one becomes `backend/lint`).
 ///
 /// # Errors
 ///
