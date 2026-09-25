@@ -70,13 +70,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+          cache-key: ${{ matrix.target }}
+          rustflags: ""
 
       - name: Install cross
         if: matrix.cross
@@ -176,7 +174,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
 
       # cargo publish waits for the index itself, and a failure is never skipped.
       - name: Publish the crates that crates.io doesn't have yet
