@@ -239,7 +239,9 @@ impl App {
             proc.kill_and_abort(cmd_id);
         }
         self.error_messages.remove(cmd_id);
-        self.pending_deps.remove(cmd_id);
+        if self.pending_deps.remove(cmd_id).is_some() {
+            self.cancel_dependents(cmd_id);
+        }
         self.mark_tree_dirty();
     }
 
@@ -397,6 +399,46 @@ mod tests {
         // A cleared command must not be started when its dependency finishes
         app.handle_app_event(exited("build", 0));
         assert!(!app.processes.contains_key("test"));
+        app.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_queued_command_cancels_its_dependents() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let command = |id: &str, depends_on: &[&str]| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: "true".into(),
+            cwd: dir.path().to_path_buf(),
+            depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                command("a", &[]),
+                command("b", &["a"]),
+                command("c", &["b"]),
+            ],
+            ..Default::default()
+        };
+        let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
+
+        app.start_command("c", AREA, true);
+        assert!(app.pending_deps.contains_key("b"));
+        assert!(app.pending_deps.contains_key("c"));
+
+        app.clear_command("b");
+        assert!(!app.pending_deps.contains_key("c"), "c still waits on b");
+        assert!(!app.error_messages.contains_key("c"));
+
+        app.handle_app_event(exited("a", 0));
+        assert!(!app.processes.contains_key("b"));
+        assert!(!app.processes.contains_key("c"));
         app.shutdown();
     }
 }
