@@ -46,6 +46,10 @@ pub enum GitScope {
     /// Changes staged in the index, compared with `HEAD` (the empty tree before the first
     /// commit). Unstaged and untracked changes don't count.
     Staged,
+    /// Changes since the merge base of `HEAD` and a revision such as `origin/main`: commits
+    /// since then plus staged, unstaged and untracked changes, like a pull request's diff
+    /// with the work in progress on top.
+    Since(String),
 }
 
 /// A temporary index to read instead of a repo's own, such as the one git names in
@@ -117,6 +121,15 @@ pub enum SelectionIssue {
     },
     /// The repo with this work tree could not be scanned, so nothing in it selects.
     ScanFailed { repo: PathBuf, message: String },
+    /// The since-base scope's `base` can't be resolved in this repo, or shares no history with
+    /// its `HEAD`, so nothing in it selects.
+    BaseRefNotFound {
+        repo: PathBuf,
+        base: String,
+        message: String,
+    },
+    /// The since-base scope found no `HEAD` commit in this repo, so nothing in it selects.
+    UnbornHead { repo: PathBuf },
 }
 
 impl SelectionIssue {
@@ -126,6 +139,7 @@ impl SelectionIssue {
         match self {
             SelectionIssue::NotInRepo { fatal, .. } => *fatal,
             SelectionIssue::ScanFailed { .. } => false,
+            SelectionIssue::BaseRefNotFound { .. } | SelectionIssue::UnbornHead { .. } => true,
         }
     }
 }
@@ -149,6 +163,21 @@ impl fmt::Display for SelectionIssue {
             SelectionIssue::ScanFailed { repo, message } => {
                 write!(f, "git scan of {} failed: {message}", repo.display())
             }
+            SelectionIssue::BaseRefNotFound {
+                repo,
+                base,
+                message,
+            } => write!(
+                f,
+                "can't compare {} with base '{base}': {message} (in CI, fetch the base with \
+                 full history, e.g. actions/checkout with fetch-depth: 0)",
+                repo.display()
+            ),
+            SelectionIssue::UnbornHead { repo } => write!(
+                f,
+                "can't compare {} with a base: HEAD has no commits yet",
+                repo.display()
+            ),
         }
     }
 }
