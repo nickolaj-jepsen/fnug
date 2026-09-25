@@ -174,9 +174,9 @@ fn discover_glob(root_dir: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, C
 
 /// Load a sub-config file and prepare it as a `ConfigCommandGroup`.
 fn load_sub_config(config_path: &Path, root_dir: &Path) -> Result<ConfigCommandGroup, ConfigError> {
-    let config = Config::from_file(config_path)?;
+    let (mut group, workspace) = Config::from_file(config_path)?.into_root();
 
-    if config.workspace.is_some() {
+    if workspace.is_some() {
         warn!(
             "Workspace config '{}' has a 'workspace' field which will be ignored (no recursive discovery)",
             config_path.display()
@@ -186,8 +186,6 @@ fn load_sub_config(config_path: &Path, root_dir: &Path) -> Result<ConfigCommandG
     let sub_dir = config_path
         .parent()
         .ok_or_else(|| ConfigError::Workspace("Config path has no parent directory".into()))?;
-
-    let mut group = config.root;
 
     // Set cwd to the sub-config's directory relative to root, if not already set
     if group.cwd.is_none() {

@@ -68,3 +68,25 @@ fn docs_demo_config_is_tui_only() {
     assert_eq!(command(&config, "test-auto").auto.always, Some(true));
     assert_eq!(command(&config, "test-not-auto").auto.always, Some(false));
 }
+
+#[test]
+fn missing_cmd_error_has_path_and_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        r"fnug_version: 0.1.0
+name: root
+children:
+  - name: first
+    commands:
+      - name: ok
+        cmd: 'true'
+  - name: second
+    commands:
+      - name: broken
+",
+    );
+    let err = load_config(Some(&path), true).unwrap_err().to_string();
+    assert!(err.contains("children[1].commands[0]"), "{err}");
+    assert!(err.contains("line"), "{err}");
+}

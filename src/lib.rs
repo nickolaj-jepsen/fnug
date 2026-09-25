@@ -78,15 +78,16 @@ pub fn load_config(
         config_path.display(),
         cwd.display()
     );
-    let mut parsed = Config::from_file(&config_path)?;
+    let parsed = Config::from_file(&config_path)?;
     validate_version(&parsed.fnug_version);
+    let (mut root, workspace) = parsed.into_root();
 
     // Discover and merge workspace sub-configs before converting
-    if let Some(ref ws) = parsed.workspace {
-        workspace::discover_and_merge(ws, &cwd, &mut parsed.root)?;
+    if let Some(ref ws) = workspace {
+        workspace::discover_and_merge(ws, &cwd, &mut root)?;
     }
 
-    let mut config: CommandGroup = parsed.root.try_into()?;
+    let mut config: CommandGroup = root.try_into()?;
     validate_tree(&config)?;
     validate_dependencies(&config)?;
     config.inherit(&Inheritance::from(cwd.clone()))?;
