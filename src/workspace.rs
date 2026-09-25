@@ -10,6 +10,7 @@ use log::{debug, warn};
 use crate::config_file::{
     Config, ConfigCommandGroup, ConfigError, WorkspaceConfig, find_config_in_dir,
 };
+use crate::trust::TrustPolicy;
 
 /// Find the package configs `ws` selects below `root_dir`, as paths with canonical directories.
 ///
@@ -39,7 +40,8 @@ pub fn discover(ws: &WorkspaceConfig, root_dir: &Path) -> Result<Vec<PathBuf>, C
     Ok(paths)
 }
 
-/// Load each package config and append it to `root`'s children. Returns the loaded paths.
+/// Load each package config that `trust` accepts and append it to `root`'s children. Refused
+/// packages are skipped with a warning. Returns the loaded paths.
 ///
 /// # Errors
 ///
@@ -47,12 +49,22 @@ pub fn discover(ws: &WorkspaceConfig, root_dir: &Path) -> Result<Vec<PathBuf>, C
 pub fn merge(
     root: &mut ConfigCommandGroup,
     packages: &[PathBuf],
+    trust: &TrustPolicy,
 ) -> Result<Vec<PathBuf>, ConfigError> {
     let children = root.children.get_or_insert_with(Vec::new);
+    let mut loaded = Vec::new();
     for path in packages {
+        if let Err(untrusted) = trust.check(path) {
+            warn!(
+                "Skipping workspace package: {}",
+                ConfigError::from(untrusted)
+            );
+            continue;
+        }
         children.push(load_sub_config(path)?);
+        loaded.push(path.clone());
     }
-    Ok(packages.to_vec())
+    Ok(loaded)
 }
 
 /// Discover config files by walking the filesystem, skipping `.gitignore`'d paths.

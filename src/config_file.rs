@@ -14,6 +14,7 @@ use crate::commands::auto::Auto;
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::commands::ids::local_id;
+use crate::trust::{TrustPolicy, Untrusted};
 
 /// Errors that can occur while loading configuration
 #[derive(Error, Debug)]
@@ -71,6 +72,17 @@ pub enum ConfigError {
     Validation(String),
     #[error("Workspace discovery error: {0}")]
     Workspace(String),
+    #[error(
+        "Refusing to load {path}: it is owned by uid {owner}, not by you (uid {uid}) or root. \
+         Pass it with -c to load it anyway, or add its directory to FNUG_SAFE_DIRECTORIES"
+    )]
+    UntrustedConfig { path: PathBuf, owner: u32, uid: u32 },
+}
+
+impl From<Untrusted> for ConfigError {
+    fn from(Untrusted { path, owner, uid }: Untrusted) -> Self {
+        ConfigError::UntrustedConfig { path, owner, uid }
+    }
 }
 
 fn fmt_hint(hint: Option<&str>) -> String {
@@ -428,12 +440,14 @@ impl Config {
 ///
 /// # Errors
 ///
-/// Returns `ConfigError::ConfigNotFound` if no directory up to the root has a config file.
-pub(crate) fn find_config_from(start: &Path) -> Result<PathBuf, ConfigError> {
+/// Returns `ConfigError::ConfigNotFound` if no directory up to the root has a config file, and
+/// `ConfigError::UntrustedConfig` if `trust` refuses the nearest one.
+pub(crate) fn find_config_from(start: &Path, trust: &TrustPolicy) -> Result<PathBuf, ConfigError> {
     debug!("Searching for config file in {}", start.display());
     let found = start.ancestors().find_map(find_config_in_dir);
     match found {
         Some(path) => {
+            trust.check(&path)?;
             info!("Found config file: {}", path.display());
             Ok(path)
         }

@@ -626,6 +626,7 @@ dependencies = [
  "glob",
  "inquire",
  "insta",
+ "libc",
  "log",
  "notify",
  "notify-debouncer-full",
