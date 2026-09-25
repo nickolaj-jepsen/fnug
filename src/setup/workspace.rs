@@ -1,56 +1,49 @@
 use std::path::{Path, PathBuf};
 
 use crate::commands::group::CommandGroup;
+use crate::setup::hooks;
 
-/// A sub-repository discovered within a workspace.
+/// A workspace package with its own git repository.
 pub struct SubRepo {
     pub name: String,
+    /// The package's config directory.
     pub path: PathBuf,
 }
 
-/// Find sub-repos in the workspace that have their own git repository.
-///
-/// Only returns directories that have a different `.git` dir from the workspace root,
-/// meaning they are actual sub-repos (e.g. git submodules) rather than subdirectories
-/// of the same repo.
+/// Workspace packages whose pre-commit hook differs from the one for `cwd`, such as packages in
+/// git submodules, so they need a hook of their own. A hook runs one package's checks, so of
+/// packages that share a hook only the first is returned, with a warning.
 #[must_use]
 pub fn find_sub_repos(cwd: &Path, config: &CommandGroup) -> Vec<SubRepo> {
-    let root_git_dir = git2::Repository::discover(cwd)
-        .ok()
-        .map(|r| r.path().to_path_buf());
-
-    let mut sub_repos = Vec::new();
-
+    let root_hook = hooks::resolve(cwd).ok().map(|t| t.hook_path);
+    let mut hooks_seen: Vec<PathBuf> = Vec::new();
+    let mut sub_repos: Vec<SubRepo> = Vec::new();
     for child in &config.children {
-        let child_dir = if child.cwd.as_os_str().is_empty() {
-            cwd.to_path_buf()
-        } else if child.cwd.is_absolute() {
-            child.cwd.clone()
-        } else {
-            cwd.join(&child.cwd)
+        // Only packages have a config of their own for the hook to run
+        let Some(dir) = child.source.as_deref().and_then(Path::parent) else {
+            continue;
         };
-
-        if !child_dir.exists() {
+        let Ok(target) = hooks::resolve(dir) else {
+            continue;
+        };
+        if root_hook.as_ref() == Some(&target.hook_path) {
             continue;
         }
-
-        let child_git_dir = git2::Repository::discover(&child_dir)
-            .ok()
-            .map(|r| r.path().to_path_buf());
-
-        // Only include if it has a different git dir (i.e., a separate repo)
-        let is_different_repo = match (&root_git_dir, &child_git_dir) {
-            (Some(root), Some(child)) => root != child,
-            _ => false,
-        };
-
-        if is_different_repo {
-            sub_repos.push(SubRepo {
-                name: child.name.clone(),
-                path: child_dir,
-            });
+        if let Some(i) = hooks_seen.iter().position(|h| *h == target.hook_path) {
+            log::warn!(
+                "packages {} and {} share the pre-commit hook {}, so it only runs {}'s checks",
+                sub_repos[i].name,
+                child.name,
+                target.hook_path.display(),
+                sub_repos[i].name
+            );
+            continue;
         }
+        hooks_seen.push(target.hook_path);
+        sub_repos.push(SubRepo {
+            name: child.name.clone(),
+            path: dir.to_path_buf(),
+        });
     }
-
     sub_repos
 }
