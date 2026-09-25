@@ -13,9 +13,23 @@ pub enum HookError {
 
 const HOOK_MARKER: &str = "# fnug";
 
+/// Arguments the pre-commit hook passes to `fnug`.
+///
+/// Global flags come before the subcommand so the hook also parses with
+/// fnug versions where they weren't global yet.
+#[must_use]
+pub fn hook_args(no_workspace: bool) -> Vec<&'static str> {
+    let mut args = Vec::with_capacity(4);
+    if no_workspace {
+        args.push("--no-workspace");
+    }
+    args.extend(["check", "--fail-fast", "--mute-success"]);
+    args
+}
+
 fn fnug_lines(no_workspace: bool) -> String {
-    let no_ws = if no_workspace { " --no-workspace" } else { "" };
-    format!("{HOOK_MARKER}\nfnug check --fail-fast --mute-success{no_ws}")
+    let args = hook_args(no_workspace).join(" ");
+    format!("{HOOK_MARKER}\nfnug {args}")
 }
 
 /// Check if a fnug pre-commit hook is installed in the given repo.
