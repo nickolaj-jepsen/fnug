@@ -398,8 +398,10 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `watch`  | bool              | Select when watched files match `path`/`regex`                          |
 | `always` | bool              | Always selected regardless of changes                                   |
 | `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`); they may not exist yet |
-| `regex`  | list of strings   | Regex patterns to match against file paths (e.g. `"\\.rs$"`)           |
+| `regex`  | list of strings   | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)      |
 | `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
+
+A changed file selects a command when it is under one of its `path` entries and matches one of its `regex` patterns (any file, if there are none). The patterns see the file's path relative to the command's `cwd`, such as `src/main.rs`, or `../shared/lib.rs` for a file outside it. Anchor with `^` to match from the `cwd` (`^tests/`), or write `(^|/)tests/` to match a directory at any depth.
 
 ## Keyboard Shortcuts
 
