@@ -135,11 +135,13 @@ fn apply_update(parser: &mut vt100::Parser, update: TerminalUpdate) {
 
 /// Spawn a thread to read from the PTY and send output to the update channel
 ///
-/// Returns a channel to receive the process exit status
+/// Returns a channel to receive the process exit status. `reaped` is set once the
+/// process has been waited on, before its status is published.
 fn spawn_pty_reader(
     mut reader: Box<dyn Read + Send>,
     mut process: Box<dyn Child + Send + Sync>,
     update_tx: crossbeam_channel::Sender<TerminalUpdate>,
+    reaped: Arc<AtomicBool>,
 ) -> crossbeam_channel::Receiver<ExitStatus> {
     let (status_tx, status_rx) = crossbeam_channel::bounded(1);
 
@@ -168,7 +170,10 @@ fn spawn_pty_reader(
         }
 
         // Wait for the process to exit
-        match process.wait() {
+        let result = process.wait();
+        // The pid may be reused from here on, so it must never be signalled again
+        reaped.store(true, Ordering::Release);
+        match result {
             Ok(status) => {
                 let _ = status_tx.send(status);
             }
@@ -185,6 +190,7 @@ fn spawn_pty_writer(
     mut writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     mut killer: Box<dyn ChildKiller + Send + Sync>,
+    reaped: Arc<AtomicBool>,
 ) -> crossbeam_channel::Sender<PtyUpdate> {
     let (pty_tx, pty_rx) = crossbeam_channel::bounded(1000);
 
@@ -217,10 +223,14 @@ fn spawn_pty_writer(
                     }
                 }
                 Ok(PtyUpdate::KillProcess) => {
-                    debug!("Killing process");
-                    killer
-                        .kill()
-                        .unwrap_or_else(|e| debug!("Failed to kill process: {e:?}"));
+                    if reaped.load(Ordering::Acquire) {
+                        debug!("Process already exited, not killing");
+                    } else {
+                        debug!("Killing process");
+                        killer
+                            .kill()
+                            .unwrap_or_else(|e| debug!("Failed to kill process: {e:?}"));
+                    }
                 }
                 Err(_) => {
                     debug!("PTY writer thread EOF");
@@ -240,6 +250,7 @@ pub struct Terminal {
     status_rx: crossbeam_channel::Receiver<ExitStatus>,
     parser: Arc<Mutex<vt100::Parser>>,
     dirty: Arc<AtomicBool>,
+    reaped: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -279,9 +290,10 @@ impl Terminal {
         )));
 
         let dirty = Arc::new(AtomicBool::new(false));
+        let reaped = Arc::new(AtomicBool::new(false));
         let update_tx = spawn_output_writer(Arc::clone(&parser), Arc::clone(&dirty));
-        let status_rx = spawn_pty_reader(reader, process, update_tx.clone());
-        let pty_tx = spawn_pty_writer(writer, master, killer);
+        let status_rx = spawn_pty_reader(reader, process, update_tx.clone(), Arc::clone(&reaped));
+        let pty_tx = spawn_pty_writer(writer, master, killer, Arc::clone(&reaped));
 
         Ok(Self {
             update_tx,
@@ -289,6 +301,7 @@ impl Terminal {
             status_rx,
             parser,
             dirty,
+            reaped,
         })
     }
 
@@ -399,12 +412,20 @@ impl Terminal {
         Ok(status.exit_code())
     }
 
-    /// Kill the process running in the terminal.
+    /// Whether the process has exited and been reaped.
+    pub(crate) fn has_exited(&self) -> bool {
+        self.reaped.load(Ordering::Acquire)
+    }
+
+    /// Kill the process running in the terminal. Does nothing once it has exited.
     ///
     /// # Errors
     ///
     /// Returns `ProcessError::WriterDisconnected` if the PTY channel is closed.
     pub fn kill(&self) -> Result<(), ProcessError> {
+        if self.has_exited() {
+            return Ok(());
+        }
         self.send_pty(PtyUpdate::KillProcess)
     }
 
@@ -512,5 +533,36 @@ mod tests {
             saw_output |= guard.screen().contents().contains('y');
             acquired += 1;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn has_exited_once_wait_returns() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn("true", dir.path());
+
+        assert_eq!(term.0.wait().await.unwrap(), 0);
+        // Set before the exit status is published, so later kills are always skipped
+        assert!(term.0.has_exited());
+        term.0.kill().unwrap();
+    }
+
+    #[test]
+    fn kill_stops_running_command() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn("touch ready && exec sleep 30", dir.path());
+        let started = wait_until(Duration::from_secs(5), || dir.path().join("ready").exists());
+        assert!(started, "command did not start");
+        assert!(!term.0.has_exited());
+
+        term.0.kill().unwrap();
+
+        let exited = wait_until(Duration::from_secs(5), || term.0.has_exited());
+        assert!(exited, "command still running after kill");
     }
 }
