@@ -36,9 +36,13 @@ pub struct LoadOptions {
     pub config: Option<PathBuf>,
     /// Don't resolve upward to a parent workspace root.
     pub no_workspace: bool,
-    /// Directory to act from: the config search starts here and a relative `config` resolves
-    /// against it. Defaults to the process working directory.
+    /// Directory to act from: the config search starts here and a relative `config` or
+    /// `root_dir` resolves against it. Defaults to the process working directory.
     pub start_dir: Option<PathBuf>,
+    /// Base directory for the config's relative paths and workspace discovery, instead of the
+    /// config file's directory. Without `config`, the search starts here. Setting it disables
+    /// the parent workspace lookup.
+    pub root_dir: Option<PathBuf>,
     /// Which configs may be loaded without being passed as `config`: the one found by
     /// searching, a parent workspace root, and workspace packages. The default ignores
     /// `FNUG_SAFE_DIRECTORIES`; pass [`TrustPolicy::from_env`] to honour it like the CLI does.
@@ -50,7 +54,8 @@ pub struct LoadOptions {
 pub struct LoadedConfig {
     /// The root command group.
     pub root: CommandGroup,
-    /// The root config's directory, which relative paths in it are resolved against.
+    /// The directory relative paths in the root config resolve against: `root_dir`, or the root
+    /// config's directory.
     pub cwd: PathBuf,
     /// The root config file (the workspace root, if one was resolved).
     pub config_path: PathBuf,
@@ -63,6 +68,7 @@ pub struct LoadedConfig {
 /// # Errors
 ///
 /// Returns `ConfigError::ConfigFileMissing` if `opts.config` doesn't exist,
+/// `ConfigError::RootDirMissing` if `opts.root_dir` doesn't exist,
 /// `ConfigError::ConfigNotFound` if no config file is found, `ConfigError::UntrustedConfig` if
 /// the config found by searching is refused by `opts.trust`, and another `ConfigError` if a
 /// config cannot be parsed, contains invalid values, or references non-existent directories.
@@ -74,14 +80,27 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     }
     .map_err(|e| ConfigError::UnknownWorkingDirectory(e.to_string()))?;
 
+    let root_dir = opts
+        .root_dir
+        .as_ref()
+        .map(|dir| {
+            let dir = start_dir.join(dir);
+            dir.canonicalize()
+                .map_err(|source| ConfigError::RootDirMissing { path: dir, source })
+        })
+        .transpose()?;
+
     let found = match &opts.config {
         Some(file) if opts.start_dir.is_some() => resolve_config_arg(&start_dir.join(file))?,
         Some(file) => resolve_config_arg(file)?,
-        None => config_file::find_config_from(&start_dir, &opts.trust)?,
+        None => {
+            config_file::find_config_from(root_dir.as_ref().unwrap_or(&start_dir), &opts.trust)?
+        }
     };
 
-    // An explicit config is always the root; a found one may belong to a parent workspace.
-    let promoted = if opts.no_workspace || opts.config.is_some() {
+    // An explicit config or base directory pins the root; a found config may belong to a
+    // parent workspace.
+    let promoted = if opts.no_workspace || opts.config.is_some() || root_dir.is_some() {
         None
     } else {
         find_workspace_root(&found, &opts.trust)
@@ -93,10 +112,13 @@ pub fn load(opts: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         (found, parsed, None)
     };
 
-    let cwd = config_path
-        .parent()
-        .ok_or_else(|| ConfigError::ConfigNotFound(config_path.clone()))?
-        .to_path_buf();
+    let cwd = match root_dir {
+        Some(dir) => dir,
+        None => config_path
+            .parent()
+            .ok_or_else(|| ConfigError::ConfigNotFound(config_path.clone()))?
+            .to_path_buf(),
+    };
     debug!(
         "Creating core from config file: {} (cwd: {})",
         config_path.display(),

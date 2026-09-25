@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_workspace: bool,
 
+    /// Resolve the config's paths and workspace against DIR instead of the config's directory
+    #[arg(long, global = true, value_name = "DIR")]
+    root: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -74,6 +78,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let load_opts = LoadOptions {
         config: cli.config.as_deref().map(PathBuf::from),
         no_workspace: cli.no_workspace,
+        root_dir: cli.root.clone(),
         trust: fnug::trust::TrustPolicy::from_env(),
         ..LoadOptions::default()
     };

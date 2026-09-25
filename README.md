@@ -86,6 +86,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | ----------------- | --------------------------------------------------------------- |
 | `-c <path>`       | Path to config file, always loaded as the root                  |
 | `--no-workspace`  | Disable workspace resolution (don't search for a parent root)   |
+| `--root <dir>`    | Resolve the config's paths and workspace against `<dir>` instead of the config's directory, and don't look for a parent workspace root; without `-c`, search for the config from `<dir>` |
 | `--log-file`      | Write logs to a file                                            |
 | `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info) |
 | `--fail-fast`     | Stop on first failure (`check` only)                            |
