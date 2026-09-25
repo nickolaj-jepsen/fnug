@@ -120,7 +120,7 @@
           ]
         },
         "path": {
-          "description": "Path prefixes, relative to the working directory, that changed files must be under.\nDefaults to the working directory; `[]` resets an inherited value to it.",
+          "description": "Path prefixes, relative to the working directory, that changed files must be under. They\ndon't have to exist. Defaults to the working directory; `[]` resets an inherited value to it.",
           "type": [
             "array",
             "null"

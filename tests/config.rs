@@ -455,6 +455,69 @@ fn path_override_keeps_inherited_regex() {
 }
 
 #[test]
+fn missing_auto_path_does_not_fail_load() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("backend")).unwrap();
+    let path = write_config(
+        dir.path(),
+        r"
+name: root
+children:
+  - name: backend
+    cwd: backend
+    auto:
+      git: true
+      path: [srcc, ./legacy/../gone/x]
+    commands:
+      - name: lint
+        cmd: 'true'
+",
+    );
+    let (config, _) = load_config(Some(&path), true).unwrap();
+    let backend = dir.path().canonicalize().unwrap().join("backend");
+    assert_eq!(
+        command(&config, "lint").auto.paths(),
+        [backend.join("srcc"), backend.join("gone/x")]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_auto_path_resolves_symlinked_ancestor() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+    let path = write_config(
+        dir.path(),
+        "name: root\ncommands:\n  - name: a\n    cmd: 'true'\n    auto:\n      path: [link/missing]\n",
+    );
+    let (config, _) = load_config(Some(&path), true).unwrap();
+    assert_eq!(
+        command(&config, "a").auto.paths(),
+        [real.canonicalize().unwrap().join("missing")]
+    );
+}
+
+#[test]
+fn missing_cwd_error_names_missing_dir() {
+    let err = load_err(
+        r"
+name: root
+children:
+  - name: backend
+    cwd: backendx
+    commands:
+      - name: lint
+        cmd: 'true'
+",
+    );
+    assert!(err.contains("backendx"), "{err}");
+    assert!(err.contains("No such file"), "{err}");
+    assert!(err.contains("root > backend"), "{err}");
+}
+
+#[test]
 fn path_empty_list_resets_to_cwd() {
     let (dir, path) = lockfile_repo();
     let (config, _) = load_config(Some(&path), true).unwrap();

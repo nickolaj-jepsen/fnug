@@ -4,7 +4,7 @@ use crate::commands::group::CommandGroup;
 use crate::config_file::ConfigError;
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[must_use]
 pub fn inherit_path(parent: &Path, child: PathBuf) -> PathBuf {
@@ -25,16 +25,71 @@ pub struct Inheritance {
     env: HashMap<String, String>,
 }
 
+/// A configured path that could not be resolved.
+struct PathError {
+    field: String,
+    path: PathBuf,
+    source: io::Error,
+}
+
+/// Canonicalize `path`, allowing its tail to be missing: the deepest existing ancestor is
+/// canonicalized and the missing components are appended. This keeps missing paths comparable
+/// with canonical paths (e.g. git's realpath'd work tree).
+fn canonicalize_lenient(path: &Path) -> io::Result<PathBuf> {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(mut resolved) => {
+                // Missing components can't be symlinks, so `..` among them is resolved lexically.
+                for component in missing.into_iter().rev() {
+                    match component {
+                        Component::ParentDir => {
+                            resolved.pop();
+                        }
+                        Component::Normal(name) => resolved.push(name),
+                        _ => {}
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                match (existing.parent(), existing.components().next_back()) {
+                    (Some(parent), Some(last)) => {
+                        missing.push(last);
+                        existing = parent;
+                    }
+                    _ => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 impl Inheritance {
-    fn canonicalize(&mut self) -> Result<(), io::Error> {
+    /// Resolve `cwd`, which must exist, and `auto.path`, which may name missing paths.
+    fn canonicalize(&mut self) -> Result<(), PathError> {
         if !self.cwd.as_os_str().is_empty() {
-            self.cwd = self.cwd.canonicalize()?;
+            self.cwd = self.cwd.canonicalize().map_err(|source| PathError {
+                field: "cwd".to_string(),
+                path: self.cwd.clone(),
+                source,
+            })?;
         }
         if let Some(paths) = &self.auto.path {
             let canonical = paths
                 .iter()
-                .map(|p| inherit_path(&self.cwd, p.clone()).canonicalize())
-                .collect::<Result<Vec<PathBuf>, io::Error>>()?;
+                .enumerate()
+                .map(|(i, p)| {
+                    let path = inherit_path(&self.cwd, p.clone());
+                    canonicalize_lenient(&path).map_err(|source| PathError {
+                        field: format!("auto.path[{i}]"),
+                        path,
+                        source,
+                    })
+                })
+                .collect::<Result<Vec<PathBuf>, PathError>>()?;
             self.auto.path = Some(canonical);
         }
         Ok(())
@@ -76,15 +131,17 @@ pub trait Inheritable: Sized {
     ///
     /// # Errors
     ///
-    /// Returns `ConfigError::DirectoryNotFound` if a referenced directory does not exist.
+    /// Returns `ConfigError::DirectoryNotFound` if the working directory does not exist, or an
+    /// `auto.path` can't be resolved for another reason than being missing.
     fn inherit(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
         let mut inherited = self.calculate_inheritance(inheritance)?;
         inherited
             .canonicalize()
             .map_err(|e| ConfigError::DirectoryNotFound {
-                path: inherited.cwd.clone(),
-                entry: inherited.entry_path.join("."),
-                source: e,
+                entry: inherited.entry_path.join(" > "),
+                field: e.field,
+                path: e.path,
+                source: e.source,
             })?;
         self.apply_inheritance(&inherited)
     }
