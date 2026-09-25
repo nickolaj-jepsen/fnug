@@ -15,9 +15,9 @@ use ratatui::backend::CrosstermBackend;
 
 use fnug::check::CheckResult;
 use fnug::commands::group::CommandGroup;
+use fnug::logger::LoggerConfig;
 use fnug::selectors::watch::watch_commands;
 use fnug::tui::app::{App, AppEvent};
-use fnug::tui::log_state::LogBuffer;
 
 /// Start a file watcher that forwards watch events to the app event channel.
 /// The watcher setup (inotify registration) runs on a blocking thread to avoid
@@ -79,10 +79,10 @@ pub async fn run(
     log_level: Option<log::LevelFilter>,
     check_result: Option<CheckResult>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    // Initialize the log buffer and custom logger
-    let log_buffer = LogBuffer::new();
-    let log_file = log_file.as_ref().map(std::fs::File::create).transpose()?;
-    fnug::logger::init(log_buffer.clone(), log_file, log_level);
+    let logger = fnug::logger::init(LoggerConfig {
+        level: log_level,
+        file: log_file.map(PathBuf::from),
+    })?;
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -103,7 +103,7 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(config.clone(), cwd, log_buffer);
+    let mut app = App::new(config.clone(), cwd, logger.buffer());
     if let Some(ref result) = check_result {
         let initial_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.apply_check_result(result, initial_area);
@@ -112,8 +112,10 @@ pub async fn run(
         app.spawn_git_selection();
     }
 
-    // Connect the logger to the app's event channel for redraw notifications
-    fnug::logger::connect_event_sender(app.event_tx.clone());
+    let log_tx = app.event_tx.clone();
+    logger.set_notifier(Box::new(move || {
+        let _ = log_tx.try_send(AppEvent::LogUpdated);
+    }));
 
     let file_watcher_handle = start_file_watcher(&config, app.event_tx.clone());
 
