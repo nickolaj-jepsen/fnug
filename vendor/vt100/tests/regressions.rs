@@ -238,3 +238,15 @@ fn all_contents_alt_screen() {
     parser.process(b"\x1b[?1049l");
     assert_eq!(parser.screen().all_contents().lines().count(), 10);
 }
+
+#[test]
+fn cell_chars_combining() {
+    let mut parser = vt100::Parser::new(2, 10, 0);
+    parser.process("e\u{301}中".as_bytes());
+    let screen = parser.screen();
+
+    let combined: Vec<_> = screen.cell(0, 0).unwrap().chars().collect();
+    assert_eq!(combined, ['e', '\u{301}']);
+    assert_eq!(screen.cell(0, 1).unwrap().chars().collect::<String>(), "中");
+    assert_eq!(screen.cell(0, 3).unwrap().chars().count(), 0);
+}
