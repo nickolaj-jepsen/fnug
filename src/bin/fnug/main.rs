@@ -14,19 +14,19 @@ use fnug::load_config;
 #[command(name = "fnug", about = "TUI command runner based on git changes")]
 struct Cli {
     /// Path to config file (auto-detected if not specified)
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     config: Option<String>,
 
     /// Log file path (enables file logging in addition to TUI log panel)
-    #[arg(long)]
+    #[arg(long, global = true)]
     log_file: Option<String>,
 
     /// Log level [default: info]
-    #[arg(long, value_parser = parse_level_filter)]
+    #[arg(long, global = true, value_parser = parse_level_filter)]
     log_level: Option<LevelFilter>,
 
     /// Disable workspace resolution (don't search for a parent workspace root)
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_workspace: bool,
 
     #[command(subcommand)]
@@ -86,5 +86,95 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         None => None,
     };
 
-    tui::run(config, cwd, cli.log_file, cli.log_level, check_result).await
+    let check_failed = check_result.is_some();
+    let tui_code = tui::run(config, cwd, cli.log_file, cli.log_level, check_result).await?;
+    Ok(handoff_exit_code(check_failed, tui_code))
+}
+
+fn handoff_exit_code(check_failed: bool, tui_code: ExitCode) -> ExitCode {
+    // Keep the check's failure after the TUI closes, so `fnug check && git push` stops.
+    if check_failed {
+        ExitCode::FAILURE
+    } else {
+        tui_code
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fnug::setup::hooks;
+
+    use super::*;
+
+    #[test]
+    fn hook_args_parse() {
+        for no_workspace in [false, true] {
+            let cli =
+                Cli::try_parse_from(std::iter::once("fnug").chain(hooks::hook_args(no_workspace)))
+                    .unwrap();
+            assert_eq!(cli.no_workspace, no_workspace);
+            assert!(matches!(cli.command, Some(Commands::Check(_))));
+        }
+    }
+
+    #[test]
+    fn installed_hook_line_parses() {
+        for no_workspace in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(dir.path()).unwrap();
+            hooks::install(dir.path(), no_workspace).unwrap();
+            let hook = std::fs::read_to_string(dir.path().join(".git/hooks/pre-commit")).unwrap();
+            let line = hook.lines().last().unwrap();
+            let cli = Cli::try_parse_from(line.split_whitespace()).unwrap();
+            assert_eq!(cli.no_workspace, no_workspace);
+            assert!(matches!(cli.command, Some(Commands::Check(_))));
+        }
+    }
+
+    #[test]
+    fn global_flags_parse_after_subcommand() {
+        let cli = Cli::try_parse_from([
+            "fnug",
+            "check",
+            "--no-workspace",
+            "-c",
+            "x.yaml",
+            "--log-file",
+            "fnug.log",
+            "--log-level",
+            "debug",
+        ])
+        .unwrap();
+        assert!(cli.no_workspace);
+        assert_eq!(cli.config.as_deref(), Some("x.yaml"));
+        assert_eq!(cli.log_file.as_deref(), Some("fnug.log"));
+        assert_eq!(cli.log_level, Some(LevelFilter::Debug));
+    }
+
+    #[test]
+    fn handoff_keeps_check_failure() {
+        assert_eq!(
+            handoff_exit_code(true, ExitCode::SUCCESS),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            handoff_exit_code(false, ExitCode::SUCCESS),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            handoff_exit_code(false, ExitCode::FAILURE),
+            ExitCode::FAILURE
+        );
+    }
+
+    // Hooks installed by 0.1.0-alpha.11..13 put the flag after the subcommand.
+    #[test]
+    fn legacy_hook_line_parses() {
+        let cli = Cli::try_parse_from(
+            "fnug check --fail-fast --mute-success --no-workspace".split_whitespace(),
+        )
+        .unwrap();
+        assert!(cli.no_workspace);
+        assert!(matches!(cli.command, Some(Commands::Check(_))));
+    }
 }

@@ -687,7 +687,7 @@ commands:
     assert_eq!(config.children.len(), 2);
 
     let mut child_names: Vec<&str> = config.children.iter().map(|c| c.name.as_str()).collect();
-    child_names.sort();
+    child_names.sort_unstable();
     assert_eq!(child_names, vec!["pkg-a", "pkg-b"]);
 }
 

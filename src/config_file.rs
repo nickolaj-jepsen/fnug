@@ -18,6 +18,8 @@ use crate::commands::group::CommandGroup;
 pub enum ConfigError {
     #[error("No config file found in current directory or its parents: {0}")]
     ConfigNotFound(PathBuf),
+    #[error("Config file not found: {0}")]
+    ConfigFileMissing(PathBuf),
     #[error("Unable to read config file {path}: {source}")]
     Io {
         path: PathBuf,

@@ -12,6 +12,7 @@
 //! # Synopsis
 //!
 //! ```
+//! # use fnug_vt100 as vt100;
 //! let mut parser = vt100::Parser::new(24, 80, 0);
 //!
 //! let screen = parser.screen().clone();

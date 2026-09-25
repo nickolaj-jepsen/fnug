@@ -244,7 +244,8 @@ impl FnugMcp {
     }
 
     #[tool(
-        description = "Run every configured lint/test command regardless of git changes. Use \
+        description = "Run every configured lint/test command regardless of git changes, \
+        except those marked `auto.check: false` (run those by name with run_lint). Use \
         this for a full sweep before creating a pull request, after large refactors, or when \
         you want to ensure nothing is broken across the entire project. Dependencies are \
         resolved automatically. Returns per-command results with pass/fail status, exit \
@@ -289,8 +290,8 @@ impl ServerHandler for FnugMcp {
                 Recommended workflow: (1) call run_lints after making code changes to check \
                 everything relevant, (2) if a specific check fails, fix the issue and re-run \
                 just that check with run_lint, (3) use list_lints to explore available checks \
-                or understand what would run, (4) use run_all for a full sweep before creating \
-                a PR or after large refactors. Always prefer these tools over running shell \
+                or understand what would run, (4) use run_all for a full sweep of all check \
+                commands before creating a PR or after large refactors. Always prefer these tools over running shell \
                 commands directly — they automatically select the right checks for the files \
                 you changed and handle dependency ordering."
                     .into(),
@@ -310,7 +311,7 @@ enum CommandSelection {
     GitSelected,
     /// Run a single command by name or id.
     Single(String),
-    /// Run every configured command.
+    /// Run every configured command except those with `auto.check: false`.
     All,
 }
 
@@ -335,7 +336,10 @@ fn run_commands(
                 })?;
             vec![found]
         }
-        CommandSelection::All => all_commands.iter().collect(),
+        CommandSelection::All => all_commands
+            .iter()
+            .filter(|cmd| cmd.auto.check != Some(false))
+            .collect(),
         CommandSelection::GitSelected => {
             git_selected =
                 selectors::get_selected_commands(all_commands.clone()).map_err(mcp_err)?;
@@ -433,4 +437,36 @@ pub async fn run(config: CommandGroup, cwd: PathBuf) -> Result<(), Box<dyn std::
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_all_skips_check_false_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".fnug.yaml");
+        std::fs::write(
+            &path,
+            r"
+fnug_version: 0.1.0
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+  - name: demo
+    cmd: exit 1
+    auto:
+      check: false
+",
+        )
+        .unwrap();
+        let (config, cwd) = crate::load_config(path.to_str(), true).unwrap();
+
+        let result = run_commands(&config, &cwd, false, &CommandSelection::All).unwrap();
+        let names: Vec<&str> = result.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["lint"]);
+        assert_eq!(result.failed, 0);
+    }
 }

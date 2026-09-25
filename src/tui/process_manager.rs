@@ -102,6 +102,7 @@ impl App {
         let Some(cmd) = self.find_command(cmd_id) else {
             return;
         };
+        self.error_messages.remove(cmd_id);
 
         // Check dependencies
         if !cmd.depends_on.is_empty() {
@@ -232,10 +233,14 @@ impl App {
         });
     }
 
-    /// Clear a command's terminal and kill the process if running
+    /// Clear a command's terminal, error and queued run, and kill the process if running
     pub fn clear_command(&mut self, cmd_id: &str) {
         if let Some(proc) = self.processes.remove(cmd_id) {
             proc.kill_and_abort(cmd_id);
+        }
+        self.error_messages.remove(cmd_id);
+        if self.pending_deps.remove(cmd_id).is_some() {
+            self.cancel_dependents(cmd_id);
         }
         self.mark_tree_dirty();
     }
@@ -287,5 +292,153 @@ impl App {
                 debug!("Failed to resize terminal: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use portable_pty::{PtySize, native_pty_system};
+    use ratatui::layout::Rect;
+
+    use crate::commands::command::Command;
+    use crate::commands::group::CommandGroup;
+    use crate::tui::app::{App, AppEvent, CommandStatus};
+    use crate::tui::log_state::LogBuffer;
+    use crate::tui::tree_widget::NodeKind;
+
+    const AREA: Rect = Rect::new(0, 0, 80, 24);
+
+    fn pty_available() -> bool {
+        let ok = native_pty_system().openpty(PtySize::default()).is_ok();
+        if !ok {
+            eprintln!("skipping: no PTY available");
+        }
+        ok
+    }
+
+    /// `test` depends on `build`; both run `true` in `dir`.
+    fn dep_app(dir: &Path) -> App {
+        let command = |id: &str, depends_on: Vec<String>| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: "true".into(),
+            cwd: dir.to_path_buf(),
+            depends_on,
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                command("build", vec![]),
+                command("test", vec!["build".into()]),
+            ],
+            ..Default::default()
+        };
+        App::new(config, dir.to_path_buf(), LogBuffer::new())
+    }
+
+    fn exited(id: &str, code: u32) -> AppEvent {
+        AppEvent::ProcessExited(id.into(), code)
+    }
+
+    fn node_status(app: &mut App, id: &str) -> CommandStatus {
+        app.rebuild_visible_nodes();
+        let node = app.visible_nodes.iter().find(|n| n.id == id).unwrap();
+        match &node.kind {
+            NodeKind::Command { status, .. } => status.clone(),
+            NodeKind::Group { .. } => panic!("'{id}' is a group"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sticky_dep_error_cleared_on_rerun() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = dep_app(dir.path());
+
+        app.start_command("test", AREA, true);
+        app.handle_app_event(exited("build", 1));
+        assert_eq!(
+            node_status(&mut app, "test"),
+            CommandStatus::Error("Dependency 'build' failed".into())
+        );
+
+        app.start_command("test", AREA, true);
+        app.handle_app_event(exited("build", 0));
+        app.handle_app_event(exited("test", 0));
+
+        assert_eq!(node_status(&mut app, "test"), CommandStatus::Success);
+        assert!(!app.error_messages.contains_key("test"));
+        app.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clear_command_drops_error_and_pending_deps() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = dep_app(dir.path());
+
+        app.start_command("test", AREA, true);
+        app.handle_app_event(exited("build", 1));
+        app.clear_command("test");
+        assert!(!app.error_messages.contains_key("test"));
+        assert_eq!(node_status(&mut app, "test"), CommandStatus::Pending);
+
+        app.start_command("test", AREA, true);
+        assert!(app.pending_deps.contains_key("test"));
+        app.clear_command("test");
+        assert!(!app.pending_deps.contains_key("test"));
+
+        // A cleared command must not be started when its dependency finishes
+        app.handle_app_event(exited("build", 0));
+        assert!(!app.processes.contains_key("test"));
+        app.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_queued_command_cancels_its_dependents() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let command = |id: &str, depends_on: &[&str]| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: "true".into(),
+            cwd: dir.path().to_path_buf(),
+            depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                command("a", &[]),
+                command("b", &["a"]),
+                command("c", &["b"]),
+            ],
+            ..Default::default()
+        };
+        let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
+
+        app.start_command("c", AREA, true);
+        assert!(app.pending_deps.contains_key("b"));
+        assert!(app.pending_deps.contains_key("c"));
+
+        app.clear_command("b");
+        assert!(!app.pending_deps.contains_key("c"), "c still waits on b");
+        assert!(!app.error_messages.contains_key("c"));
+
+        app.handle_app_event(exited("a", 0));
+        assert!(!app.processes.contains_key("b"));
+        assert!(!app.processes.contains_key("c"));
+        app.shutdown();
     }
 }

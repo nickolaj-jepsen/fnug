@@ -12,6 +12,8 @@ use portable_pty::{
 use crate::commands::command::Command;
 
 const DEFAULT_SCROLLBACK_SIZE: usize = 3500;
+/// Updates applied per parser lock acquisition before yielding it to the renderer
+const MAX_UPDATES_PER_LOCK: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -88,23 +90,17 @@ fn spawn_output_writer(
     let (update_tx, terminal_rx) = crossbeam_channel::bounded(1000);
 
     spawn(move || {
-        loop {
-            let res = terminal_rx.recv();
+        while let Ok(update) = terminal_rx.recv() {
             let mut parser = parser.lock();
-            if let Ok(update) = res {
+            apply_update(&mut parser, update);
+            // Bounded batch: an unbounded drain holds the lock for as long as output floods in
+            for update in terminal_rx.try_iter().take(MAX_UPDATES_PER_LOCK - 1) {
                 apply_update(&mut parser, update);
-
-                // Drain any pending updates to batch processing
-                while let Ok(update) = terminal_rx.try_recv() {
-                    apply_update(&mut parser, update);
-                }
-            } else {
-                debug!("Terminal update channel closed (process exited)");
-                break;
             }
-
+            drop(parser);
             dirty.store(true, Ordering::Release);
         }
+        debug!("Terminal update channel closed (process exited)");
     });
 
     update_tx
@@ -139,11 +135,13 @@ fn apply_update(parser: &mut vt100::Parser, update: TerminalUpdate) {
 
 /// Spawn a thread to read from the PTY and send output to the update channel
 ///
-/// Returns a channel to receive the process exit status
+/// Returns a channel to receive the process exit status. `reaped` is set once the
+/// process has been waited on, before its status is published.
 fn spawn_pty_reader(
     mut reader: Box<dyn Read + Send>,
     mut process: Box<dyn Child + Send + Sync>,
     update_tx: crossbeam_channel::Sender<TerminalUpdate>,
+    reaped: Arc<AtomicBool>,
 ) -> crossbeam_channel::Receiver<ExitStatus> {
     let (status_tx, status_rx) = crossbeam_channel::bounded(1);
 
@@ -172,7 +170,10 @@ fn spawn_pty_reader(
         }
 
         // Wait for the process to exit
-        match process.wait() {
+        let result = process.wait();
+        // The pid may be reused from here on, so it must never be signalled again
+        reaped.store(true, Ordering::Release);
+        match result {
             Ok(status) => {
                 let _ = status_tx.send(status);
             }
@@ -189,6 +190,7 @@ fn spawn_pty_writer(
     mut writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     mut killer: Box<dyn ChildKiller + Send + Sync>,
+    reaped: Arc<AtomicBool>,
 ) -> crossbeam_channel::Sender<PtyUpdate> {
     let (pty_tx, pty_rx) = crossbeam_channel::bounded(1000);
 
@@ -221,10 +223,14 @@ fn spawn_pty_writer(
                     }
                 }
                 Ok(PtyUpdate::KillProcess) => {
-                    debug!("Killing process");
-                    killer
-                        .kill()
-                        .unwrap_or_else(|e| debug!("Failed to kill process: {e:?}"));
+                    if reaped.load(Ordering::Acquire) {
+                        debug!("Process already exited, not killing");
+                    } else {
+                        debug!("Killing process");
+                        killer
+                            .kill()
+                            .unwrap_or_else(|e| debug!("Failed to kill process: {e:?}"));
+                    }
                 }
                 Err(_) => {
                     debug!("PTY writer thread EOF");
@@ -244,6 +250,7 @@ pub struct Terminal {
     status_rx: crossbeam_channel::Receiver<ExitStatus>,
     parser: Arc<Mutex<vt100::Parser>>,
     dirty: Arc<AtomicBool>,
+    reaped: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -283,9 +290,10 @@ impl Terminal {
         )));
 
         let dirty = Arc::new(AtomicBool::new(false));
+        let reaped = Arc::new(AtomicBool::new(false));
         let update_tx = spawn_output_writer(Arc::clone(&parser), Arc::clone(&dirty));
-        let status_rx = spawn_pty_reader(reader, process, update_tx.clone());
-        let pty_tx = spawn_pty_writer(writer, master, killer);
+        let status_rx = spawn_pty_reader(reader, process, update_tx.clone(), Arc::clone(&reaped));
+        let pty_tx = spawn_pty_writer(writer, master, killer, Arc::clone(&reaped));
 
         Ok(Self {
             update_tx,
@@ -293,6 +301,7 @@ impl Terminal {
             status_rx,
             parser,
             dirty,
+            reaped,
         })
     }
 
@@ -403,12 +412,20 @@ impl Terminal {
         Ok(status.exit_code())
     }
 
-    /// Kill the process running in the terminal.
+    /// Whether the process has exited and been reaped.
+    pub(crate) fn has_exited(&self) -> bool {
+        self.reaped.load(Ordering::Acquire)
+    }
+
+    /// Kill the process running in the terminal. Does nothing once it has exited.
     ///
     /// # Errors
     ///
     /// Returns `ProcessError::WriterDisconnected` if the PTY channel is closed.
     pub fn kill(&self) -> Result<(), ProcessError> {
+        if self.has_exited() {
+            return Ok(());
+        }
         self.send_pty(PtyUpdate::KillProcess)
     }
 
@@ -437,5 +454,141 @@ impl Terminal {
     /// Returns `ProcessError::WriterDisconnected` if the PTY channel is closed.
     pub fn write(&self, input: Vec<u8>) -> Result<(), ProcessError> {
         self.send_pty(PtyUpdate::Write(input))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use portable_pty::{PtySize, native_pty_system};
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use parking_lot::Mutex;
+
+    use super::{Terminal, TerminalSize, TerminalUpdate, spawn_output_writer};
+    use crate::commands::command::Command;
+
+    fn pty_available() -> bool {
+        let ok = native_pty_system().openpty(PtySize::default()).is_ok();
+        if !ok {
+            eprintln!("skipping: no PTY available");
+        }
+        ok
+    }
+
+    /// Kills the command when dropped, so a failed assertion doesn't leak it.
+    struct Spawned(Terminal);
+
+    impl Drop for Spawned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    fn spawn(cmd: &str, cwd: &Path) -> Spawned {
+        let command = Command {
+            id: "t".into(),
+            name: "t".into(),
+            cmd: cmd.into(),
+            cwd: cwd.to_path_buf(),
+            ..Default::default()
+        };
+        let size = TerminalSize::new(80, 24);
+        Spawned(Terminal::new(&command, size, Terminal::default_scrollback_size()).unwrap())
+    }
+
+    fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cond()
+    }
+
+    #[test]
+    fn parser_lock_available_during_flood() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn("touch ready && exec yes", dir.path());
+        let started = wait_until(Duration::from_secs(5), || dir.path().join("ready").exists());
+        assert!(started, "command did not start");
+
+        let parser = term.0.parser();
+        let start = Instant::now();
+        let mut acquired = 0;
+        let mut saw_output = false;
+        // Keep contending long enough for the output queue to fill up behind the parser
+        while acquired < 5 || !saw_output || start.elapsed() < Duration::from_millis(500) {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "no output from `yes`"
+            );
+            let Some(guard) = parser.try_lock_for(Duration::from_millis(500)) else {
+                panic!("parser lock starved after {acquired} acquisitions");
+            };
+            saw_output |= guard.screen().contents().contains('y');
+            acquired += 1;
+        }
+    }
+
+    #[test]
+    fn output_writer_releases_lock_between_batches() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let tx = spawn_output_writer(Arc::clone(&parser), Arc::clone(&dirty));
+
+        // Queue a full channel of output while the writer is blocked on the lock
+        let guard = parser.lock();
+        for _ in 0..1000 {
+            tx.send(TerminalUpdate::Process(b"y\r\n".repeat(2730)))
+                .unwrap();
+        }
+        drop(guard);
+
+        while !dirty.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        // An unbounded drain only publishes once the queue is empty
+        assert!(!tx.is_empty(), "writer drained everything before yielding");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn has_exited_once_wait_returns() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn("true", dir.path());
+
+        assert_eq!(term.0.wait().await.unwrap(), 0);
+        // Set before the exit status is published, so later kills are always skipped
+        assert!(term.0.has_exited());
+        term.0.kill().unwrap();
+    }
+
+    #[test]
+    fn kill_stops_running_command() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let term = spawn("touch ready && exec sleep 30", dir.path());
+        let started = wait_until(Duration::from_secs(5), || dir.path().join("ready").exists());
+        assert!(started, "command did not start");
+        assert!(!term.0.has_exited());
+
+        term.0.kill().unwrap();
+
+        let exited = wait_until(Duration::from_secs(5), || term.0.has_exited());
+        assert!(exited, "command still running after kill");
     }
 }

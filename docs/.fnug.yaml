@@ -1,15 +1,23 @@
 fnug_version: 0.1.0
 name: example
+# Demo fixture for docs/demo.tape: TUI only, kept out of `fnug check` and MCP runs.
+# Commands without watch/git/always don't inherit `check`, so they repeat it.
+auto: &manual
+  check: false
 commands:
   - name: htop
     cmd: htop
+    auto: *manual
   - name: recursive?!
     cmd: cargo run --bin fnug
     cwd: ..
+    auto: *manual
   - name: A very very very long name
     cmd: cat ../src/pty/terminal.rs
+    auto: *manual
   - name: always-fails
     cmd: exit 1
+    auto: *manual
 children:
   - name: nested-auto
     auto:
@@ -20,6 +28,7 @@ children:
       - name: test-not-auto
         auto:
           always: false
+          check: false
         cmd: cat ../src/pty/terminal.rs
   - name: not-expanded
     auto:
@@ -27,3 +36,4 @@ children:
     commands:
       - name: test-not-expanded
         cmd: cat ../src/pty/terminal.rs
+        auto: *manual
