@@ -483,7 +483,6 @@ children:
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn missing_auto_path_resolves_symlinked_ancestor() {
     let dir = tempfile::tempdir().unwrap();
@@ -1727,6 +1726,21 @@ fn root_dir_missing_is_an_error() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("nope"), "{err}");
+}
+
+#[test]
+fn root_dir_file_is_an_error() {
+    let (config_dir, root) = rooted();
+    let file = root.path().join("file");
+    std::fs::write(&file, "").unwrap();
+    let err = fnug::load(&LoadOptions {
+        config: Some(config_dir.path().join(".fnug.yaml")),
+        root_dir: Some(file),
+        ..LoadOptions::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("not a directory"), "{err}");
 }
 
 #[test]
