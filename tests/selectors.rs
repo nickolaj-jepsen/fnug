@@ -1163,6 +1163,74 @@ commands:
     assert_eq!(seen["rust"], BTreeSet::new());
 }
 
+/// Replace `path` the way many editors and tools save: write a new file, rename it over.
+fn atomic_write(path: &Path, contents: &str) {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_survives_two_atomic_replaces() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let manifest = root.join("Cargo.toml");
+    std::fs::write(&manifest, "one").unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+commands:
+  - name: toml
+    cmd: 'true'
+    auto:
+      watch: true
+      path: [./Cargo.toml]
+",
+    );
+    let mut handle = start_watch(&config);
+
+    for round in ["two", "three"] {
+        std::fs::write(root.join("Cargo.lock"), round).unwrap();
+        atomic_write(&manifest, round);
+        let seen = watch_until(&mut handle, |seen| seen.contains_key("toml")).await;
+        assert_eq!(seen["toml"], BTreeSet::from([manifest.clone()]), "{round}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_new_dir_is_watched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    // The file is watched through `.` too, which must stay recursive.
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  watch: true
+commands:
+  - name: any
+    cmd: 'true'
+  - name: toml
+    cmd: 'true'
+    auto:
+      path: [./Cargo.toml]
+",
+    );
+    let mut handle = start_watch(&config);
+
+    std::fs::create_dir(root.join("new")).unwrap();
+    watch_until(&mut handle, |seen| seen.contains_key("any")).await;
+    let file = root.join("new/a.txt");
+    std::fs::write(&file, "").unwrap();
+    watch_until(&mut handle, |seen| {
+        seen.get("any").is_some_and(|files| files.contains(&file))
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn watch_missing_path_skipped() {
     let tmp = tempfile::tempdir().unwrap();

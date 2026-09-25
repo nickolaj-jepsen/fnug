@@ -212,31 +212,70 @@ fn start_debouncer(
 }
 
 /// Watch each of `paths` on its own, so one that is missing or fails leaves the others watched.
+/// Directories are watched recursively. A file is watched through its parent directory, as
+/// saving it by renaming a new file over it would end a watch on the file itself.
 fn register(
     debouncer: &mut Debouncer<RecommendedWatcher, RecommendedCache>,
-    paths: &[&Path],
+    paths: &[PathBuf],
 ) -> WatchReport {
     let mut report = WatchReport::default();
-    for &path in paths {
-        if matches!(path.symlink_metadata(), Err(e) if e.kind() == io::ErrorKind::NotFound) {
-            report.missing.push(path.to_path_buf());
-            continue;
-        }
-        match debouncer.watch(path, RecursiveMode::Recursive) {
-            Ok(()) => {
-                debug!("Watching path: {}", path.display());
-                report.roots.push(path.to_path_buf());
-                report.watched_dirs += 1;
-            }
-            // A recursive watch stops at the first directory that fails, leaving the rest of
-            // the tree unwatched, so the path counts as failed even if some of it is watched.
-            Err(e) => {
-                report.limit_reached |= matches!(e.kind, notify::ErrorKind::MaxFilesWatch);
-                report.failed.push((path.to_path_buf(), e.to_string()));
+    let mut dirs: Vec<&Path> = Vec::new();
+    let mut files: Vec<&Path> = Vec::new();
+    for path in paths {
+        match path.symlink_metadata() {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => report.missing.push(path.clone()),
+            Ok(meta) if !meta.is_dir() => files.push(path),
+            _ => {
+                if add_watch(debouncer, path, path, RecursiveMode::Recursive, &mut report) {
+                    dirs.push(path);
+                }
             }
         }
     }
+    // After the directories: a file under a watched one needs no watch of its own, and a
+    // non-recursive watch would turn off notify's recursion on a directory already watched.
+    let mut parents: Vec<&Path> = Vec::new();
+    for file in files {
+        let parent = file.parent().unwrap_or(file);
+        if dirs.iter().any(|dir| file.starts_with(dir)) || parents.contains(&parent) {
+            report.roots.push(file.to_path_buf());
+        } else if add_watch(
+            debouncer,
+            file,
+            parent,
+            RecursiveMode::NonRecursive,
+            &mut report,
+        ) {
+            parents.push(parent);
+        }
+    }
     report
+}
+
+/// Watch `dir` so changes to the watch path `path` are seen, and record the outcome in
+/// `report`. Returns whether it worked.
+fn add_watch(
+    debouncer: &mut Debouncer<RecommendedWatcher, RecommendedCache>,
+    path: &Path,
+    dir: &Path,
+    mode: RecursiveMode,
+    report: &mut WatchReport,
+) -> bool {
+    match debouncer.watch(dir, mode) {
+        Ok(()) => {
+            debug!("Watching {} for {}", dir.display(), path.display());
+            report.roots.push(path.to_path_buf());
+            report.watched_dirs += 1;
+            true
+        }
+        // A recursive watch stops at the first directory that fails, leaving the rest of the
+        // tree unwatched, so the path counts as failed even if some of it is watched.
+        Err(e) => {
+            report.limit_reached |= matches!(e.kind, notify::ErrorKind::MaxFilesWatch);
+            report.failed.push((path.to_path_buf(), e.to_string()));
+            false
+        }
+    }
 }
 
 /// Start watching the `auto.path` entries of the commands with `auto.watch`. Paths that are
@@ -253,7 +292,6 @@ pub fn watch_commands(commands: Vec<Command>) -> Result<WatchHandle, WatchError>
         return Err(WatchError::NoWatchableCommands);
     }
     let paths: Vec<PathBuf> = matcher.keys.iter().map(|key| key.path.clone()).collect();
-    let paths: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
 
     let (sender, events) = mpsc::channel(100);
     let mut debouncer = start_debouncer(matcher, sender)?;
