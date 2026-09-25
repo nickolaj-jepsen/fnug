@@ -58,6 +58,10 @@ impl Action {
             Self::InstallMcp { editor, cwd } => {
                 editor.install(cwd)?;
                 println!("Configured MCP for {editor}");
+                // The entry runs plain `fnug`: the file is shared, so no machine's path goes in
+                if fsutil::find_on_path("fnug").is_none() {
+                    println!("  warning: fnug isn't on PATH, so {editor} can't start it yet");
+                }
             }
             Self::RemoveMcp { editor, cwd } => {
                 editor.remove(cwd)?;

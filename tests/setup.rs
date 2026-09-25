@@ -1,5 +1,5 @@
-//! Tests for `fnug setup`'s git hook handling. Hooks are run with `sh` and a shim `fnug` on
-//! `PATH` that records its arguments.
+//! Tests for `fnug setup`: git hooks, which are run with `sh` and a shim `fnug` on `PATH` that
+//! records its arguments, and editor MCP configs.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use std::sync::{Once, OnceLock};
 use fnug::setup::hooks::{
     self, ForeignPolicy, HookError, HookLocation, HookStatus, InstallOptions, InstallOutcome,
 };
+use fnug::setup::mcp::{Editor, McpError};
 use git2::{IndexAddOption, Repository, RepositoryInitOptions, Signature};
 
 /// Keep the developer's global and system git config (a global `core.hooksPath`, say) out of the
@@ -709,13 +710,145 @@ fn missing_fnug_local_blocks_shared_skips() {
 
     // Also when the hook runs with `sh -e`, as a `#!/bin/sh -e` shebang does
     std::fs::remove_file(root.join("user-line")).unwrap();
-    let status = Command::new(which_sh())
+    let output = Command::new(which_sh())
         .arg("-e")
         .arg(&hook)
         .current_dir(&root)
         .env("PATH", NO_FNUG_PATH)
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success());
+    assert!(output.status.success(), "{output:?}");
     assert!(root.join("user-line").exists());
+}
+
+// ─── editor MCP configs ───
+
+const JSONC: &str = r#"{
+    // Servers for this repo
+    "servers": {
+        "zeta": { "command": "zeta" },
+        "alpha": { "command": "alpha" }, // the one we use most
+    },
+    "inputs": [],
+}
+"#;
+
+fn write_config(editor: Editor, dir: &Path, content: &str) -> PathBuf {
+    let path = editor.config_path(dir);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
+#[test]
+fn jsonc_install_preserves_comments_order_indent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(Editor::VsCode, dir.path(), JSONC);
+    assert!(!Editor::VsCode.status(dir.path()).unwrap());
+
+    Editor::VsCode.install(dir.path()).unwrap();
+
+    let content = read(&path);
+    assert!(Editor::VsCode.status(dir.path()).unwrap());
+    for kept in [
+        "// Servers for this repo",
+        "// the one we use most",
+        "\n        \"zeta\": { \"command\": \"zeta\" },\n",
+        "\n    \"inputs\": [],\n",
+    ] {
+        assert!(content.contains(kept), "lost {kept:?}:\n{content}");
+    }
+    let position = |text: &str| content.find(text).unwrap();
+    assert!(position("zeta") < position("alpha") && position("alpha") < position("\"fnug\""));
+    assert!(position("\"fnug\"") < position("inputs"), "{content}");
+    assert!(
+        content.contains("\n        \"fnug\": {\n"),
+        "indent:\n{content}"
+    );
+    assert!(content.contains("\"command\": \"fnug\""), "{content}");
+}
+
+#[test]
+fn jsonc_remove_preserves_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(Editor::VsCode, dir.path(), JSONC);
+    Editor::VsCode.install(dir.path()).unwrap();
+    Editor::VsCode.remove(dir.path()).unwrap();
+
+    let content = read(&path);
+    assert!(!Editor::VsCode.status(dir.path()).unwrap());
+    assert!(!content.contains("fnug"), "{content}");
+    assert!(content.contains("// Servers for this repo"), "{content}");
+    assert!(content.contains("// the one we use most"), "{content}");
+}
+
+#[test]
+fn installing_twice_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(Editor::VsCode, dir.path(), JSONC);
+    Editor::VsCode.install(dir.path()).unwrap();
+    let once = read(&path);
+
+    assert_eq!(
+        Editor::VsCode
+            .plan_install(dir.path(), &["mcp".to_string()])
+            .unwrap(),
+        None
+    );
+    Editor::VsCode.install(dir.path()).unwrap();
+    assert_eq!(read(&path), once);
+}
+
+#[test]
+fn status_reports_parse_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(Editor::ClaudeCode, dir.path(), "{ \"mcpServers\": ");
+
+    let err = Editor::ClaudeCode.status(dir.path()).unwrap_err();
+    assert!(matches!(err, McpError::Parse { .. }), "{err}");
+    assert!(err.to_string().contains(".mcp.json"), "{err}");
+    assert!(Editor::ClaudeCode.install(dir.path()).is_err());
+    assert_eq!(
+        read(&path),
+        "{ \"mcpServers\": ",
+        "a broken file is left alone"
+    );
+}
+
+#[test]
+fn new_config_is_plain_json() {
+    let dir = tempfile::tempdir().unwrap();
+    Editor::ClaudeCode.install(dir.path()).unwrap();
+    assert_eq!(
+        read(&Editor::ClaudeCode.config_path(dir.path())),
+        "{\n  \"mcpServers\": {\n    \"fnug\": {\n      \"type\": \"stdio\",\n      \"command\": \"fnug\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}\n"
+    );
+}
+
+#[test]
+fn servers_key_of_the_wrong_type_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(Editor::ClaudeCode, dir.path(), "{\"mcpServers\": []}\n");
+    let err = Editor::ClaudeCode.install(dir.path()).unwrap_err();
+    assert!(matches!(err, McpError::NotAnObject { .. }), "{err}");
+}
+
+#[test]
+fn no_temp_files_left() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(Editor::VsCode, dir.path(), JSONC);
+    Editor::VsCode.install(dir.path()).unwrap();
+    Editor::VsCode.remove(dir.path()).unwrap();
+    Editor::ClaudeCode.install(dir.path()).unwrap();
+
+    let names = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(dir.path()), [".mcp.json", ".vscode"]);
+    assert_eq!(names(&dir.path().join(".vscode")), ["mcp.json"]);
 }
