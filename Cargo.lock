@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "fnug-vt100"
-version = "0.15.3"
+version = "0.16.0"
 dependencies = [
  "itoa",
  "log",
