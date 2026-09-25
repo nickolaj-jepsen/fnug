@@ -169,3 +169,31 @@ fn cursor_remove_drops_legacy_servers_entry() {
         json!({"mcpServers": {"other": {"command": "other"}}})
     );
 }
+
+#[test]
+fn subcommand_help_lists_global_options_separately() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = fnug(dir.path(), &["check", "--help"]);
+    assert_success(&output);
+    let help = String::from_utf8_lossy(&output.stdout);
+    let (own, global) = help
+        .split_once("Global options:")
+        .unwrap_or_else(|| panic!("no global options heading:\n{help}"));
+    assert!(own.contains("--fail-fast"), "{help}");
+    for flag in [
+        "--config",
+        "--log-file",
+        "--log-level",
+        "--no-workspace",
+        "--root",
+    ] {
+        assert!(
+            global.contains(flag),
+            "{flag} not under the heading:\n{help}"
+        );
+        assert!(
+            !own.contains(flag),
+            "{flag} among the check options:\n{help}"
+        );
+    }
+}

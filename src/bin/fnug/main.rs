@@ -16,7 +16,9 @@ use fnug::{LoadOptions, LoadedConfig};
 #[command(
     name = "fnug",
     version,
-    about = "TUI command runner based on git changes"
+    about = "TUI command runner based on git changes",
+    // Keeps the global flags apart from a subcommand's own flags in its --help
+    next_help_heading = "Global options"
 )]
 struct Cli {
     /// Path to config file (auto-detected if not specified)
