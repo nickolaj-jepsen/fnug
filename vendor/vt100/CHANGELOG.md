@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.15.3] - Unreleased
+
+First changelog entry for the `fnug-vt100` fork. It also records the fork's
+earlier changes on top of upstream vt100 0.15.2, which were never listed here.
+
+### Added
+
+* `Parser::clear` to clear the screen, the alternate screen and the
+  scrollback
+* `Parser::scrollback_len` and `Screen::scrollback_len` to get the number of
+  rows currently in scrollback
+
+### Fixed
+
+* Restoring the cursor (`ESC 8`, or leaving the alternate screen with
+  `CSI ? 1049 l`) after the terminal shrank no longer panics. The saved
+  cursor position is now clamped on resize, as in upstream vt100 0.16.2.
+* `visible_rows` no longer underflows when the scrollback offset is larger
+  than the scrollback or the screen
+
 ## [0.15.2] - 2023-02-05
 
 ### Changed
