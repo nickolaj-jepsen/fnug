@@ -875,6 +875,30 @@ children:
 }
 
 #[test]
+fn command_may_share_the_root_name() {
+    let (_dir, config) = load(
+        r"
+name: lint
+commands:
+  - name: lint
+    cmd: 'true'
+  - name: after
+    cmd: 'true'
+    depends_on: [lint]
+",
+    );
+    assert_eq!(config.commands[0].id, "lint");
+    assert_eq!(config.commands[1].depends_on, ["lint"]);
+    assert_ne!(config.id, "lint");
+}
+
+#[test]
+fn explicit_root_id_still_unique() {
+    let err = load_err("name: x\nid: lint\ncommands:\n  - name: lint\n    cmd: 'true'\n");
+    assert!(err.contains("Duplicate id 'lint'"), "{err}");
+}
+
+#[test]
 fn dependency_cycle_lists_whole_cycle() {
     let err = load_err(
         r"
