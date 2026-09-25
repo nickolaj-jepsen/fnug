@@ -128,6 +128,9 @@ impl App {
                     cmd.name,
                     unresolved.len()
                 );
+                // Queued first, so a dependency that fails to start fails this command too
+                self.pending_deps
+                    .insert(cmd_id.to_string(), unresolved.clone());
                 // Start unresolved deps that aren't running or pending
                 for dep_id in &unresolved {
                     if !self
@@ -139,7 +142,6 @@ impl App {
                         self.start_command(dep_id, terminal_area, false);
                     }
                 }
-                self.pending_deps.insert(cmd_id.to_string(), unresolved);
                 if set_active {
                     self.active_terminal_id = Some(cmd_id.to_string());
                 }
@@ -197,6 +199,7 @@ impl App {
                 let msg = format!("Failed to start '{}': {}", cmd.name, e);
                 error!("{msg}");
                 self.error_messages.insert(cmd_id.to_string(), msg);
+                self.fail_dependents(cmd_id);
                 if set_active {
                     self.active_terminal_id = Some(cmd_id.to_string());
                 }
@@ -495,6 +498,49 @@ mod tests {
         assert!(!app.processes.contains_key("a"));
         let msg = app.error_messages.get("a").expect("no error shown");
         assert!(msg.contains("does not exist"), "{msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_failure_fails_dependents() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                Command {
+                    id: "gone".into(),
+                    name: "gone".into(),
+                    cmd: "true".into(),
+                    cwd: dir.path().join("gone"),
+                    ..Default::default()
+                },
+                Command {
+                    id: "dependent".into(),
+                    name: "dependent".into(),
+                    cmd: "true".into(),
+                    cwd: dir.path().to_path_buf(),
+                    depends_on: vec!["gone".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
+
+        app.start_command("dependent", AREA, true);
+
+        assert!(app.error_messages.contains_key("gone"));
+        assert!(
+            !app.pending_deps.contains_key("dependent"),
+            "dependent waits for a dependency that never started"
+        );
+        assert_eq!(
+            node_status(&mut app, "dependent"),
+            CommandStatus::Error("Dependency 'gone' failed".into())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -560,7 +560,7 @@ impl App {
     }
 
     /// Propagate failure to commands waiting on a failed dependency (recursive)
-    fn fail_dependents(&mut self, failed_id: &str) {
+    pub(super) fn fail_dependents(&mut self, failed_id: &str) {
         let failed_id_owned = failed_id.to_string();
         let dependents: Vec<String> = self
             .pending_deps
