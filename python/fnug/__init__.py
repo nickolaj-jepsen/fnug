@@ -34,17 +34,8 @@ def _find_binary() -> str:
     Checks the Python scripts directory first (where maturin installs it),
     then falls back to PATH lookup.
     """
-    # Check in the scripts directory next to the Python executable
     if sys.executable:
-        bin_dir = Path(sys.executable).parent
-        for name in ("fnug", "fnug.exe"):
-            candidate = bin_dir / name
-            if candidate.is_file():
-                return str(candidate)
-
-    # Check in the Scripts directory on Windows
-    if sys.platform == "win32" and sys.prefix:
-        candidate = Path(sys.prefix) / "Scripts" / "fnug.exe"
+        candidate = Path(sys.executable).parent / "fnug"
         if candidate.is_file():
             return str(candidate)
 
