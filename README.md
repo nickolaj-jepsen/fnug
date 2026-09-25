@@ -84,7 +84,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 | Flag              | Description                                                     |
 | ----------------- | --------------------------------------------------------------- |
-| `-c <path>`       | Path to config file                                             |
+| `-c <path>`       | Path to config file, always loaded as the root                  |
 | `--no-workspace`  | Disable workspace resolution (don't search for a parent root)   |
 | `--log-file`      | Write logs to a file                                            |
 | `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info) |
@@ -284,7 +284,7 @@ workspace:
 
 Each package behaves the same as when fnug runs inside it on its own: its `cwd` and `auto.path` are relative to the package directory, and it inherits no `cwd`, `auto` or `env` from the root config. Package ids are prefixed with the package's id, which defaults to its `name`, so a `build` command in a package named `api` has the id `api/build`. Inside a package, `depends_on: [build]` means the package's own `build`; reference another package's command by its full id (`api/build`) and a root command by its id.
 
-When run from a subdirectory that contains a `.fnug.yaml`, fnug automatically resolves upward to the nearest workspace root. Use `--no-workspace` to disable this behavior.
+When fnug finds a config by searching upward (no `-c`), it loads a parent workspace root instead if that root's own discovery includes the config. A config the root doesn't discover, for example in a gitignored or hidden directory, below `max_depth`, or not matched by `paths`, is loaded on its own. Parent configs that fail to parse, or whose discovery fails, are skipped with a warning. `-c` always loads the given file as the root. Use `--no-workspace` to never look for a parent workspace root.
 
 ### Advanced example
 
