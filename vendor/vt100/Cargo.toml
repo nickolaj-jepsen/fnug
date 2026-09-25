@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "fnug-vt100"
-version = "0.15.3"
+version = "0.16.0"
 include = [
     "src/**/*",
     "LICENSE",
