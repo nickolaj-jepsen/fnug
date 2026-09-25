@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 
 use fnug::check::CheckResult;
 use fnug::commands::group::CommandGroup;
-use fnug::logger::LoggerConfig;
+use fnug::logger::LoggerHandle;
 use fnug::selectors::watch::watch_commands;
 use fnug::tui::app::{App, AppEvent};
 
@@ -75,15 +75,9 @@ fn worker_panic_message(thread: Option<&str>, panic: &impl Display) -> Option<St
 pub async fn run(
     config: CommandGroup,
     cwd: PathBuf,
-    log_file: Option<String>,
-    log_level: Option<log::LevelFilter>,
+    logger: LoggerHandle,
     check_result: Option<CheckResult>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let logger = fnug::logger::init(LoggerConfig {
-        level: log_level,
-        file: log_file.map(PathBuf::from),
-    })?;
-
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         if let Some(message) = worker_panic_message(std::thread::current().name(), panic_info) {
@@ -95,7 +89,8 @@ pub async fn run(
         }
     }));
 
-    // Setup terminal
+    // Log lines would corrupt the TUI; the log panel shows them instead
+    logger.set_stderr(false);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -122,9 +117,15 @@ pub async fn run(
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app).await;
     file_watcher_handle.abort();
+    if let Err(e) = &result {
+        // Only to the log panel's buffer and the log file; stderr gets it once, below
+        error!("Application error: {e}");
+    }
 
     // Give the terminal back before waiting for commands to stop
     let restored = restore_terminal(&mut terminal);
+    // So problems stopping the commands reach stderr
+    logger.set_stderr(true);
     let running = app
         .processes
         .values()
@@ -137,7 +138,6 @@ pub async fn run(
     restored?;
 
     if let Err(e) = result {
-        error!("Application error: {e}");
         eprintln!("Error: {e}");
         return Ok(ExitCode::FAILURE);
     }
