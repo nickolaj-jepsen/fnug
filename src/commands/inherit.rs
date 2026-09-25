@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn test_basic_cwd_inheritance() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         create_dir_all(&root);
 
         let mut group = CommandGroup {
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn test_relative_path_resolution() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn test_auto_settings_inheritance() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         create_dir_all(&root);
 
         let parent_auto = Auto {
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn test_nested_inheritance() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn test_no_base_path() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().unwrap();
         let subdir = root.join("subdir");
         create_dir_all(&subdir);
 
