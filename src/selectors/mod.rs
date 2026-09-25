@@ -9,6 +9,7 @@ use thiserror::Error;
 
 pub(crate) mod always;
 mod git;
+mod ignore;
 mod matching;
 pub mod watch;
 

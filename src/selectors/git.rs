@@ -72,6 +72,17 @@ impl Change {
 /// may be missing, such as a deleted directory: discovery starts from its nearest existing
 /// ancestor. Fails if no repo contains `path` or the repo is bare.
 fn discover(path: &Path) -> Result<RepoEntry, String> {
+    let (workdir, repo) = open_work_tree(path)?;
+    debug!("Discovered git repo at {}", workdir.display());
+    Ok(RepoEntry {
+        workdir,
+        repo,
+        pathspecs: Some(Vec::new()),
+    })
+}
+
+/// The canonical root of the work tree containing `path`, and its repo; see [`discover`].
+pub(super) fn open_work_tree(path: &Path) -> Result<(PathBuf, Repository), String> {
     let start = path.ancestors().find(|p| p.is_dir()).unwrap_or(path);
     // Not `Repository::discover`: it reopens the gitdir, so a `.git` file without
     // `core.worktree` (as `git init --separate-git-dir` writes) gets the wrong work tree.
@@ -86,12 +97,7 @@ fn discover(path: &Path) -> Result<RepoEntry, String> {
     let workdir = workdir
         .canonicalize()
         .unwrap_or_else(|_| workdir.to_path_buf());
-    debug!("Discovered git repo at {}", workdir.display());
-    Ok(RepoEntry {
-        workdir,
-        repo,
-        pathspecs: Some(Vec::new()),
-    })
+    Ok((workdir, repo))
 }
 
 /// The temporary index named by `index_file` (`GIT_INDEX_FILE`), for the repo at `git_dir`
