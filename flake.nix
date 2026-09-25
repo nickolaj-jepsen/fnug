@@ -1,11 +1,6 @@
 {
   description = "Fnug - A nice lint runner";
 
-  nixConfig = {
-    extra-substituters = ["https://fnug.cachix.org"];
-    extra-trusted-public-keys = ["fnug.cachix.org-1:SDUeF2nZSbSPOAMNJdYZdoVB+tHdB8UHHcqhEmizeNk="];
-  };
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
@@ -30,8 +25,6 @@
             lib,
             rustPlatform,
             pkg-config,
-            cmake,
-            openssl,
           }: let
             cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
           in
@@ -40,22 +33,9 @@
               inherit (cargoToml.package) version;
               src = ./.;
 
-              cargoLock = {
-                lockFile = ./Cargo.lock;
-                outputHashes = {};
-              };
+              cargoLock.lockFile = ./Cargo.lock;
 
-              doCheck = false;
-
-              postPatch = ''
-                cp -r vendor/vt100 $cargoDepsCopy/fnug-vt100-0.15.2
-              '';
-
-              nativeBuildInputs = [
-                pkg-config
-                cmake
-              ];
-              buildInputs = [openssl];
+              nativeBuildInputs = [pkg-config];
 
               meta = {
                 description = "A nice lint runner";
@@ -100,7 +80,6 @@
           nativeBuildInputs = with pkgs; [
             rustToolchain
             pkg-config
-            cmake
           ];
         };
       };
