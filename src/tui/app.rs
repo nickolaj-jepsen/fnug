@@ -3,14 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{debug, error};
+use log::{debug, error, info};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
-use crate::process::StopSignal;
+use crate::process::{ExitInfo, StopSignal};
 use crate::pty::terminal::Terminal;
 use crate::selectors::get_selected_commands;
 
@@ -26,9 +26,12 @@ pub enum CommandStatus {
     Pending,
     Running,
     Success,
+    /// Exit code, or 128 plus the signal number
     Failure(u32),
     Error(String),
     WaitingForDeps,
+    /// Exited after the user stopped it
+    Stopped,
 }
 
 /// A running or completed process with its terminal and status
@@ -38,6 +41,10 @@ pub struct ProcessInstance {
     pub(super) task_handles: Vec<JoinHandle<()>>,
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
+    /// How the process ended, once it has
+    pub exit: Option<ExitInfo>,
+    /// Distinguishes this run's events from those of earlier runs of the same command
+    pub generation: u64,
 }
 
 /// How long a stopped (or restarted, or cleared) command gets before it is killed
@@ -60,8 +67,16 @@ impl ProcessInstance {
 
 /// Events dispatched to the main application loop
 pub enum AppEvent {
-    ProcessExited(String, u32),
-    ProcessError(String, String),
+    ProcessExited {
+        id: String,
+        generation: u64,
+        exit: ExitInfo,
+    },
+    ProcessError {
+        id: String,
+        generation: u64,
+        message: String,
+    },
     WatcherTriggered(Vec<Command>),
     LogUpdated,
     GitSelectionComplete(u64, Result<Vec<Command>, String>),
@@ -226,6 +241,8 @@ pub struct App {
     git_selection_handle: Option<JoinHandle<()>>,
     /// Generation counter for staleness detection of git selection results
     git_selection_generation: u64,
+    /// Generation of the most recently started process
+    pub(super) next_generation: u64,
     /// Command IDs from the current batch run (for auto-focus on failure)
     pub(super) batch_run_ids: Option<HashSet<String>>,
     /// Whether the help overlay is shown
@@ -306,6 +323,7 @@ impl App {
             last_terminal_area: Rect::default(),
             git_selection_handle: None,
             git_selection_generation: 0,
+            next_generation: 0,
             batch_run_ids: None,
             show_help: false,
         };
@@ -433,34 +451,51 @@ impl App {
     /// Handle app events (called from event loop)
     pub fn handle_app_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::ProcessExited(cmd_id, exit_code) => {
-                if let Some(proc) = self.processes.get_mut(&cmd_id) {
-                    proc.finished_at = Some(Instant::now());
-                    proc.status = if exit_code == 0 {
-                        CommandStatus::Success
-                    } else {
-                        CommandStatus::Failure(exit_code)
-                    };
-                }
-                if exit_code == 0 {
-                    self.selected.remove(&cmd_id);
-                    // Check pending deps - start commands whose deps are now satisfied
-                    self.resolve_dependency(&cmd_id);
+            AppEvent::ProcessExited {
+                id,
+                generation,
+                exit,
+            } => {
+                let Some(proc) = self.current_process(&id, generation) else {
+                    return;
+                };
+                proc.finished_at = Some(Instant::now());
+                proc.status = if exit.stop_requested {
+                    CommandStatus::Stopped
+                } else if exit.success() {
+                    CommandStatus::Success
                 } else {
-                    // Propagate failure to dependents
-                    self.fail_dependents(&cmd_id);
+                    CommandStatus::Failure(exit.shell_code())
+                };
+                proc.exit = Some(exit);
+                match proc.status {
+                    CommandStatus::Stopped => {
+                        info!("Command '{id}' stopped");
+                        self.cancel_dependents(&id);
+                    }
+                    CommandStatus::Success => {
+                        self.selected.remove(&id);
+                        // Check pending deps - start commands whose deps are now satisfied
+                        self.resolve_dependency(&id);
+                    }
+                    _ => self.fail_dependents(&id),
                 }
                 self.mark_tree_dirty();
                 self.check_batch_complete();
             }
-            AppEvent::ProcessError(cmd_id, msg) => {
-                error!("Process error for '{cmd_id}': {msg}");
-                if let Some(proc) = self.processes.get_mut(&cmd_id) {
-                    proc.finished_at = Some(Instant::now());
-                    proc.status = CommandStatus::Error(msg.clone());
-                }
-                self.error_messages.insert(cmd_id.clone(), msg);
-                self.fail_dependents(&cmd_id);
+            AppEvent::ProcessError {
+                id,
+                generation,
+                message,
+            } => {
+                let Some(proc) = self.current_process(&id, generation) else {
+                    return;
+                };
+                error!("Process error for '{id}': {message}");
+                proc.finished_at = Some(Instant::now());
+                proc.status = CommandStatus::Error(message.clone());
+                self.error_messages.insert(id.clone(), message);
+                self.fail_dependents(&id);
                 self.mark_tree_dirty();
             }
             AppEvent::WatcherTriggered(commands) => {
@@ -492,6 +527,18 @@ impl App {
                 // Redraw happens automatically on next frame
             }
         }
+    }
+
+    /// The process for `id`, unless an event of `generation` comes from an earlier, replaced run
+    fn current_process(&mut self, id: &str, generation: u64) -> Option<&mut ProcessInstance> {
+        let proc = self
+            .processes
+            .get_mut(id)
+            .filter(|p| p.generation == generation);
+        if proc.is_none() {
+            debug!("Ignoring event from a replaced run of '{id}'");
+        }
+        proc
     }
 
     /// Remove a satisfied dependency and start commands whose deps are all clear
@@ -543,6 +590,7 @@ impl App {
             .map(|(cmd_id, _)| cmd_id.clone())
             .collect();
         for cmd_id in dependents {
+            info!("Cancelled '{cmd_id}', which was waiting on '{cancelled_id}'");
             self.pending_deps.remove(&cmd_id);
             self.cancel_dependents(&cmd_id);
         }

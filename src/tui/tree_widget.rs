@@ -136,6 +136,7 @@ pub fn render_node_text(node: &VisibleNode) -> String {
                 CommandStatus::Running => text.push_str(" ⧗"),
                 CommandStatus::Error(_) => text.push_str(" ⚠"),
                 CommandStatus::WaitingForDeps => text.push_str(" ◌"),
+                CommandStatus::Stopped => text.push_str(" ■"),
                 CommandStatus::Pending => {}
             }
             if let Some(d) = duration {
@@ -283,6 +284,9 @@ impl Widget for TreeWidget<'_> {
                         }
                         CommandStatus::WaitingForDeps => {
                             Some(Span::styled(" ◌", Style::default().fg(theme::RUNNING)))
+                        }
+                        CommandStatus::Stopped => {
+                            Some(Span::styled(" ■", Style::default().fg(theme::DIM)))
                         }
                     };
                     spans.extend(status_span);
@@ -438,7 +442,7 @@ mod tests {
     #[test]
     fn test_snapshot_status_indicators() {
         let nodes = vec![
-            group_node_with_status("root", "ci", 0, true, vec![], true, 1, 1, 1, 3, 5),
+            group_node_with_status("root", "ci", 0, true, vec![], true, 1, 1, 1, 3, 6),
             cmd_node_with_duration(
                 "a",
                 "lint",
@@ -472,11 +476,12 @@ mod tests {
                 "e",
                 "notify",
                 1,
-                true,
+                false,
                 vec![],
                 false,
                 CommandStatus::Error("timeout".into()),
             ),
+            cmd_node("f", "serve", 1, true, vec![], false, CommandStatus::Stopped),
         ];
         insta::assert_snapshot!(render_tree_text(&nodes));
     }

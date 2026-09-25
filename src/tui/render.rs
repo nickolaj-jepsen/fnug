@@ -172,6 +172,7 @@ impl App {
                         Some(CommandStatus::Failure(_) | CommandStatus::Error(_)) => {
                             ("failed", theme::FAILURE)
                         }
+                        Some(CommandStatus::Stopped) => ("stopped", theme::DIM),
                         _ => ("pending", theme::DIM),
                     };
                     let name = self
