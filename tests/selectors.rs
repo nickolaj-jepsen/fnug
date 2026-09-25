@@ -1415,4 +1415,74 @@ commands:
             BTreeSet::from([root.join("repo/target/doc/index.json")])
         );
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_skips_unreadable_ignored_dir() {
+        let (_tmp, root, _repo) = watch_repo();
+        std::fs::write(root.join("repo/.gitignore"), "target/\npgdata/\n").unwrap();
+        for dir in ["pgdata", "src"] {
+            std::fs::create_dir(root.join("repo").join(dir)).unwrap();
+        }
+        let Some(_pgdata) = Unreadable::new(&root.join("repo/pgdata")) else {
+            eprintln!("skipping: permissions are not enforced for this user");
+            return;
+        };
+        let mut handle = start_watch(&root.join(".fnug.yaml"));
+        assert!(handle.report.failed.is_empty(), "{:?}", handle.report);
+
+        let file = root.join("repo/src/a.json");
+        std::fs::write(&file, "{}").unwrap();
+        let seen = watch_until_ctl(&mut handle, &root).await;
+        assert_eq!(seen["json"], BTreeSet::from([file]));
+    }
+
+    #[test]
+    fn watch_registers_only_kept_dirs() {
+        let (_tmp, root, _repo) = watch_repo();
+        for dir in [
+            "repo/target/debug/deps",
+            "repo/target/release",
+            "repo/src/deep",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let handle = start_watch(&root.join(".fnug.yaml"));
+
+        // repo, repo/src, repo/src/deep and ctl; not .git or anything in target.
+        assert_eq!(handle.report.watched_dirs, 4, "{:?}", handle.report);
+    }
+
+    #[test]
+    fn watch_registers_10k_dirs_quickly() {
+        let (_tmp, root, _repo) = watch_repo();
+        for dir in 0..10_000 {
+            std::fs::create_dir_all(root.join(format!("repo/src/{}/{}", dir / 100, dir % 100)))
+                .unwrap();
+        }
+        let started = std::time::Instant::now();
+        let handle = start_watch(&root.join(".fnug.yaml"));
+        let elapsed = started.elapsed();
+        if handle.report.limit_reached {
+            eprintln!("skipping: the system's limit on file watches is too low");
+            return;
+        }
+
+        // repo, repo/src, its 100 + 10k subdirectories and ctl.
+        assert_eq!(handle.report.watched_dirs, 10_103, "{:?}", handle.report);
+        // About half a second in a debug build; checking each new watch against every earlier
+        // one took 8 seconds.
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_new_dir_reports_files_already_in_it() {
+        let (_tmp, root, _repo) = watch_repo();
+        let mut handle = start_watch(&root.join(".fnug.yaml"));
+
+        let file = root.join("repo/new/deep/a.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{}").unwrap();
+        let seen = watch_until(&mut handle, |seen| seen.contains_key("json")).await;
+        assert_eq!(seen["json"], BTreeSet::from([file]));
+    }
 }
