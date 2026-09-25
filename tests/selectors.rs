@@ -454,3 +454,107 @@ commands:
     let lint = output.get("lint").expect("lint is selected");
     assert_eq!(lint.files, [latin1]);
 }
+
+#[test]
+fn scan_is_limited_to_configured_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  git: true
+commands:
+  - name: src
+    cmd: 'true'
+    auto:
+      path: [src]
+  - name: file
+    cmd: 'true'
+    auto:
+      path: [docs/demo.tape]
+",
+    );
+    commit_all(&repo);
+    for dir in ["src", "src2", "docs", "other"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+    }
+    std::fs::write(root.join("src2/a.rs"), "").unwrap();
+    std::fs::write(root.join("docs/other.md"), "").unwrap();
+    std::fs::write(root.join("other/b.rs"), "").unwrap();
+
+    let output = select_with(&config, &SelectOptions::default());
+    assert!(output.commands.is_empty(), "{:?}", output.commands);
+    assert_eq!(output.changed_files, 0);
+
+    std::fs::write(root.join("src/a.rs"), "").unwrap();
+    std::fs::write(root.join("docs/demo.tape"), "").unwrap();
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["src", "file"]);
+    assert_eq!(output.changed_files, 2);
+}
+
+#[test]
+fn pathspec_literal_brackets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+auto:
+  git: true
+commands:
+  - name: pkg
+    cmd: 'true'
+    auto:
+      path: ['pkg[1]']
+  - name: src
+    cmd: 'true'
+    auto:
+      path: [src]
+",
+    );
+    std::fs::create_dir(root.join("pkg[1]")).unwrap();
+    std::fs::write(root.join("pkg[1]/p.rs"), "one\n").unwrap();
+    commit_all(&repo);
+    std::fs::write(root.join("pkg[1]/p.rs"), "two\n").unwrap();
+    std::fs::create_dir(root.join("pkg1")).unwrap();
+    std::fs::write(root.join("pkg1/q.rs"), "").unwrap();
+
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["pkg"]);
+    assert_eq!(output.get("pkg").unwrap().files, [root.join("pkg[1]/p.rs")]);
+}
+
+#[test]
+fn path_inside_untracked_dir_selects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = Repository::init(&root).unwrap();
+    let config = write_config(
+        &root,
+        r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+    auto:
+      git: true
+      path: [new/sub]
+",
+    );
+    commit_all(&repo);
+    std::fs::create_dir_all(root.join("new/sub")).unwrap();
+    std::fs::write(root.join("new/sub/a.txt"), "").unwrap();
+    std::fs::write(root.join("new/b.txt"), "").unwrap();
+
+    let output = select_with(&config, &SelectOptions::default());
+    assert_eq!(
+        output.get("lint").unwrap().files,
+        [root.join("new/sub/a.txt")]
+    );
+}
