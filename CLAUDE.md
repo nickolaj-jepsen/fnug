@@ -85,8 +85,9 @@ Workspace mode (`workspace: true` or `workspace: { paths: [...] }`) discovers su
 Automated via GitHub Actions (`release.yaml`), triggered when the version in `Cargo.toml` changes on `main`. Publishes to crates.io (fnug-vt100 first, then fnug) and PyPI.
 
 1. Update version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if vendored crate changed)
-2. `cargo generate-lockfile`
-3. `git commit -m "chore: bump version to X.Y.Z"`
+2. Update the version in the README install commands (`cargo install --locked fnug@X.Y.Z`)
+3. `cargo generate-lockfile`
+4. `git commit -m "chore: bump version to X.Y.Z"`
 
 ## Python Package
 
