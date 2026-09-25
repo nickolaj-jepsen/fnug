@@ -1175,3 +1175,153 @@ commands:
     );
     assert_eq!(a.auto.regexes().len(), b.auto.regexes().len());
 }
+
+// ─── workspace root promotion ───
+
+fn load_from(start: &Path) -> fnug::LoadedConfig {
+    fnug::load(&LoadOptions {
+        start_dir: Some(start.to_path_buf()),
+        ..LoadOptions::default()
+    })
+    .unwrap()
+}
+
+fn names(config: &CommandGroup) -> Vec<String> {
+    config
+        .all_commands()
+        .into_iter()
+        .map(|c| c.name.clone())
+        .collect()
+}
+
+fn one_command(name: &str) -> String {
+    format!("name: {name}\ncommands:\n  - name: {name}-cmd\n    cmd: 'true'\n")
+}
+
+#[test]
+fn explicit_config_skips_promotion() {
+    let dir = workspace(
+        &format!("{GLOB_ROOT}commands:\n  - name: root-cmd\n    cmd: 'true'\n"),
+        &[("packages/a", &one_command("a"))],
+    );
+    let loaded = fnug::load(&LoadOptions {
+        config: Some(dir.path().join("packages/a/.fnug.yaml")),
+        ..LoadOptions::default()
+    })
+    .unwrap();
+    assert_eq!(names(&loaded.root), ["a-cmd"]);
+}
+
+#[test]
+fn start_dir_promotes_only_when_covered() {
+    let dir = workspace(
+        &format!("{GLOB_ROOT}commands:\n  - name: root-cmd\n    cmd: 'true'\n"),
+        &[
+            ("packages/a", &one_command("a")),
+            ("tools/x", &one_command("x")),
+        ],
+    );
+    let root = dir.path().canonicalize().unwrap();
+
+    let local = load_from(&dir.path().join("tools/x"));
+    assert_eq!(names(&local.root), ["x-cmd"]);
+    assert_eq!(local.config_path, root.join("tools/x/.fnug.yaml"));
+
+    let promoted = load_from(&dir.path().join("packages/a"));
+    assert_eq!(names(&promoted.root), ["root-cmd", "a-cmd"]);
+    assert_eq!(promoted.config_path, root.join(".fnug.yaml"));
+}
+
+#[test]
+fn empty_paths_workspace_does_not_hijack() {
+    let dir = workspace(
+        "name: root\nworkspace:\n  paths: []\ncommands:\n  - name: planted\n    cmd: 'true'\n",
+        &[("victim", &one_command("victim"))],
+    );
+    let loaded = load_from(&dir.path().join("victim"));
+    assert_eq!(names(&loaded.root), ["victim-cmd"]);
+}
+
+#[test]
+fn nested_config_not_hijacked() {
+    // The root's walk stops at services/, which has a config, so it never reaches services/api.
+    let dir = workspace(
+        "name: root\nworkspace: true\n",
+        &[
+            ("services", &one_command("svc")),
+            ("services/api", &one_command("api")),
+        ],
+    );
+    git2::Repository::init(dir.path()).unwrap();
+    let loaded = load_from(&dir.path().join("services/api"));
+    assert_eq!(names(&loaded.root), ["api-cmd"]);
+
+    let from_services = load_from(&dir.path().join("services"));
+    assert_eq!(names(&from_services.root), ["svc-cmd"]);
+    assert_eq!(from_services.root.name, "root");
+}
+
+#[test]
+fn gitignored_nested_worktree_not_hijacked() {
+    // Like a linked worktree under .claude/worktrees/, or any gitignored checkout copy.
+    let dir = workspace(
+        "name: root\nworkspace: true\ncommands:\n  - name: main-cmd\n    cmd: 'true'\n",
+        &[
+            (
+                "worktrees/wt",
+                &format!("{}workspace: true\n", one_command("wt")),
+            ),
+            (".claude/worktrees/wt2", &one_command("wt2")),
+            ("pkg", &one_command("pkg")),
+        ],
+    );
+    git2::Repository::init(dir.path()).unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "worktrees/\n").unwrap();
+
+    assert_eq!(
+        names(&load_from(&dir.path().join("worktrees/wt")).root),
+        ["wt-cmd"]
+    );
+    assert_eq!(
+        names(&load_from(&dir.path().join(".claude/worktrees/wt2")).root),
+        ["wt2-cmd"]
+    );
+    assert_eq!(
+        names(&load_from(&dir.path().join("pkg")).root),
+        ["main-cmd", "pkg-cmd"]
+    );
+}
+
+#[test]
+fn max_depth_limits_promotion() {
+    let dir = workspace(
+        "name: root\nworkspace:\n  max_depth: 1\n",
+        &[("a/b", &one_command("deep"))],
+    );
+    git2::Repository::init(dir.path()).unwrap();
+    assert_eq!(
+        names(&load_from(&dir.path().join("a/b")).root),
+        ["deep-cmd"]
+    );
+}
+
+#[test]
+fn unparseable_ancestor_skipped() {
+    let dir = workspace("name: [unterminated\n", &[("repo", &one_command("repo"))]);
+    let loaded = load_from(&dir.path().join("repo"));
+    assert_eq!(names(&loaded.root), ["repo-cmd"]);
+}
+
+#[test]
+fn non_git_ancestor_workspace_skipped() {
+    let dir = workspace(
+        "name: root\nworkspace: true\ncommands:\n  - name: root-cmd\n    cmd: 'true'\n",
+        &[("repo", &one_command("repo"))],
+    );
+    if git2::Repository::discover(dir.path()).is_ok() {
+        return; // the tempdir is inside a git repo, so the ancestor's discovery works
+    }
+    git2::Repository::init(dir.path().join("repo")).unwrap();
+    let loaded = load_from(&dir.path().join("repo"));
+    assert_eq!(names(&loaded.root), ["repo-cmd"]);
+}

@@ -11,40 +11,48 @@ use crate::config_file::{
     Config, ConfigCommandGroup, ConfigError, WorkspaceConfig, find_config_in_dir,
 };
 
-/// Discover workspace configs and append them as children of the root config group.
+/// Find the package configs `ws` selects below `root_dir`, as paths with canonical directories.
 ///
 /// # Errors
 ///
-/// Returns `ConfigError` if discovery fails or a sub-config cannot be parsed.
-pub fn discover_and_merge(
-    ws: &WorkspaceConfig,
-    root_dir: &Path,
-    root: &mut ConfigCommandGroup,
-) -> Result<Vec<PathBuf>, ConfigError> {
+/// Returns `ConfigError::Workspace` if `root_dir` can't be resolved, a glob pattern is invalid,
+/// or a directory walk fails (including when `root_dir` is not in a git repository).
+pub fn discover(ws: &WorkspaceConfig, root_dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
     const DEFAULT_MAX_DEPTH: usize = 5;
 
+    let root_dir = root_dir.canonicalize().map_err(|e| {
+        ConfigError::Workspace(format!("Failed to resolve {}: {e}", root_dir.display()))
+    })?;
     let paths = match ws {
         WorkspaceConfig::Enabled(false) => return Ok(vec![]),
-        WorkspaceConfig::Enabled(true) => discover_git(root_dir, DEFAULT_MAX_DEPTH)?,
+        WorkspaceConfig::Enabled(true) => discover_git(&root_dir, DEFAULT_MAX_DEPTH)?,
         WorkspaceConfig::Options(opts) => {
             let max_depth = opts.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
             if let Some(patterns) = &opts.paths {
-                discover_glob(root_dir, patterns)?
+                discover_glob(&root_dir, patterns)?
             } else {
-                discover_git(root_dir, max_depth)?
+                discover_git(&root_dir, max_depth)?
             }
         }
     };
-
     debug!("Discovered {} workspace config(s)", paths.len());
-
-    let children = root.children.get_or_insert_with(Vec::new);
-    for path in &paths {
-        let sub = load_sub_config(path)?;
-        children.push(sub);
-    }
-
     Ok(paths)
+}
+
+/// Load each package config and append it to `root`'s children. Returns the loaded paths.
+///
+/// # Errors
+///
+/// Returns `ConfigError` if a package config can't be read or parsed.
+pub fn merge(
+    root: &mut ConfigCommandGroup,
+    packages: &[PathBuf],
+) -> Result<Vec<PathBuf>, ConfigError> {
+    let children = root.children.get_or_insert_with(Vec::new);
+    for path in packages {
+        children.push(load_sub_config(path)?);
+    }
+    Ok(packages.to_vec())
 }
 
 /// Discover config files by walking the filesystem, skipping `.gitignore`'d paths.
@@ -115,7 +123,8 @@ fn walk_dir(
         }
 
         if let Some(config_path) = find_config_in_dir(&path) {
-            if seen_dirs.insert(path.clone()) {
+            let config_path = canonical_config(&config_path)?;
+            if seen_dirs.insert(config_path.clone()) {
                 debug!("Found workspace config: {}", config_path.display());
                 results.push(config_path);
             }
@@ -154,6 +163,9 @@ fn discover_glob(root_dir: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, C
             if !dir.is_dir() {
                 continue;
             }
+            let dir = dir.canonicalize().map_err(|e| {
+                ConfigError::Workspace(format!("Failed to resolve {}: {e}", dir.display()))
+            })?;
 
             // Skip the root directory itself
             if dir == root_dir {
@@ -170,6 +182,22 @@ fn discover_glob(root_dir: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, C
     }
 
     Ok(results)
+}
+
+/// `config_path` with its directory canonicalized, so it compares equal to other spellings.
+fn canonical_config(config_path: &Path) -> Result<PathBuf, ConfigError> {
+    let resolve = || {
+        Some(
+            config_path
+                .parent()?
+                .canonicalize()
+                .ok()?
+                .join(config_path.file_name()?),
+        )
+    };
+    resolve().ok_or_else(|| {
+        ConfigError::Workspace(format!("Failed to resolve {}", config_path.display()))
+    })
 }
 
 /// Load a sub-config file and prepare it as a `ConfigCommandGroup`.
