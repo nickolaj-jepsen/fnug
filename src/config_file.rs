@@ -210,7 +210,8 @@ pub struct ConfigCommand {
     /// Auto-selection rules.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<ConfigAuto>,
-    /// Extra environment variables, added to the inherited ones.
+    /// Extra environment variables, added to the inherited ones. `$VAR` and `${VAR}` expand to
+    /// the inherited value or the process environment; `$$` is a literal `$`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
     /// Commands that must finish successfully before this one runs, by id or by a name that is
@@ -307,7 +308,9 @@ pub struct ConfigCommandGroup {
     /// Nested groups.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<ConfigCommandGroup>>,
-    /// Environment variables for everything in the group, added to the inherited ones.
+    /// Environment variables for everything in the group, added to the inherited ones. `$VAR`
+    /// and `${VAR}` expand to the inherited value or the process environment; `$$` is a literal
+    /// `$`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
     /// The config file this group is the root of.
@@ -378,7 +381,8 @@ pub struct Config {
     /// Command groups.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<ConfigCommandGroup>>,
-    /// Environment variables for every command.
+    /// Environment variables for every command. `$VAR` and `${VAR}` expand to the process
+    /// environment; `$$` is a literal `$`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 }

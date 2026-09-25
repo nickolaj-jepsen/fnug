@@ -50,7 +50,7 @@
       ]
     },
     "env": {
-      "description": "Environment variables for every command.",
+      "description": "Environment variables for every command. `$VAR` and `${VAR}` expand to the process\nenvironment; `$$` is a literal `$`.",
       "type": [
         "object",
         "null"
@@ -186,7 +186,7 @@
           }
         },
         "env": {
-          "description": "Extra environment variables, added to the inherited ones.",
+          "description": "Extra environment variables, added to the inherited ones. `$VAR` and `${VAR}` expand to\nthe inherited value or the process environment; `$$` is a literal `$`.",
           "type": [
             "object",
             "null"
@@ -265,7 +265,7 @@
           ]
         },
         "env": {
-          "description": "Environment variables for everything in the group, added to the inherited ones.",
+          "description": "Environment variables for everything in the group, added to the inherited ones. `$VAR`\nand `${VAR}` expand to the inherited value or the process environment; `$$` is a literal\n`$`.",
           "type": [
             "object",
             "null"
