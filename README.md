@@ -93,6 +93,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
 | `--mute-success`  | Suppress output for passing commands (`check` only)             |
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
+| `-V`, `--version` | Print fnug's version                                            |
 
 ## Configuration
 

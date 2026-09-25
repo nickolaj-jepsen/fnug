@@ -13,7 +13,11 @@ use log::LevelFilter;
 use fnug::{LoadOptions, LoadedConfig};
 
 #[derive(Parser, Debug)]
-#[command(name = "fnug", about = "TUI command runner based on git changes")]
+#[command(
+    name = "fnug",
+    version,
+    about = "TUI command runner based on git changes"
+)]
 struct Cli {
     /// Path to config file (auto-detected if not specified)
     #[arg(short, long, global = true)]

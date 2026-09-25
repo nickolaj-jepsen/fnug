@@ -47,6 +47,19 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn version_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    for flag in ["--version", "-V"] {
+        let output = fnug(dir.path(), &[flag]);
+        assert_success(&output);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("fnug {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+#[test]
 fn no_workspace_after_subcommand_is_accepted() {
     let dir = git_repo_with_config(".fnug.yaml");
     let output = fnug(dir.path(), &["check", "--no-tui", "--no-workspace"]);
