@@ -378,3 +378,87 @@ fn readme_and_dogfood_configs_parse() {
             .unwrap_or_else(|e| panic!("{e}\n{block}"));
     }
 }
+
+fn commit_all(repo: &git2::Repository) {
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("fnug", "fnug@example.com").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &[])
+        .unwrap();
+}
+
+const LOCKFILE_CONFIG: &str = r"
+fnug_version: 0.1.0
+name: root
+children:
+  - name: rust
+    auto:
+      git: true
+      path: [./src]
+      regex: ['\.rs$']
+    commands:
+      - name: lockfile
+        cmd: 'true'
+        auto:
+          path: [./Cargo.toml]
+          regex: []
+      - name: sub
+        cmd: 'true'
+        auto:
+          path: [./src/sub]
+      - name: everything
+        cmd: 'true'
+        auto:
+          path: []
+";
+
+/// A git repo with `src/sub/lib.rs` and `Cargo.toml` committed, and the lockfile config.
+fn lockfile_repo() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    std::fs::create_dir_all(dir.path().join("src/sub")).unwrap();
+    std::fs::write(dir.path().join("src/sub/lib.rs"), "").unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+    let path = write_config(dir.path(), LOCKFILE_CONFIG);
+    commit_all(&repo);
+    (dir, path)
+}
+
+#[test]
+fn regex_empty_list_clears_inherited() {
+    let (dir, path) = lockfile_repo();
+    let (config, _) = load_config(Some(&path), true).unwrap();
+    assert!(command(&config, "lockfile").auto.regexes().is_empty());
+
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let commands = config.all_commands().into_iter().cloned().collect();
+    let selected: Vec<String> = fnug::selectors::get_selected_commands(commands)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(selected, ["lockfile"]);
+}
+
+#[test]
+fn path_override_keeps_inherited_regex() {
+    let (dir, path) = lockfile_repo();
+    let (config, _) = load_config(Some(&path), true).unwrap();
+    let sub = &command(&config, "sub").auto;
+    let root = dir.path().canonicalize().unwrap();
+    assert_eq!(sub.paths(), [root.join("src/sub")]);
+    assert_eq!(sub.regexes().len(), 1);
+}
+
+#[test]
+fn path_empty_list_resets_to_cwd() {
+    let (dir, path) = lockfile_repo();
+    let (config, _) = load_config(Some(&path), true).unwrap();
+    let everything = &command(&config, "everything").auto;
+    assert_eq!(everything.paths(), [dir.path().canonicalize().unwrap()]);
+    assert_eq!(everything.regexes().len(), 1);
+}
