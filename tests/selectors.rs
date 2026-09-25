@@ -1,9 +1,13 @@
-//! Tests for auto-selection: git scopes, path and regex matching, and selection issues.
+//! Tests for auto-selection: git scopes, path and regex matching, selection issues, and file
+//! watching.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use fnug::commands::command::Command;
 use fnug::load_config;
+use fnug::selectors::watch::watch_commands;
 use fnug::selectors::{
     GitScope, IndexOverride, SelectOptions, SelectedBy, SelectionIssue, SelectorOutput,
     get_selected_commands, select,
@@ -1060,4 +1064,37 @@ fn since_in_shallow_clone_says_so() {
         "{:?}",
         output.issues
     );
+}
+
+/// The commands of the config at `config_path`, for the watcher.
+fn watched_commands(config_path: &Path) -> Vec<Command> {
+    let (config, _) = load_config(Some(config_path.to_str().unwrap()), true).unwrap();
+    config.all_commands().into_iter().cloned().collect()
+}
+
+const WATCH_SRC_CONFIG: &str = r"
+name: root
+commands:
+  - name: test
+    cmd: 'true'
+    auto:
+      watch: true
+      path: [./src]
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_latency_under_2s() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    let config = write_config(&root, WATCH_SRC_CONFIG);
+    let (mut events, _watcher) = watch_commands(watched_commands(&config)).unwrap();
+
+    std::fs::write(root.join("src/a.txt"), "").unwrap();
+    let batch = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("no watch event within 2s")
+        .unwrap();
+    let ids: Vec<&str> = batch.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["test"]);
 }
