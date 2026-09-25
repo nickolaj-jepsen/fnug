@@ -25,7 +25,7 @@ children:
         depends_on:
           - rust-fmt
       - name: clippy check
-        cmd: cargo clippy -- -D warnings
+        cmd: cargo clippy --all-targets -- -D warnings
         depends_on:
           - rust-clippy-fix
       - name: cwd
