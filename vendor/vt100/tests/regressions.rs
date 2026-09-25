@@ -367,3 +367,70 @@ fn rep_wraps() {
     assert!(parser.screen().row_wrapped(1));
     assert_eq!(parser.screen().cursor_position(), (2, 3));
 }
+
+fn replies_to(input: &[u8]) -> Vec<u8> {
+    let mut parser = vt100::Parser::new(24, 80, 0);
+    parser.process(input);
+    parser.take_replies()
+}
+
+#[test]
+fn dsr_cpr() {
+    assert_eq!(replies_to(b"\x1b[6n"), b"\x1b[1;1R");
+    assert_eq!(replies_to(b"\x1b[5;10H\x1b[6n"), b"\x1b[5;10R");
+    // a pending wrap after the last column reports the last column
+    assert_eq!(replies_to(b"\x1b[1;80HX\x1b[6n"), b"\x1b[1;80R");
+    assert_eq!(replies_to(b"\x1b[5;10H\x1b[?6n"), b"\x1b[?5;10R");
+}
+
+#[test]
+fn dsr_origin_mode() {
+    let input = b"\x1b[5;20r\x1b[?6h\x1b[3;4H\x1b[6n\x1b[?6n";
+    assert_eq!(replies_to(input), b"\x1b[3;4R\x1b[?3;4R");
+}
+
+#[test]
+fn dsr_status() {
+    assert_eq!(replies_to(b"\x1b[5n"), b"\x1b[0n");
+    assert_eq!(replies_to(b"\x1b[7n\x1b[?5n"), b"");
+}
+
+#[test]
+fn da1() {
+    assert_eq!(replies_to(b"\x1b[c"), b"\x1b[?1;2c");
+    assert_eq!(replies_to(b"\x1b[0c"), b"\x1b[?1;2c");
+    assert_eq!(replies_to(b"\x1b[1c"), b"");
+}
+
+#[test]
+fn da2() {
+    assert_eq!(replies_to(b"\x1b[>c"), b"\x1b[>0;0;0c");
+    assert_eq!(replies_to(b"\x1b[>0c"), b"\x1b[>0;0;0c");
+    assert_eq!(replies_to(b"\x1b[>1c"), b"");
+}
+
+#[test]
+fn take_replies_drains() {
+    let mut parser = vt100::Parser::new(24, 80, 0);
+    assert!(!parser.has_pending_replies());
+
+    // replies survive a full reset (RIS), like the title does
+    parser.process(b"\x1b[5n\x1b[c\x1bc\x1b[2;3H\x1b[6n");
+    assert!(parser.has_pending_replies());
+    assert_eq!(parser.take_replies(), b"\x1b[0n\x1b[?1;2c\x1b[2;3R");
+    assert!(!parser.has_pending_replies());
+    assert_eq!(parser.take_replies(), b"");
+}
+
+#[test]
+fn replies_capped() {
+    let mut parser = vt100::Parser::new(24, 80, 0);
+    parser.process(&b"\x1b[5n".repeat(2000));
+
+    let replies = parser.take_replies();
+    assert_eq!(replies.len(), 4096);
+    assert!(replies.chunks(4).all(|reply| reply == b"\x1b[0n"));
+
+    parser.process(b"\x1b[6n");
+    assert_eq!(parser.take_replies(), b"\x1b[1;1R");
+}

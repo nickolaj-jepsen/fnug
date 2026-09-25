@@ -7,6 +7,8 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 
+const MAX_PENDING_REPLIES: usize = 4096;
+
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MouseProtocolMode {
@@ -82,6 +84,7 @@ pub struct Screen {
     errors: usize,
 
     last_printed: Option<char>,
+    replies: Vec<u8>,
 }
 
 impl Screen {
@@ -108,6 +111,7 @@ impl Screen {
             errors: 0,
 
             last_printed: None,
+            replies: Vec::new(),
         }
     }
 
@@ -120,6 +124,14 @@ impl Screen {
     pub(crate) fn clear(&mut self) {
         self.grid.clear();
         self.alternate_grid.clear();
+    }
+
+    pub(crate) fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.replies)
+    }
+
+    pub(crate) fn has_pending_replies(&self) -> bool {
+        !self.replies.is_empty()
     }
 
     /// Returns the current size of the terminal.
@@ -792,6 +804,16 @@ impl Screen {
             self.mouse_protocol_encoding = MouseProtocolEncoding::default();
         }
     }
+
+    fn push_reply(&mut self, reply: &[u8]) {
+        // drop whole replies once the host stops draining, so a program that
+        // floods queries can't grow memory or get a truncated sequence
+        if self.replies.len() + reply.len() > MAX_PENDING_REPLIES {
+            log::debug!("dropping reply, {} bytes pending", self.replies.len());
+            return;
+        }
+        self.replies.extend_from_slice(reply);
+    }
 }
 
 impl Screen {
@@ -1098,6 +1120,7 @@ impl Screen {
         let audible_bell_count = self.audible_bell_count;
         let visual_bell_count = self.visual_bell_count;
         let errors = self.errors;
+        let replies = std::mem::take(&mut self.replies);
 
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
 
@@ -1106,6 +1129,7 @@ impl Screen {
         self.audible_bell_count = audible_bell_count;
         self.visual_bell_count = visual_bell_count;
         self.errors = errors;
+        self.replies = replies;
     }
 
     // ESC g
@@ -1227,6 +1251,21 @@ impl Screen {
                 self.text(c);
             }
             self.last_printed = Some(c);
+        }
+    }
+
+    // CSI c
+    fn da1(&mut self, param: u16) {
+        if param == 0 {
+            // VT100 with advanced video option
+            self.push_reply(b"\x1b[?1;2c");
+        }
+    }
+
+    // CSI > c
+    fn da2(&mut self, param: u16) {
+        if param == 0 {
+            self.push_reply(b"\x1b[>0;0;0c");
         }
     }
 
@@ -1511,6 +1550,33 @@ impl Screen {
         }
     }
 
+    // CSI n
+    fn dsr(&mut self, mode: u16) {
+        match mode {
+            5 => self.push_reply(b"\x1b[0n"),
+            6 => {
+                let (row, col) = self.grid().cursor_report_position();
+                self.push_reply(format!("\x1b[{row};{col}R").as_bytes());
+            }
+            n => {
+                log::debug!("unhandled DSR mode: {n}");
+            }
+        }
+    }
+
+    // CSI ? n
+    fn decdsr(&mut self, mode: u16) {
+        match mode {
+            6 => {
+                let (row, col) = self.grid().cursor_report_position();
+                self.push_reply(format!("\x1b[?{row};{col}R").as_bytes());
+            }
+            n => {
+                log::debug!("unhandled DECDSR mode: {n}");
+            }
+        }
+    }
+
     // CSI r
     fn decstbm(&mut self, (top, bottom): (u16, u16)) {
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
@@ -1612,10 +1678,12 @@ impl vte::Perform for Screen {
                 'T' => self.sd(canonicalize_params_1(params, 1)),
                 'X' => self.ech(canonicalize_params_1(params, 1)),
                 'b' => self.rep(last_printed, canonicalize_params_1(params, 1)),
+                'c' => self.da1(canonicalize_params_1(params, 0)),
                 'd' => self.vpa(canonicalize_params_1(params, 1)),
                 'h' => self.sm(params),
                 'l' => self.rm(params),
                 'm' => self.sgr(params),
+                'n' => self.dsr(canonicalize_params_1(params, 0)),
                 'r' => self.decstbm(canonicalize_params_decstbm(params, self.grid().size())),
                 _ => {
                     if log::log_enabled!(log::Level::Debug) {
@@ -1628,12 +1696,14 @@ impl vte::Perform for Screen {
                 'K' => self.decsel(canonicalize_params_1(params, 0)),
                 'h' => self.decset(params),
                 'l' => self.decrst(params),
+                'n' => self.decdsr(canonicalize_params_1(params, 0)),
                 _ => {
                     if log::log_enabled!(log::Level::Debug) {
                         log::debug!("unhandled csi sequence: CSI ? {} {}", param_str(params), c);
                     }
                 }
             },
+            Some(b'>') if c == 'c' => self.da2(canonicalize_params_1(params, 0)),
             Some(i) => {
                 if log::log_enabled!(log::Level::Debug) {
                     log::debug!(
