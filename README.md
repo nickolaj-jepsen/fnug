@@ -179,7 +179,7 @@ commands:
 
 ### Nested groups with inheritance
 
-Groups inherit `cwd`, `auto`, and `env` settings from their parent.
+Groups inherit `cwd`, `auto`, and `env` settings from their parent. Each `auto` field is inherited on its own, so a group's `check: false` applies to every command below it unless a command sets `check` itself.
 
 ```yaml
 fnug_version: 0.1.0

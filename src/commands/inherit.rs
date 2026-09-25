@@ -114,15 +114,7 @@ impl Auto {
 
 impl Inheritable for Auto {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        // Only inherit auto settings if the parent has watch, git, or always enabled
-        let mut auto = if inheritance.auto.watch.unwrap_or(false)
-            || inheritance.auto.git.unwrap_or(false)
-            || inheritance.auto.always.unwrap_or(false)
-        {
-            self.merge(&inheritance.auto)
-        } else {
-            self.clone()
-        };
+        let mut auto = self.merge(&inheritance.auto);
 
         // If the path is empty, inherit the cwd from the parent
         if auto.path.is_empty() {
