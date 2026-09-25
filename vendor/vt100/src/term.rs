@@ -110,9 +110,11 @@ pub struct Attrs {
     fgcolor: Option<crate::attrs::Color>,
     bgcolor: Option<crate::attrs::Color>,
     bold: Option<bool>,
+    dim: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
     inverse: Option<bool>,
+    strikethrough: Option<bool>,
 }
 
 impl Attrs {
@@ -131,6 +133,11 @@ impl Attrs {
         self
     }
 
+    pub fn dim(mut self, dim: bool) -> Self {
+        self.dim = Some(dim);
+        self
+    }
+
     pub fn italic(mut self, italic: bool) -> Self {
         self.italic = Some(italic);
         self
@@ -145,6 +152,11 @@ impl Attrs {
         self.inverse = Some(inverse);
         self
     }
+
+    pub fn strikethrough(mut self, strikethrough: bool) -> Self {
+        self.strikethrough = Some(strikethrough);
+        self
+    }
 }
 
 impl BufWrite for Attrs {
@@ -154,9 +166,11 @@ impl BufWrite for Attrs {
         if self.fgcolor.is_none()
             && self.bgcolor.is_none()
             && self.bold.is_none()
+            && self.dim.is_none()
             && self.italic.is_none()
             && self.underline.is_none()
             && self.inverse.is_none()
+            && self.strikethrough.is_none()
         {
             return;
         }
@@ -227,12 +241,16 @@ impl BufWrite for Attrs {
             }
         }
 
-        if let Some(bold) = self.bold {
-            if bold {
-                write_param!(1);
-            } else {
-                write_param!(22);
-            }
+        // 22 turns off both bold and dim, so whichever should stay on is
+        // set alongside it
+        if self.bold == Some(false) || self.dim == Some(false) {
+            write_param!(22);
+        }
+        if self.bold == Some(true) {
+            write_param!(1);
+        }
+        if self.dim == Some(true) {
+            write_param!(2);
         }
 
         if let Some(italic) = self.italic {
@@ -256,6 +274,14 @@ impl BufWrite for Attrs {
                 write_param!(7);
             } else {
                 write_param!(27);
+            }
+        }
+
+        if let Some(strikethrough) = self.strikethrough {
+            if strikethrough {
+                write_param!(9);
+            } else {
+                write_param!(29);
             }
         }
 
