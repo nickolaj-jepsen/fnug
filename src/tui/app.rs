@@ -35,6 +35,9 @@ pub enum CommandStatus {
 }
 
 /// A running or completed process with its terminal and status
+///
+/// Kept after the process exits until it is rerun or cleared: scrollback and copy read the
+/// terminal's parser, and the idle terminal threads cost next to nothing.
 pub struct ProcessInstance {
     pub terminal: Arc<Terminal>,
     pub status: CommandStatus,
