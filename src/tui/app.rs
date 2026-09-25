@@ -702,6 +702,7 @@ impl App {
             .await
             .is_err()
         {
+            // Safety net: normally the per-stop escalation already sent SIGKILL at QUIT_GRACE
             for (id, proc) in &processes {
                 if let Err(e) = proc.terminal.force_kill() {
                     log::warn!("Failed to kill process '{id}': {e}");
