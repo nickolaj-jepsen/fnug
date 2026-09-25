@@ -258,12 +258,14 @@ fn spawn_pty_reader(
 /// Exit is published once output has drained, or after `DRAIN_DEADLINE` if background processes
 /// still hold the PTY. The child is reaped only after EOF: until then its zombie keeps the process
 /// group id reserved, so stopping those background processes cannot signal a reused pid.
+/// `reaped_tx` is set last, after both.
 fn spawn_waiter(
     name: String,
     handle: ProcessHandle,
     mut child: Box<dyn Child + Send + Sync>,
     reader_done: crossbeam_channel::Receiver<()>,
     status_tx: watch::Sender<Option<ExitInfo>>,
+    reaped_tx: watch::Sender<bool>,
 ) {
     spawn_thread("fnug-pty-wait", move || {
         let mut reap = || {
@@ -271,26 +273,27 @@ fn spawn_waiter(
                 error!("Failed to reap '{name}': {e}");
             }
         };
-        let exit = match handle.wait_exit() {
-            Ok(exit) => exit,
+        match handle.wait_exit() {
             Err(e) => {
                 error!("Failed to wait for '{name}': {e}");
                 reap();
-                return;
             }
-        };
-        if matches!(
-            reader_done.recv_timeout(DRAIN_DEADLINE),
-            Err(RecvTimeoutError::Timeout)
-        ) {
-            warn!("'{name}' exited but background processes still hold its terminal");
-            status_tx.send_replace(Some(exit));
-            let _ = reader_done.recv();
-            reap();
-        } else {
-            reap();
-            status_tx.send_replace(Some(exit));
+            Ok(exit) => {
+                if matches!(
+                    reader_done.recv_timeout(DRAIN_DEADLINE),
+                    Err(RecvTimeoutError::Timeout)
+                ) {
+                    warn!("'{name}' exited but background processes still hold its terminal");
+                    status_tx.send_replace(Some(exit));
+                    let _ = reader_done.recv();
+                    reap();
+                } else {
+                    reap();
+                    status_tx.send_replace(Some(exit));
+                }
+            }
         }
+        reaped_tx.send_replace(true);
     });
 }
 
@@ -337,6 +340,7 @@ pub struct Terminal {
     update_tx: crossbeam_channel::Sender<TerminalUpdate>,
     pty_tx: crossbeam_channel::Sender<PtyInput>,
     status_rx: watch::Receiver<Option<ExitInfo>>,
+    reaped_rx: watch::Receiver<bool>,
     handle: ProcessHandle,
     master: Mutex<Box<dyn MasterPty + Send>>,
     size: Mutex<TerminalSize>,
@@ -385,6 +389,7 @@ impl Terminal {
         )));
         let dirty = Arc::new(AtomicBool::new(false));
         let (status_tx, status_rx) = watch::channel(None);
+        let (reaped_tx, reaped_rx) = watch::channel(false);
         let (reader_done_tx, reader_done_rx) = crossbeam_channel::bounded(0);
 
         let update_tx = spawn_output_writer(
@@ -400,6 +405,7 @@ impl Terminal {
             child,
             reader_done_rx,
             status_tx,
+            reaped_tx,
         );
         let pty_tx = spawn_pty_writer(writer);
 
@@ -407,6 +413,7 @@ impl Terminal {
             update_tx,
             pty_tx,
             status_rx,
+            reaped_rx,
             handle,
             master: Mutex::new(master),
             size: Mutex::new(size),
@@ -554,6 +561,22 @@ impl Terminal {
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.exit_info().is_none()
+    }
+
+    /// Whether the command has been reaped, which happens once it has exited and nothing holds
+    /// its PTY any more. Signals are no-ops from then on.
+    #[must_use]
+    pub fn is_reaped(&self) -> bool {
+        self.handle.is_reaped()
+    }
+
+    /// Wait until the command is reaped and its exit published (unless the exit could not be
+    /// determined). Unlike [`wait`](Self::wait), this also waits for background processes that
+    /// still hold the PTY. Cancel-safe.
+    pub async fn wait_reaped(&self) {
+        let mut reaped_rx = self.reaped_rx.clone();
+        // An error means the waiter thread is gone, so there is nothing left to wait for
+        let _ = reaped_rx.wait_for(|reaped| *reaped).await;
     }
 
     /// Send `signal` to the command's process group, then `SIGKILL` if it is still unreaped

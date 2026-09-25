@@ -5,6 +5,7 @@ mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use log::LevelFilter;
@@ -57,7 +58,20 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("Error: failed to start the async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(run());
+    // Don't wait for blocking tasks that can't be cancelled, such as an in-flight git scan
+    runtime.shutdown_timeout(Duration::from_millis(500));
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -66,7 +80,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[tokio::main]
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
