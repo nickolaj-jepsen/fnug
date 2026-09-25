@@ -54,6 +54,27 @@ fn no_workspace_after_subcommand_is_accepted() {
 }
 
 #[test]
+fn bare_config_filename_is_resolved() {
+    for file in [".fnug.yaml", "ci.yaml"] {
+        let dir = git_repo_with_config(file);
+        assert_success(&fnug(dir.path(), &["-c", file, "check", "--no-tui"]));
+        assert_success(&fnug(
+            dir.path(),
+            &["-c", file, "--no-workspace", "check", "--no-tui"],
+        ));
+    }
+}
+
+#[test]
+fn missing_config_file_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = fnug(dir.path(), &["-c", "missing.yaml", "check", "--no-tui"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("Config file not found"), "{stderr}");
+}
+
+#[test]
 fn mcp_install_writes_each_editors_servers_key() {
     let dir = tempfile::tempdir().unwrap();
     for (editor, key) in [
