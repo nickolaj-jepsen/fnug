@@ -14,6 +14,18 @@ pub struct Auto {
 }
 
 impl Auto {
+    /// Path prefixes a changed file must fall under.
+    #[must_use]
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.path
+    }
+
+    /// Patterns a changed file must match; empty means any file matches.
+    #[must_use]
+    pub fn regexes(&self) -> &[LazyRegex] {
+        &self.regex
+    }
+
     /// # Errors
     ///
     /// Returns `ConfigError::Regex` if any regex pattern is invalid.
