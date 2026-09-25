@@ -139,3 +139,33 @@ def test_disabled_workspace_is_allowed(fake_fnug):
     fnug.check(demo_config(workspace=False))
 
     assert fake_fnug.last_config()["workspace"] is False
+
+
+def test_check_flag_mapping(fake_fnug):
+    fnug.check(all_=True, no_workspace=True, fail_fast=True)
+
+    assert fake_fnug.last()["argv"] == [
+        "--no-workspace",
+        "check",
+        "--fail-fast",
+        "--all",
+    ]
+
+
+def test_start_no_workspace(fake_fnug):
+    fnug.start(no_workspace=True)
+
+    assert fake_fnug.last()["argv"] == ["--no-workspace"]
+
+
+def test_no_python_wrapper_env(fake_fnug, monkeypatch):
+    monkeypatch.delenv("FNUG_PYTHON_WRAPPER", raising=False)
+
+    fnug.check()
+
+    assert "FNUG_PYTHON_WRAPPER" not in fake_fnug.last()["env"]
+
+
+def test_workspace_options_exported():
+    assert fnug.WorkspaceOptions is WorkspaceOptions
+    assert "WorkspaceOptions" in fnug.__all__
