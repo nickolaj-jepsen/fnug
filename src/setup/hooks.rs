@@ -91,7 +91,8 @@ pub enum HookStatus {
     NotInstalled,
     /// A block in the current format.
     Installed,
-    /// A block written by an older fnug, which installing updates.
+    /// A block written by an older fnug, which installing updates. In a hook that isn't a shell
+    /// script, installing goes by [`ForeignPolicy`].
     Outdated,
     /// No fnug block, in a hook that isn't a shell script; see [`ForeignPolicy`].
     Foreign,
@@ -101,8 +102,9 @@ pub enum HookStatus {
 pub enum ForeignPolicy {
     /// Fail with [`HookError::ForeignHook`].
     Refuse,
-    /// Rename the hook to `pre-commit.local` and replace it with an sh hook that runs fnug and
-    /// then the original. Removing fnug's hook puts the original back.
+    /// Rename the hook to `pre-commit.local`, dropping a legacy fnug block from it, and replace
+    /// it with an sh hook that runs fnug and then the original. Removing fnug's hook puts the
+    /// original back.
     Chain,
 }
 
@@ -331,21 +333,18 @@ impl HookPlan {
         self.note.as_deref()
     }
 
-    /// Make the changes.
+    /// Make the changes. If one fails, the ones before it are undone as far as possible.
     ///
     /// # Errors
     ///
     /// Returns `HookError::Io` if a file can't be written, renamed or removed.
     pub fn apply(&self) -> Result<(), HookError> {
-        for step in &self.steps {
-            match step {
-                Step::Write {
-                    path,
-                    content,
-                    mode,
-                } => write_atomic(path, content, *mode)?,
-                Step::Rename { from, to } => std::fs::rename(from, to)?,
-                Step::Remove(path) => std::fs::remove_file(path)?,
+        for (done, step) in self.steps.iter().enumerate() {
+            if let Err(e) = step.run() {
+                for undo in self.steps[..done].iter().rev().filter_map(Step::undo) {
+                    let _ = undo.run();
+                }
+                return Err(e.into());
             }
         }
         Ok(())
@@ -359,12 +358,50 @@ enum Step {
         path: PathBuf,
         content: String,
         mode: Option<u32>,
+        /// What to write back if a later step fails.
+        previous: Option<String>,
     },
     Rename {
         from: PathBuf,
         to: PathBuf,
     },
     Remove(PathBuf),
+}
+
+impl Step {
+    fn run(&self) -> io::Result<()> {
+        match self {
+            Self::Write {
+                path,
+                content,
+                mode,
+                ..
+            } => write_atomic(path, content, *mode),
+            Self::Rename { from, to } => std::fs::rename(from, to),
+            Self::Remove(path) => std::fs::remove_file(path),
+        }
+    }
+
+    /// The step that reverses this one, if it can be reversed.
+    fn undo(&self) -> Option<Self> {
+        match self {
+            Self::Write {
+                path,
+                previous: Some(previous),
+                ..
+            } => Some(Self::Write {
+                path: path.clone(),
+                content: previous.clone(),
+                mode: None,
+                previous: None,
+            }),
+            Self::Rename { from, to } => Some(Self::Rename {
+                from: to.clone(),
+                to: from.clone(),
+            }),
+            Self::Write { .. } | Self::Remove(_) => None,
+        }
+    }
 }
 
 /// Work out what [`install_with`] would change, and what that amounts to, without changing it.
@@ -438,43 +475,39 @@ fn install_steps(target: &HookTarget, opts: &InstallOptions) -> Result<Planned, 
     };
     // Git skips hooks that aren't executable
     let mode = std::fs::metadata(path)?.permissions().mode() | 0o111;
-    let (text, script) = match String::from_utf8(existing) {
-        Ok(text) => {
-            let script = classify(&text);
-            (Some(text), script)
+    let text = String::from_utf8(existing).ok();
+    let interpreter = match &text {
+        Some(text) => {
+            let lines: Vec<&str> = text.split_inclusive('\n').collect();
+            if let Some(range) = find_block(&lines) {
+                let chained = lines[range].concat().contains(CHAINED_NAME);
+                let content = splice(text, &block(chained));
+                return Ok((
+                    vec![write_step(path, content, mode)],
+                    InstallOutcome::Updated,
+                    None,
+                ));
+            }
+            match classify(text) {
+                Script::Shell => {
+                    let content = splice(text, &block(false));
+                    let note = sets_up_path(text).then(|| {
+                        format!(
+                            "{} sets PATH or sources files, and fnug now runs before that. If fnug needs it, move fnug's block below those lines; updates keep it there.",
+                            path.display()
+                        )
+                    });
+                    return Ok((
+                        vec![write_step(path, content, mode)],
+                        InstallOutcome::Updated,
+                        note,
+                    ));
+                }
+                // Even with a legacy block: the block is sh, which this interpreter may not run
+                Script::Foreign(interpreter) => interpreter,
+            }
         }
-        Err(_) => (None, Script::Foreign("binary".to_string())),
-    };
-
-    if let Some(text) = text {
-        let lines: Vec<&str> = text.split_inclusive('\n').collect();
-        if let Some(range) = find_block(&lines) {
-            let chained = lines[range].concat().contains(CHAINED_NAME);
-            let content = splice(&text, &block(chained));
-            return Ok((
-                vec![write_step(path, content, mode)],
-                InstallOutcome::Updated,
-                None,
-            ));
-        }
-        if script == Script::Shell || find_legacy(&lines).is_some() {
-            let content = splice(&text, &block(false));
-            let note = sets_up_path(&text).then(|| {
-                format!(
-                    "{} sets PATH or sources files, and fnug now runs before that. If fnug needs it, move fnug's block below those lines; updates keep it there.",
-                    path.display()
-                )
-            });
-            return Ok((
-                vec![write_step(path, content, mode)],
-                InstallOutcome::Updated,
-                note,
-            ));
-        }
-    }
-
-    let Script::Foreign(interpreter) = script else {
-        unreachable!("shell hooks are handled above");
+        None => "binary".to_string(),
     };
     match opts.foreign {
         ForeignPolicy::Refuse => Err(HookError::ForeignHook {
@@ -482,12 +515,16 @@ fn install_steps(target: &HookTarget, opts: &InstallOptions) -> Result<Planned, 
             interpreter,
             snippet: in_config_dir(&target.config_rel, &format!("fnug {}", args.join(" "))),
         }),
-        ForeignPolicy::Chain => chain_steps(path, format!("#!/bin/sh\n{}", block(true))),
+        ForeignPolicy::Chain => {
+            chain_steps(path, text.as_deref(), format!("#!/bin/sh\n{}", block(true)))
+        }
     }
 }
 
-/// Move the hook at `path` aside, to be run by `wrapper`, which replaces it.
-fn chain_steps(path: &Path, wrapper: String) -> Result<Planned, HookError> {
+/// Move the hook at `path`, whose content is `text` unless it isn't UTF-8, aside to be run by
+/// `wrapper`, which replaces it. A legacy block is dropped from the original, since the wrapper
+/// runs fnug.
+fn chain_steps(path: &Path, text: Option<&str>, wrapper: String) -> Result<Planned, HookError> {
     let original = path.with_file_name(CHAINED_NAME);
     if original.exists() {
         return Err(io::Error::new(
@@ -496,13 +533,21 @@ fn chain_steps(path: &Path, wrapper: String) -> Result<Planned, HookError> {
         )
         .into());
     }
-    let steps = vec![
-        Step::Rename {
-            from: path.to_path_buf(),
-            to: original.clone(),
-        },
-        write_step(path, wrapper, 0o755),
-    ];
+    let mut steps = vec![Step::Rename {
+        from: path.to_path_buf(),
+        to: original.clone(),
+    }];
+    if let Some(text) = text
+        && let Some(stripped) = strip(text)
+    {
+        steps.push(Step::Write {
+            path: original.clone(),
+            content: stripped.rest,
+            mode: None,
+            previous: Some(text.to_string()),
+        });
+    }
+    steps.push(write_step(path, wrapper, 0o755));
     Ok((steps, InstallOutcome::Chained { original }, None))
 }
 
@@ -511,6 +556,7 @@ fn write_step(path: &Path, content: String, mode: u32) -> Step {
         path: path.to_path_buf(),
         content,
         mode: Some(mode),
+        previous: None,
     }
 }
 
@@ -548,17 +594,18 @@ fn remove_steps(target: &HookTarget) -> Result<Vec<Step>, HookError> {
             path: path.clone(),
             content: stripped.rest,
             mode: None,
+            previous: None,
         }]);
     }
-    let mut steps = vec![Step::Remove(path.clone())];
     let original = path.with_file_name(CHAINED_NAME);
     if stripped.chained && original.exists() {
-        steps.push(Step::Rename {
+        // Replaces the wrapper in one step, so there is always a hook
+        return Ok(vec![Step::Rename {
             from: original,
             to: path.clone(),
-        });
+        }]);
     }
-    Ok(steps)
+    Ok(vec![Step::Remove(path.clone())])
 }
 
 struct BlockSpec<'a> {
@@ -827,6 +874,27 @@ mod tests {
     fn strip_leaves_unfenced_mentions_alone() {
         assert!(strip("#!/bin/sh\n# fnug runs in CI\ncargo fmt --check\n").is_none());
         assert!(strip("#!/bin/sh\n# >>> fnug >>>\nno end fence\n").is_none());
+    }
+
+    #[test]
+    fn failed_chain_puts_the_hook_back() {
+        for original in [
+            "#!/usr/bin/env python3\nexit(0)\n",
+            "#!/usr/bin/env python3\n\n# fnug\nfnug check --fail-fast\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let hook = dir.path().join("pre-commit");
+            let local = hook.with_file_name(CHAINED_NAME);
+            std::fs::write(&hook, original).unwrap();
+            let (mut steps, ..) = chain_steps(&hook, Some(original), "wrapper".into()).unwrap();
+            // Fails, because the parent directory is a file by then
+            *steps.last_mut().unwrap() = write_step(&local.join("x"), String::new(), 0o755);
+
+            let plan = HookPlan { steps, note: None };
+            assert!(plan.apply().is_err());
+            assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
+            assert!(!local.exists());
+        }
     }
 
     #[test]
