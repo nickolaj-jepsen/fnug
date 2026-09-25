@@ -80,6 +80,8 @@ pub struct Screen {
     visual_bell_count: usize,
 
     errors: usize,
+
+    last_printed: Option<char>,
 }
 
 impl Screen {
@@ -104,6 +106,8 @@ impl Screen {
             visual_bell_count: 0,
 
             errors: 0,
+
+            last_printed: None,
         }
     }
 
@@ -1216,6 +1220,16 @@ impl Screen {
         self.grid_mut().erase_cells(count, attrs);
     }
 
+    // CSI b
+    fn rep(&mut self, last_printed: Option<char>, count: u16) {
+        if let Some(c) = last_printed {
+            for _ in 0..count {
+                self.text(c);
+            }
+            self.last_printed = Some(c);
+        }
+    }
+
     // CSI d
     fn vpa(&mut self, row: u16) {
         self.grid_mut().row_set(row - 1);
@@ -1528,9 +1542,16 @@ impl vte::Perform for Screen {
             self.errors = self.errors.saturating_add(1);
         }
         self.text(c);
+        // combining characters leave the base character in place for REP
+        if c.width()
+            .map_or_else(|| u32::from(c) >= 256, |width| width > 0)
+        {
+            self.last_printed = Some(c);
+        }
     }
 
     fn execute(&mut self, b: u8) {
+        self.last_printed = None;
         match b {
             7 => self.bel(),
             8 => self.bs(),
@@ -1550,6 +1571,7 @@ impl vte::Perform for Screen {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, b: u8) {
+        self.last_printed = None;
         intermediates.first().map_or_else(
             || match b {
                 b'7' => self.decsc(),
@@ -1570,6 +1592,8 @@ impl vte::Perform for Screen {
     }
 
     fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, c: char) {
+        // only REP keeps the last printed character, and it puts it back
+        let last_printed = self.last_printed.take();
         match intermediates.first() {
             None => match c {
                 '@' => self.ich(canonicalize_params_1(params, 1)),
@@ -1587,6 +1611,7 @@ impl vte::Perform for Screen {
                 'S' => self.su(canonicalize_params_1(params, 1)),
                 'T' => self.sd(canonicalize_params_1(params, 1)),
                 'X' => self.ech(canonicalize_params_1(params, 1)),
+                'b' => self.rep(last_printed, canonicalize_params_1(params, 1)),
                 'd' => self.vpa(canonicalize_params_1(params, 1)),
                 'h' => self.sm(params),
                 'l' => self.rm(params),
@@ -1623,6 +1648,7 @@ impl vte::Perform for Screen {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
+        self.last_printed = None;
         match (params.get(0), params.get(1)) {
             (Some(&b"0"), Some(s)) => self.osc0(s),
             (Some(&b"1"), Some(s)) => self.osc1(s),
@@ -1636,6 +1662,7 @@ impl vte::Perform for Screen {
     }
 
     fn hook(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
+        self.last_printed = None;
         if log::log_enabled!(log::Level::Debug) {
             intermediates.first().map_or_else(
                 || {
