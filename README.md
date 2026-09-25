@@ -158,7 +158,7 @@ commands:
 
 ### Excluding commands from check mode
 
-Commands with `auto.check: false` are skipped during `fnug check` (and git hooks) but remain auto-selected in the TUI. Use `fnug check --all` to include them.
+Commands with `auto.check: false` are skipped during `fnug check`, git hooks and the MCP `run_lints`/`run_all` tools, but remain auto-selected in the TUI. Use `fnug check --all` to include them, or MCP `run_lint` to run one by name.
 
 Useful for commands that are too slow or noisy for pre-commit checks but you still want to run them automatically in the TUI.
 
