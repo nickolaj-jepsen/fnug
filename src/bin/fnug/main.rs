@@ -164,14 +164,38 @@ mod tests {
     }
 
     #[test]
-    fn installed_hook_line_parses() {
+    fn installed_hook_args_parse() {
+        use std::os::unix::fs::PermissionsExt;
+
         for no_workspace in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            git2::Repository::init(dir.path()).unwrap();
+            let repo = git2::Repository::init(dir.path()).unwrap();
+            // Overrides a global core.hooksPath, which would put the hook elsewhere
+            repo.config()
+                .unwrap()
+                .set_str("core.hooksPath", ".git/hooks")
+                .unwrap();
             hooks::install(dir.path(), no_workspace).unwrap();
-            let hook = std::fs::read_to_string(dir.path().join(".git/hooks/pre-commit")).unwrap();
-            let line = hook.lines().last().unwrap();
-            let cli = Cli::try_parse_from(line.split_whitespace()).unwrap();
+
+            // Run the hook with a `fnug` first on PATH that prints its arguments
+            let shim = dir.path().join("bin/fnug");
+            std::fs::create_dir(shim.parent().unwrap()).unwrap();
+            std::fs::write(&shim, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::var("PATH").unwrap_or_default();
+            let output = std::process::Command::new("sh")
+                .arg(".git/hooks/pre-commit")
+                .current_dir(dir.path())
+                .env(
+                    "PATH",
+                    format!("{}:{path}", dir.path().join("bin").display()),
+                )
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+
+            let args = String::from_utf8(output.stdout).unwrap();
+            let cli = Cli::try_parse_from(std::iter::once("fnug").chain(args.lines())).unwrap();
             assert_eq!(cli.no_workspace, no_workspace);
             assert!(matches!(cli.command, Some(Commands::Check(_))));
         }
