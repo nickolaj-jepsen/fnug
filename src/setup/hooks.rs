@@ -85,6 +85,8 @@ pub struct HookTarget {
     /// that file, and `location` is where it is.
     pub resolved: Option<PathBuf>,
     pub location: HookLocation,
+    /// Where `hooks_dir` is, and so a hook that replaces the link at `hook_path`.
+    pub hooks_dir_location: HookLocation,
     /// Where the hook runs fnug, relative to `workdir`: the directory [`resolve`] was given, such
     /// as the config's directory. Empty at the top.
     pub config_rel: PathBuf,
@@ -326,7 +328,7 @@ pub fn resolve(config_dir: &Path) -> Result<HookTarget, HookError> {
             HookLocation::External
         }
     };
-    let location = match hooks_dir.strip_prefix(&workdir) {
+    let hooks_dir_location = match hooks_dir.strip_prefix(&workdir) {
         // husky 9 sets `.husky/_`, husky 5 to 8 `.husky`
         Ok(rel) if rel == Path::new(".husky/_") || rel == Path::new(".husky") => {
             HookLocation::Husky {
@@ -335,7 +337,7 @@ pub fn resolve(config_dir: &Path) -> Result<HookTarget, HookError> {
         }
         _ => place(&hooks_dir),
     };
-    let (hook_path, resolved, location) = match location {
+    let (hook_path, resolved, location) = match hooks_dir_location.clone() {
         HookLocation::Husky { user_hook } => {
             (user_hook.clone(), None, HookLocation::Husky { user_hook })
         }
@@ -358,6 +360,7 @@ pub fn resolve(config_dir: &Path) -> Result<HookTarget, HookError> {
         hook_path,
         resolved,
         location,
+        hooks_dir_location,
         config_rel,
     })
 }
@@ -725,7 +728,14 @@ fn install_steps(target: &HookTarget, opts: &InstallOptions) -> Result<Planned, 
             snippet: in_config_dir(&target.config_rel, &format!("fnug {}", args.join(" "))),
         }),
         ForeignPolicy::Chain => {
-            chain_steps(path, text.as_deref(), format!("#!/bin/sh\n{}", block(true)))
+            // The wrapper replaces any link with a file of its own in the hooks dir
+            let wrapper = HookTarget {
+                resolved: None,
+                location: target.hooks_dir_location.clone(),
+                ..target.clone()
+            };
+            let content = format!("#!/bin/sh\n{}", block_for(&wrapper, opts, true));
+            chain_steps(path, text.as_deref(), content)
         }
     }
 }
@@ -1178,6 +1188,7 @@ mod tests {
                 hook_path: PathBuf::from("/repo/.git/hooks/pre-commit"),
                 resolved: None,
                 location: HookLocation::Local,
+                hooks_dir_location: HookLocation::Local,
                 config_rel: config_rel.into(),
             };
             let block = block_for(&target, &opts, true);

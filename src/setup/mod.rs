@@ -288,14 +288,16 @@ impl Action {
                     ..hook.opts.clone()
                 };
                 let (plan, outcome) = hooks::plan_install(&hook.target, &opts)?;
+                let mut location = &hook.target.location;
                 if let InstallOutcome::Chained { original } = outcome {
+                    location = &hook.target.hooks_dir_location;
                     notes.push(format!(
                         "the existing hook moves to {} and runs after fnug",
                         original.display()
                     ));
                 }
                 notes.extend(plan.note().map(str::to_string));
-                let local = hook.target.location == hooks::HookLocation::Local;
+                let local = *location == hooks::HookLocation::Local;
                 notes.extend(hook_binary_note(
                     fsutil::find_on_path("fnug").as_deref(),
                     std::env::current_exe().ok().as_deref(),
@@ -698,6 +700,7 @@ mod tests {
                 resolved: None,
                 workdir: dir,
                 location: hooks::HookLocation::Local,
+                hooks_dir_location: hooks::HookLocation::Local,
                 config_rel: PathBuf::new(),
             },
             status,
