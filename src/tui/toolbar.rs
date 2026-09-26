@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, CommandStatus, Focus};
 use super::keymap::badge;
@@ -58,7 +59,7 @@ impl Shortcut {
 
     /// Width this shortcut occupies: " key " (padded badge) + space + desc
     fn width(&self) -> usize {
-        1 + self.key.chars().count() + 1 + 1 + self.desc.chars().count()
+        1 + self.key.width() + 1 + 1 + self.desc.width()
     }
 }
 
@@ -224,12 +225,20 @@ fn shortcut_spans(shortcut: &Shortcut, hovered: bool) -> [Span<'static>; 3] {
     ]
 }
 
-/// `text` cut to at most `max` characters, ending in `…` when cut
+/// `text` cut to at most `max` columns, ending in `…` when cut
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if text.width() <= max {
         return text.to_string();
     }
-    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    let budget = max.saturating_sub(1);
+    let mut used = 0;
+    let mut cut: String = text
+        .chars()
+        .take_while(|c| {
+            used += c.width().unwrap_or(0);
+            used <= budget
+        })
+        .collect();
     if max > 0 {
         cut.push('…');
     }
@@ -261,7 +270,7 @@ impl<'a> LineBuilder<'a> {
     }
 
     fn push_text(&mut self, text: String, style: Style) {
-        self.x += text.chars().count();
+        self.x += text.width();
         self.spans.push(Span::styled(text, style));
     }
 
@@ -391,6 +400,22 @@ mod tests {
         assert!(text.contains("x…"), "{text:?}");
         assert!(text.ends_with(" ?  Help"), "{text:?}");
         assert_eq!(text.chars().count(), 40);
+    }
+
+    #[test]
+    fn wide_status_is_cut_by_display_width() {
+        let mut app = two_groups();
+        app.set_status(
+            "Not watching 設定ファイル設定ファイル設定ファイル",
+            StatusLevel::Warn,
+        );
+
+        let (line, regions) = build_toolbar_line(&app, 40);
+        let text = toolbar_text(&app, 40);
+
+        assert!(text.ends_with(" ?  Help"), "{text:?}");
+        assert_eq!(line.width(), 40, "{text:?}");
+        assert_eq!(regions.last().unwrap().x_end, 40);
     }
 
     #[test]

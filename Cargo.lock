@@ -638,6 +638,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
