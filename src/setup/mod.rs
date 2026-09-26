@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use inquire::{Confirm, MultiSelect};
 use thiserror::Error;
 
+use crate::config_file::find_config_in_dir;
+use crate::init::{self, InitError, NewConfig, Proposal};
 use crate::selectors::relative_to;
 use crate::{LoadOptions, LoadedConfig};
 use hooks::{
@@ -28,6 +30,9 @@ pub enum SetupError {
     #[error("MCP config error: {0}")]
     Mcp(#[from] mcp::McpError),
 
+    #[error("{0}")]
+    Init(#[from] InitError),
+
     #[error("cancelled")]
     Cancelled,
 
@@ -37,19 +42,37 @@ pub enum SetupError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Feature {
+    CreateConfig,
     GitHooks,
     McpServer,
 }
 
+/// The features offered when there is a config.
 const FEATURES: [Feature; 2] = [Feature::GitHooks, Feature::McpServer];
 
-impl fmt::Display for Feature {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Feature {
+    fn label(self, detected: &Detected) -> String {
         match self {
-            Self::GitHooks => write!(f, "Git pre-commit hooks"),
-            Self::McpServer => write!(f, "MCP server for editors"),
+            Self::CreateConfig => match detected.config_proposals.as_deref() {
+                Some(proposals) if !proposals.is_empty() => {
+                    let found: Vec<_> = proposals.iter().map(|p| p.label.as_str()).collect();
+                    format!("Create .fnug.yaml (detected: {})", found.join(", "))
+                }
+                _ => "Create .fnug.yaml with an example command (no tooling detected)".into(),
+            },
+            Self::GitHooks => "Git pre-commit hooks".into(),
+            Self::McpServer => "MCP server for editors".into(),
         }
     }
+}
+
+/// The features to offer: creating a config when there is none, then [`FEATURES`].
+fn offered_features(detected: &Detected) -> Vec<Feature> {
+    let create = detected
+        .config_proposals
+        .as_ref()
+        .map(|_| Feature::CreateConfig);
+    create.into_iter().chain(FEATURES).collect()
 }
 
 /// A repository's pre-commit hook and whether it runs fnug.
@@ -85,7 +108,10 @@ impl RepoHook {
 #[derive(Debug, Default)]
 struct Detected {
     has_config: bool,
-    /// Where the editors' MCP configs go.
+    /// What `fnug init` would put in a config in `cwd`, when neither `cwd` nor a parent has a
+    /// config file.
+    config_proposals: Option<Vec<Proposal>>,
+    /// Where the editors' MCP configs go, and a new config.
     cwd: PathBuf,
     root_hook: Option<RepoHook>,
     sub_repo_hooks: Vec<RepoHook>,
@@ -107,6 +133,8 @@ impl Detected {
 #[derive(Debug, Default)]
 struct Choice {
     features: Vec<Feature>,
+    /// The [`Proposal::key`]s of the groups a new config gets.
+    config_keys: Vec<&'static str>,
     editors: Vec<Editor>,
     /// Indices into [`Detected::sub_repo_hooks`].
     sub_repos: Vec<usize>,
@@ -134,27 +162,39 @@ fn wanted_hooks<'a>(
         )
 }
 
-/// Indices into [`FEATURES`] to preselect: whatever is installed, and the hook when nothing is
-/// and there is a config for it to run.
+/// Indices into [`offered_features`] to preselect: creating a config if there is none, whatever
+/// is installed, and the hook when nothing is and there is a config for it to run.
 fn default_features(detected: &Detected) -> Vec<usize> {
     let hook_installed = detected
         .root_hook
         .as_ref()
         .is_some_and(RepoHook::is_installed);
     let mcp_installed = detected.mcp_installed().any(|installed| installed);
-    let mut defaults = Vec::new();
-    if hook_installed || (detected.has_config && !mcp_installed) {
-        defaults.push(0);
-    }
-    if mcp_installed {
-        defaults.push(1);
-    }
-    defaults
+    let wanted = [
+        (Feature::CreateConfig, detected.config_proposals.is_some()),
+        (
+            Feature::GitHooks,
+            hook_installed || (detected.has_config && !mcp_installed),
+        ),
+        (Feature::McpServer, mcp_installed),
+    ];
+    let offered = offered_features(detected);
+    wanted
+        .into_iter()
+        .filter(|&(_, wanted)| wanted)
+        .filter_map(|(feature, _)| offered.iter().position(|&f| f == feature))
+        .collect()
 }
 
 /// A change setup can make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
+    /// Write the config `fnug init` would, with the proposals for `dir` that have `keys`.
+    CreateConfig {
+        dir: PathBuf,
+        keys: Vec<&'static str>,
+        labels: Vec<String>,
+    },
     InstallHook {
         hook: RepoHook,
     },
@@ -185,6 +225,14 @@ fn hook_file(target: &HookTarget) -> String {
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CreateConfig { dir, labels, .. } => {
+                let path = dir.join(".fnug.yaml");
+                if labels.is_empty() {
+                    write!(f, "+ Create {} with an example command", path.display())
+                } else {
+                    write!(f, "+ Create {} with {}", path.display(), labels.join(", "))
+                }
+            }
             Self::InstallHook { hook } if hook.status == HookStatus::Outdated => {
                 write!(f, "~ Update pre-commit hook ({})", hook_file(&hook.target))
             }
@@ -222,10 +270,26 @@ impl fmt::Display for Action {
 }
 
 /// The actions that turn what is set up into what the user picked. Deselecting something removes
-/// it, except a hook that runs another config, which changes only if the user repoints it.
+/// it, except a hook that runs another config, which changes only if the user repoints it. A new
+/// config comes first, so the hook and editors never run fnug without one.
 fn plan_actions(detected: &Detected, choice: &Choice) -> Vec<Action> {
     let wants_mcp = choice.features.contains(&Feature::McpServer);
     let mut actions = Vec::new();
+
+    if let Some(proposals) = &detected.config_proposals
+        && choice.features.contains(&Feature::CreateConfig)
+    {
+        let chosen = || {
+            proposals
+                .iter()
+                .filter(|p| choice.config_keys.contains(&p.key))
+        };
+        actions.push(Action::CreateConfig {
+            dir: detected.cwd.clone(),
+            keys: chosen().map(|p| p.key).collect(),
+            labels: chosen().map(|p| p.label.clone()).collect(),
+        });
+    }
 
     for (hook, wanted) in wanted_hooks(detected, &choice.features, &choice.sub_repos) {
         let hook = hook.clone();
@@ -269,6 +333,7 @@ struct Prepared {
 }
 
 enum Change {
+    Config(NewConfig),
     Hook(HookPlan),
     Mcp {
         editor: Editor,
@@ -282,6 +347,14 @@ impl Action {
     fn prepare(&self, foreign: ForeignPolicy) -> Result<Option<Prepared>, SetupError> {
         let mut notes = Vec::new();
         let change = match self {
+            Self::CreateConfig { dir, keys, .. } => {
+                let groups = init::detect(dir)
+                    .into_iter()
+                    .filter(|p| keys.contains(&p.key))
+                    .map(|p| p.group)
+                    .collect();
+                Change::Config(init::prepare(dir, false, groups, None)?)
+            }
             Self::InstallHook { hook } => {
                 let opts = InstallOptions {
                     foreign,
@@ -384,6 +457,7 @@ fn hook_binary_note(
 impl Prepared {
     fn apply(&self) -> Result<(), SetupError> {
         match &self.change {
+            Change::Config(config) => config.write()?,
             Change::Hook(plan) => plan.apply()?,
             Change::Mcp {
                 editor,
@@ -493,8 +567,13 @@ fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Dete
             }
         })
         .collect();
+    // Not over a config that failed to load, nor one in a parent that `cwd` would then shadow
+    let config_proposals = (config.is_none()
+        && !cwd.ancestors().any(|dir| find_config_in_dir(dir).is_some()))
+    .then(|| init::detect(cwd));
     Detected {
         has_config: config.is_some(),
+        config_proposals,
         cwd: cwd.to_path_buf(),
         root_hook,
         sub_repo_hooks,
@@ -542,9 +621,24 @@ fn path_arg(path: &Path, base: &Path) -> PathBuf {
 }
 
 fn prompt(detected: &Detected) -> Result<Choice, SetupError> {
-    let features = MultiSelect::new("What would you like to set up?", FEATURES.to_vec())
+    let offered = offered_features(detected);
+    let labels = offered.iter().map(|f| f.label(detected)).collect();
+    let features: Vec<Feature> = MultiSelect::new("What would you like to set up?", labels)
         .with_default(&default_features(detected))
-        .prompt()?;
+        .raw_prompt()?
+        .into_iter()
+        .map(|option| offered[option.index])
+        .collect();
+
+    let proposals = detected.config_proposals.as_deref().unwrap_or_default();
+    let config_keys = if features.contains(&Feature::CreateConfig) && proposals.len() > 1 {
+        init::prompt(proposals)?
+            .into_iter()
+            .map(|i| proposals[i].key)
+            .collect()
+    } else {
+        proposals.iter().map(|p| p.key).collect()
+    };
 
     let editors = if features.contains(&Feature::McpServer) && !detected.editors.is_empty() {
         let options = detected.editors.iter().map(|(e, _)| *e).collect();
@@ -601,6 +695,7 @@ fn prompt(detected: &Detected) -> Result<Choice, SetupError> {
 
     Ok(Choice {
         features,
+        config_keys,
         editors,
         sub_repos,
         repoint,
@@ -722,6 +817,7 @@ mod tests {
         };
         Detected {
             has_config: true,
+            config_proposals: None,
             cwd: PathBuf::from("/repo"),
             root_hook: Some(hook("", hook_status)),
             sub_repo_hooks: Vec::new(),
@@ -751,6 +847,28 @@ mod tests {
                 "{status:?}, mcp {mcp}, config {has_config}"
             );
         }
+    }
+
+    #[test]
+    fn default_features_without_config() {
+        let without = Detected {
+            has_config: false,
+            config_proposals: Some(Vec::new()),
+            ..detected(HookStatus::NotInstalled, &[(Editor::VsCode, false)])
+        };
+        assert_eq!(
+            offered_features(&without),
+            [Feature::CreateConfig, Feature::GitHooks, Feature::McpServer]
+        );
+        assert_eq!(
+            default_features(&without),
+            [0],
+            "no hook until there's a config"
+        );
+
+        let with = detected(HookStatus::NotInstalled, &[(Editor::VsCode, false)]);
+        assert_eq!(offered_features(&with), FEATURES);
+        assert_eq!(default_features(&with), [0]);
     }
 
     #[test]
@@ -1111,6 +1229,104 @@ mod tests {
         assert_eq!(hook.status, HookStatus::Outdated);
         assert_eq!(actions, [Action::InstallHook { hook }]);
         assert!(actions[0].to_string().starts_with("~ Update"));
+    }
+
+    #[test]
+    fn created_config_comes_first_and_the_hook_runs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        init_repo(&root);
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("go.mod"), "module demo\n").unwrap();
+
+        let detected = detect(&root, None, &LoadOptions::default());
+        let keys: Vec<_> = detected
+            .config_proposals
+            .iter()
+            .flatten()
+            .map(|p| p.key)
+            .collect();
+        assert_eq!(keys, ["rust", "go"]);
+        assert_eq!(
+            Feature::CreateConfig.label(&detected),
+            "Create .fnug.yaml (detected: Rust, Go)"
+        );
+        let choice = Choice {
+            features: offered_features(&detected),
+            config_keys: vec!["go"],
+            editors: vec![Editor::ClaudeCode],
+            ..Choice::default()
+        };
+        let actions = plan_actions(&detected, &choice);
+        let path = root.join(".fnug.yaml");
+        assert_eq!(
+            actions[0].to_string(),
+            format!("+ Create {} with Go", path.display())
+        );
+        assert!(actions[1..].iter().any(is_hook_action), "{actions:?}");
+
+        for ready in prepare_all(&actions).unwrap() {
+            ready.apply().unwrap();
+        }
+
+        let hook = detected.root_hook.as_ref().unwrap();
+        assert!(hook.target.hook_path.is_file());
+        let loaded = hook_loads(hook);
+        assert_eq!(loaded.config_path, path);
+        let ids: Vec<_> = loaded
+            .root
+            .children
+            .iter()
+            .flat_map(|g| &g.commands)
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, ["gofmt", "vet", "test"]);
+        // The editor starts `fnug mcp` in the config's directory, where it finds the config
+        let mcp = std::fs::read_to_string(Editor::ClaudeCode.config_path(&root)).unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+        assert_eq!(
+            mcp["mcpServers"]["fnug"]["args"],
+            serde_json::json!(["mcp"])
+        );
+    }
+
+    #[test]
+    fn create_config_only_without_any_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let empty = detect(&root.join("sub"), None, &LoadOptions::default());
+        assert_eq!(
+            Feature::CreateConfig.label(&empty),
+            "Create .fnug.yaml with an example command (no tooling detected)"
+        );
+
+        // One that doesn't load, here or in a parent, is left for the user to fix
+        std::fs::write(root.join(".fnug.yaml"), "name: [").unwrap();
+        for dir in [root.clone(), root.join("sub")] {
+            let detected = detect(&dir, None, &LoadOptions::default());
+            assert!(detected.config_proposals.is_none(), "{}", dir.display());
+            assert_eq!(offered_features(&detected), FEATURES);
+        }
+    }
+
+    #[test]
+    fn create_config_never_replaces_a_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let action = Action::CreateConfig {
+            dir: dir.path().to_path_buf(),
+            keys: Vec::new(),
+            labels: Vec::new(),
+        };
+        // Written between the prompt and preparing
+        std::fs::write(dir.path().join(".fnug.yml"), "keep").unwrap();
+
+        assert!(matches!(
+            action.prepare(ForeignPolicy::Refuse),
+            Err(SetupError::Init(InitError::Exists(_)))
+        ));
+        assert!(prepare_all(&[action]).unwrap().is_empty());
+        assert!(!dir.path().join(".fnug.yaml").exists());
     }
 
     /// The `fnug` arguments in the Claude Code entry that setup writes when run from `dir`.

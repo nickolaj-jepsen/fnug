@@ -182,6 +182,7 @@ It never replaces an existing config unless you pass `--force`, which rewrites t
 ### Setup
 
 `fnug setup` installs a git pre-commit hook that runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`, which checks what is being committed (see [Checking what is committed](#checking-what-is-committed)), and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it.
+`fnug setup` installs a git pre-commit hook that runs `fnug check`, and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it. When neither the directory nor a parent has a config, setup first offers to create one with the groups `fnug init` would propose, and writes it before the hook and the editor entries that run it.
 
 The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead. A `pre-commit` that is a symlink counts as the file it links to: setup edits that file, shows it in the list of changes, and prints the lines instead if it is outside the repository.
 
