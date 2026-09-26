@@ -53,33 +53,32 @@ pub async fn run(
 
     // From here on SIGINT, SIGTERM and SIGHUP quit like `q`, so the terminal gets restored
     let signals = signals::install()?;
+    let mut terminal = setup_terminal()?;
     // Log lines would corrupt the TUI; the log panel shows them instead
     logger.set_stderr(false);
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
 
     // Create app
     let mut app = App::new(loaded.root, loaded.cwd, logger.buffer());
-    if let Some(ref result) = check_result {
-        apply_check_result(&mut terminal, &mut app, result)?;
+    let started = if let Some(result) = &check_result {
+        apply_check_result(&mut terminal, &mut app, result)
     } else {
         app.apply_always_selection();
         app.spawn_git_selection();
-    }
+        Ok(())
+    };
 
-    let log_tx = app.event_tx.clone();
-    logger.set_notifier(Box::new(move || {
-        let _ = log_tx.try_send(AppEvent::LogUpdated);
-    }));
-
-    app.start_file_watcher();
-    app.watch_config(reload, &loaded.sources);
-
-    // Main event loop
-    let result = run_event_loop(&mut terminal, &mut app, &signals.cancel).await;
+    let result = match started {
+        Ok(()) => {
+            let log_tx = app.event_tx.clone();
+            logger.set_notifier(Box::new(move || {
+                let _ = log_tx.try_send(AppEvent::LogUpdated);
+            }));
+            app.start_file_watcher();
+            app.watch_config(reload, &loaded.sources);
+            run_event_loop(&mut terminal, &mut app, &signals.cancel).await
+        }
+        Err(e) => Err(e.into()),
+    };
     if let Err(e) = &result {
         // Only to the log panel's buffer and the log file; stderr gets it once, below
         error!("Application error: {e}");
@@ -125,6 +124,18 @@ fn apply_check_result<B: Backend>(
     terminal.draw(|frame| pane = app.render(frame).1)?;
     app.apply_check_result(result, pane);
     Ok(())
+}
+
+/// Enter raw mode, the alternate screen and mouse capture. Undoes them if a step fails.
+fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    enable_raw_mode()?;
+    let terminal = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)
+        .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())));
+    if terminal.is_err() {
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = disable_raw_mode();
+    }
+    terminal
 }
 
 /// Leave raw mode, the alternate screen and mouse capture, and show the cursor. Tries every
