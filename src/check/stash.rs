@@ -83,8 +83,6 @@ pub enum StashError {
 /// What putting unstaged changes back did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreNote {
-    /// Unstaged changes were set aside, and are back.
-    pub restored: bool,
     /// Commands changed files that also have unstaged changes, so their changes to those files
     /// were discarded to put the unstaged ones back.
     pub discarded_fixes: bool,
@@ -260,10 +258,7 @@ impl StashGuard {
     fn reapply(&self, patch: &Path, tree: &str) -> Result<RestoreNote, String> {
         let git = |e: StashError| e.to_string();
         let saved = SavedPatch::read(&self.git, patch).map_err(git)?;
-        let mut note = RestoreNote {
-            restored: true,
-            ..RestoreNote::default()
-        };
+        let mut note = RestoreNote::default();
         let restored = match saved.compare(&self.git, tree).map_err(git)? {
             // Checkout failed before it changed them
             WorkTree::Patched => true,
@@ -411,7 +406,6 @@ fn recover_stale(
                 }
                 let restored = saved.compare(git, tree)? == WorkTree::Patched;
                 note = Some(RestoreNote {
-                    restored: true,
                     kept_patch: (!restored).then(|| patch.clone()),
                     ..RestoreNote::default()
                 });
