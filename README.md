@@ -129,7 +129,7 @@ Commands with `auto.check: false` are left out unless you add `--include-manual`
 | --------- | -------------------------------------------------------------------- |
 | 0         | Every command passed, or none was selected                           |
 | 1         | A command failed, timed out or changed tracked files, or was skipped or not run |
-| 2         | fnug couldn't do its job: a usage error, a config that doesn't load, an unknown or ambiguous name, a `--base` that doesn't resolve, `--staged` outside a git repository, or unstaged changes it couldn't set aside or put back |
+| 2         | fnug couldn't do its job: a usage error, a config that doesn't load, an unknown or ambiguous name, a `--base` that doesn't resolve, `--staged` or `--base` outside a git repository, or unstaged changes it couldn't set aside or put back |
 | 128+n     | Stopped by signal n                                                  |
 
 A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects nothing there. In a pull request, compare with the target branch; elsewhere, run everything. `--base` needs the merge base in the clone, so fetch the whole history:

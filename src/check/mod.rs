@@ -5,9 +5,10 @@ mod printer;
 pub mod stash;
 
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use git2::{Repository, RepositoryOpenFlags};
 use log::warn;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +18,7 @@ use crate::runner::{
     self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, Plan, PlanError,
     PlanOptions, RunEvent, RunReport, Selection,
 };
-use crate::selectors::SelectOptions;
+use crate::selectors::{GitScope, SelectOptions};
 
 use modified::ModificationGuard;
 use printer::Printer;
@@ -29,6 +30,8 @@ pub enum CheckError {
     Plan(#[from] PlanError),
     #[error(transparent)]
     Stash(#[from] StashError),
+    #[error("--base needs a git repository, but {} is not in one: {message}", path.display())]
+    BaseOutsideRepo { path: PathBuf, message: String },
 }
 
 /// How [`run`] selects and runs commands.
@@ -100,13 +103,15 @@ pub struct CheckResult {
 /// # Errors
 ///
 /// Returns `CheckError::Plan` if a target names no single command or git selection fails as a
-/// whole, and `CheckError::Stash` if unstaged changes can't be set aside or put back.
+/// whole, `CheckError::BaseOutsideRepo` if it selects by changes since a base and `cwd` isn't in
+/// a git work tree, and `CheckError::Stash` if unstaged changes can't be set aside or put back.
 pub async fn run(
     config: &CommandGroup,
     cwd: &Path,
     opts: &CheckOptions,
     cancel: CancellationToken,
 ) -> Result<CheckResult, CheckError> {
+    check_base_repo(&opts.selection, cwd)?;
     let Some(plan) = plan_unless_cancelled(config, &opts.selection, &cancel).await? else {
         printer::interrupted();
         return Ok(CheckResult {
@@ -184,6 +189,26 @@ pub async fn run(
     Ok(CheckResult {
         exit_code: i32::from(!report.success()),
         report,
+    })
+}
+
+/// Under the since-base scope, fail unless `cwd` is in a git work tree. Selection alone only
+/// warns about paths outside one, and would run just the `always` commands.
+fn check_base_repo(selection: &Selection, cwd: &Path) -> Result<(), CheckError> {
+    let Selection::Auto { options, .. } = selection else {
+        return Ok(());
+    };
+    if !matches!(options.scope, GitScope::Since(_)) {
+        return Ok(());
+    }
+    let message = match Repository::open_ext(cwd, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]) {
+        Ok(repo) if repo.workdir().is_some() => return Ok(()),
+        Ok(_) => "it is in a bare repository".to_string(),
+        Err(e) => e.message().to_string(),
+    };
+    Err(CheckError::BaseOutsideRepo {
+        path: cwd.to_path_buf(),
+        message,
     })
 }
 

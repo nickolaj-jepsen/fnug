@@ -897,6 +897,25 @@ fn base_unresolvable_exits_2() {
     );
 }
 
+#[test]
+fn base_outside_repo_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    if git2::Repository::discover(dir.path()).is_ok() {
+        eprintln!("skipping: the temp dir is inside a git repo");
+        return;
+    }
+    // As in a CI job that got a tarball: it must not pass with only `always` commands run
+    common::write_config(
+        dir.path(),
+        "name: root\nauto:\n  always: true\ncommands:\n  - name: build\n    cmd: 'true'\n",
+    );
+    let output = check(dir.path(), &["--base", "main"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("--base needs a git repository"), "{err}");
+    assert!(ran(&output).is_empty(), "{err}");
+}
+
 const STAGED: &str = r"
 name: root
 commands:
