@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 use ratatui::layout::Rect;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::commands::command::Command;
@@ -264,6 +264,8 @@ pub struct App {
     pub(super) next_generation: u64,
     /// Command IDs from the current batch run (for auto-focus on failure)
     pub(super) batch_run_ids: Option<HashSet<String>>,
+    /// Given to every terminal, which notifies it on new output
+    pub(super) output_notify: Arc<Notify>,
     /// Whether the help overlay is shown
     pub show_help: bool,
 }
@@ -349,6 +351,7 @@ impl App {
             git_selection_generation: 0,
             next_generation: 0,
             batch_run_ids: None,
+            output_notify: Arc::new(Notify::new()),
             show_help: false,
         };
         app.rebuild_visible_nodes();
@@ -528,8 +531,8 @@ impl App {
         find_command_in_group(&self.config, id)
     }
 
-    /// Handle app events (called from event loop)
-    pub fn handle_app_event(&mut self, event: AppEvent) {
+    /// Handle app events (called from event loop). Returns whether the screen needs a redraw.
+    pub fn handle_app_event(&mut self, event: AppEvent) -> bool {
         match event {
             AppEvent::ProcessExited {
                 id,
@@ -537,7 +540,7 @@ impl App {
                 exit,
             } => {
                 let Some(proc) = self.current_process(&id, generation) else {
-                    return;
+                    return false;
                 };
                 proc.finished_at = Some(Instant::now());
                 proc.status = if exit.stop_requested {
@@ -569,7 +572,7 @@ impl App {
                 message,
             } => {
                 let Some(proc) = self.current_process(&id, generation) else {
-                    return;
+                    return false;
                 };
                 error!("Process error for '{id}': {message}");
                 proc.finished_at = Some(Instant::now());
@@ -588,20 +591,20 @@ impl App {
                 self.mark_tree_dirty();
             }
             AppEvent::GitSelectionComplete(generation, selected) => {
-                if generation == self.git_selection_generation {
-                    self.git_selection_handle = None;
-                    for cmd in &selected {
-                        self.selected.insert(cmd.id.clone());
-                    }
-                    debug!("Git-selected {} commands", selected.len());
-                    self.fit_expansion_to_selection(false);
-                    self.mark_tree_dirty();
+                if generation != self.git_selection_generation {
+                    return false;
                 }
+                self.git_selection_handle = None;
+                for cmd in &selected {
+                    self.selected.insert(cmd.id.clone());
+                }
+                debug!("Git-selected {} commands", selected.len());
+                self.fit_expansion_to_selection(false);
+                self.mark_tree_dirty();
             }
-            AppEvent::LogUpdated => {
-                // Redraw happens automatically on next frame
-            }
+            AppEvent::LogUpdated => return self.show_logs,
         }
+        true
     }
 
     /// The process for `id`, unless an event of `generation` comes from an earlier, replaced run
@@ -741,17 +744,31 @@ impl App {
         }
     }
 
-    /// Check if any running terminal has new output that needs rendering
+    /// Whether the terminal on screen has output not drawn yet. Other terminals' output needs
+    /// no redraw, nor does any while the log panel covers the pane.
     #[must_use]
     pub fn any_terminal_dirty(&self) -> bool {
-        self.processes.values().any(|p| p.terminal.is_dirty())
+        !self.logs_on_screen() && self.active_process().is_some_and(|p| p.terminal.is_dirty())
     }
 
-    /// Clear dirty flags on all terminals (call after rendering)
+    /// Whether the log panel covers the terminal pane; fullscreen always shows the terminal.
+    pub(super) fn logs_on_screen(&self) -> bool {
+        self.show_logs && !self.fullscreen
+    }
+
+    /// Clear the dirty flag of the terminal on screen; call before drawing.
+    ///
+    /// Hidden terminals stay dirty, which keeps their output from waking the event loop.
     pub fn clear_terminal_dirty(&self) {
-        for proc in self.processes.values() {
+        if let Some(proc) = self.active_process() {
             proc.terminal.clear_dirty();
         }
+    }
+
+    /// Notified when a terminal gets output while it isn't dirty; the event loop waits on it.
+    #[must_use]
+    pub fn output_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.output_notify)
     }
 
     /// Get a reference to the active terminal's process, if any.
@@ -1182,6 +1199,14 @@ mod tests {
             "  └─○ recursive",
         ];
         assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn log_update_redraws_only_under_log_panel() {
+        let mut app = App::new(make_test_tree(), PathBuf::new(), LogBuffer::new());
+        assert!(!app.handle_app_event(AppEvent::LogUpdated));
+        app.show_logs = true;
+        assert!(app.handle_app_event(AppEvent::LogUpdated));
     }
 
     mod expansion {

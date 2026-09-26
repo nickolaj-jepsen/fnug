@@ -202,21 +202,25 @@ async fn run_event_loop(
     app: &mut App,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// Shortest time between two frames, which caps redraws at about 60 a second
+    const FRAME: Duration = Duration::from_millis(16);
 
     let mut event_stream = EventStream::new();
     let mut tree_area = Rect::default();
     let mut terminal_area = Rect::default();
     let mut needs_render = true;
+    let mut next_frame = Instant::now();
+    let output = app.output_notify();
 
-    // Frame rate limiter: ~60 FPS max
-    let mut render_tick = tokio::time::interval(Duration::from_millis(16));
-    render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Advances the elapsed time of running commands
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        if needs_render {
+        needs_render |= app.any_terminal_dirty();
+        if needs_render && Instant::now() >= next_frame {
             app.clear_terminal_dirty();
             terminal.draw(|frame| {
                 let (ta, term_a) = app.render(frame);
@@ -224,6 +228,7 @@ async fn run_event_loop(
                 terminal_area = term_a;
             })?;
             needs_render = false;
+            next_frame = Instant::now() + FRAME;
             // Whatever changed the pane: a window resize, fullscreen, or the divider
             app.sync_pty_size(terminal_area);
         }
@@ -234,12 +239,9 @@ async fn run_event_loop(
 
         // Wait for events
         tokio::select! {
-            // Periodic tick to check for dirty terminals
-            _ = render_tick.tick() => {
-                if app.any_terminal_dirty() {
-                    needs_render = true;
-                }
-            }
+            () = tokio::time::sleep_until(next_frame), if needs_render => {}
+            // Output for the terminal on screen; the loop's top checks which one got it
+            () = output.notified() => {}
             _ = clock.tick(), if app.has_active_runs() => {
                 app.mark_tree_dirty();
                 needs_render = true;
@@ -279,9 +281,8 @@ async fn run_event_loop(
             }
             // App events (process exit, watcher)
             maybe_app_event = app.event_rx.recv() => {
-                needs_render = true;
                 if let Some(app_event) = maybe_app_event {
-                    app.handle_app_event(app_event);
+                    needs_render |= app.handle_app_event(app_event);
                 }
             }
             // Defense-in-depth: handle Ctrl+C even if crossterm misses it

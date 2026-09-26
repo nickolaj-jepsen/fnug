@@ -190,7 +190,7 @@ impl App {
             scrollback: cmd
                 .scrollback
                 .unwrap_or_else(Terminal::default_scrollback_size),
-            output_notify: None,
+            output_notify: Some(Arc::clone(&self.output_notify)),
         };
         let terminal = Terminal::new(&cmd, size, opts)
             .map_err(|e| format!("Failed to start '{}': {e}", cmd.name))?;
@@ -942,6 +942,61 @@ mod tests {
 
         assert_eq!(app.current_command_id().as_deref(), Some("c"));
         assert_eq!(app.active_terminal_id.as_deref(), Some("c"));
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hidden_output_does_not_dirty() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let command = |id: &str, cmd: &str| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: cmd.into(),
+            cwd: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                command(
+                    "hidden",
+                    "while [ ! -e go ]; do sleep 0.01; done; echo output; exec sleep 30",
+                ),
+                command("shown", "exec sleep 30"),
+            ],
+            ..Default::default()
+        };
+        let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
+        app.run_command("hidden", AREA);
+        app.run_command("shown", AREA);
+        let hidden = std::sync::Arc::clone(&app.processes["hidden"].terminal);
+        let shown = std::sync::Arc::clone(&app.processes["shown"].terminal);
+        // Both echoed their start banner
+        assert!(wait_until(Duration::from_secs(5), || hidden.is_dirty()
+            && shown.is_dirty()));
+        app.clear_terminal_dirty();
+        hidden.clear_dirty();
+
+        std::fs::write(dir.path().join("go"), "").unwrap();
+        assert!(wait_until(Duration::from_secs(5), || hidden.is_dirty()));
+        assert!(
+            !app.any_terminal_dirty(),
+            "hidden output requested a redraw"
+        );
+
+        // Nor does the shown terminal while the log panel covers it
+        shown.echo(b"more".to_vec()).unwrap();
+        assert!(wait_until(Duration::from_secs(5), || shown.is_dirty()));
+        assert!(app.any_terminal_dirty());
+        app.show_logs = true;
+        assert!(!app.any_terminal_dirty());
+        // Fullscreen shows the terminal whatever the log panel's toggle says
+        app.fullscreen = true;
+        assert!(app.any_terminal_dirty());
         app.shutdown().await;
     }
 
