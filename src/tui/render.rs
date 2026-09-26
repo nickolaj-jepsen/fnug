@@ -108,8 +108,13 @@ impl App {
             frame.render_widget(Paragraph::new(search_line), search_area);
         }
 
-        // Render tree (ensure cursor is visible within the panel height)
-        self.ensure_cursor_visible(actual_tree_area.height as usize);
+        let tree_height = usize::from(actual_tree_area.height);
+        if self.last_scroll_anchor == Some((self.cursor, tree_height)) {
+            self.clamp_tree_scroll(tree_height);
+        } else {
+            self.last_scroll_anchor = Some((self.cursor, tree_height));
+            self.ensure_cursor_visible(tree_height);
+        }
         let tree_widget = TreeWidget::new(
             &self.visible_nodes,
             self.cursor,
@@ -205,7 +210,7 @@ impl App {
         frame.render_widget(placeholder, area);
     }
 
-    fn render_log_panel(&self, frame: &mut Frame, area: Rect) {
+    fn render_log_panel(&mut self, frame: &mut Frame, area: Rect) {
         let entries = self.log_buffer.entries();
         let count = entries.len();
 
@@ -236,7 +241,9 @@ impl App {
 
         let visible_height = content_area.height as usize;
         let max_scroll = count.saturating_sub(visible_height);
-        let scroll = self.log_scroll.min(max_scroll);
+        // Stored, so scrolling back down after scrolling past the top moves at once
+        self.log_scroll = self.log_scroll.min(max_scroll);
+        let scroll = self.log_scroll;
 
         // Show entries from bottom (newest last), scrolled up by `scroll`
         let start = count.saturating_sub(visible_height + scroll);
@@ -359,5 +366,110 @@ impl App {
         ];
 
         Paragraph::new(lines).render(inner, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    use crate::logger::LogEntry;
+    use crate::tui::app::App;
+    use crate::tui::log_state::LogBuffer;
+    use crate::tui::test_util::{command, draw, group, press, type_text};
+
+    /// `root` holding commands `c01` to `c{count}`
+    fn long_list(count: usize) -> App {
+        let commands = (1..=count).map(|i| command(&format!("c{i:02}"))).collect();
+        App::new(
+            group("root", vec![], commands),
+            PathBuf::new(),
+            LogBuffer::new(),
+        )
+    }
+
+    fn wheel(app: &mut App, kind: MouseEventKind, at: Rect, areas: (Rect, Rect)) {
+        let event = MouseEvent {
+            kind,
+            column: at.x + 1,
+            row: at.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(event, areas.0, areas.1);
+    }
+
+    #[test]
+    fn wheel_scroll_survives_render() {
+        let mut app = long_list(40);
+        let (_, areas) = draw(&mut app, 80, 12);
+
+        wheel(&mut app, MouseEventKind::ScrollDown, areas.0, areas);
+        let (rows, _) = draw(&mut app, 80, 12);
+
+        assert_eq!(app.tree_scroll, 5);
+        assert!(rows[0].starts_with("├─○ c05"), "{rows:?}");
+    }
+
+    #[test]
+    fn tree_scroll_clamped() {
+        let mut app = long_list(40);
+        let (_, areas) = draw(&mut app, 80, 12);
+        let height = usize::from(areas.0.height);
+
+        for _ in 0..20 {
+            wheel(&mut app, MouseEventKind::ScrollDown, areas.0, areas);
+        }
+        assert_eq!(app.tree_scroll, 41 - height, "scrolled past the last row");
+        let (rows, _) = draw(&mut app, 80, 12);
+        assert!(rows[height - 1].starts_with("└─○ c40"), "{rows:?}");
+    }
+
+    #[test]
+    fn scrolled_search_not_blank() {
+        let mut app = long_list(32);
+        draw(&mut app, 80, 13);
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        draw(&mut app, 80, 13);
+        assert!(app.tree_scroll > 0);
+
+        type_text(&mut app, "/c2");
+        let (rows, _) = draw(&mut app, 80, 13);
+
+        // All 11 rows fit below the search bar
+        assert_eq!(app.tree_scroll, 0);
+        assert!(rows[1].starts_with("▼ root"), "{rows:?}");
+    }
+
+    #[test]
+    fn log_scroll_written_back() {
+        let mut app = long_list(1);
+        for i in 0..30 {
+            app.log_buffer.push(LogEntry {
+                level: log::Level::Info,
+                target: "test".into(),
+                message: format!("line {i}"),
+                timestamp: Instant::now(),
+            });
+        }
+        press(&mut app, KeyCode::Char('L'));
+        let (_, areas) = draw(&mut app, 80, 12);
+
+        for _ in 0..20 {
+            wheel(&mut app, MouseEventKind::ScrollUp, areas.1, areas);
+        }
+        draw(&mut app, 80, 12);
+        let at_top = app.log_scroll;
+        assert!(at_top < 30, "log_scroll {at_top} not clamped");
+
+        // The first notch down moves the view
+        wheel(&mut app, MouseEventKind::ScrollDown, areas.1, areas);
+        draw(&mut app, 80, 12);
+        assert_eq!(app.log_scroll, at_top - 5);
     }
 }
