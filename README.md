@@ -103,7 +103,9 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 Captured commands, from `--mute-success`, `--jobs` above 1, the pre-commit hook or an MCP run, have no terminal. Their stdin is `/dev/null`, and each runs in a session of its own, so opening `/dev/tty`, as password and host-key prompts do, fails at once instead of waiting for input that never comes.
 
-On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands, prints the summary so far, and exits with 128 plus the signal number. On Ctrl+C (SIGINT), a command that shares fnug's terminal has already got the terminal's SIGINT, so fnug gives it 3 s to finish before sending SIGTERM, while a captured command gets SIGINT from fnug. On SIGTERM or SIGHUP, commands get the same signal. A timeout, `--fail-fast` and an MCP client's cancellation send SIGTERM. Whichever signal a command gets, it gets SIGKILL if it is still running 3 s later. Signals reach a captured command's whole process group, but only the process of a command that shares fnug's terminal.
+When none of fnug's stdin, stdout and stderr is a terminal, as in CI or behind a pipe, streamed commands run in a session of their own too. From a terminal, a streamed command stays in fnug's process group so it can use the terminal, and fnug signals only the command's own process: a process it started, such as a test binary under `cargo test`, can outlive a timeout or a signal and keep writing to the terminal. Use `--mute-success` or `--jobs` for timeouts that stop the whole process tree.
+
+On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands, prints the summary so far, and exits with 128 plus the signal number. On Ctrl+C (SIGINT), a command that shares fnug's terminal has already got the terminal's SIGINT, so fnug gives it 3 s to finish before sending SIGTERM, while a command in a session of its own gets SIGINT from fnug. On SIGTERM or SIGHUP, commands get the same signal. A timeout, `--fail-fast` and an MCP client's cancellation send SIGTERM. Whichever signal a command gets, it gets SIGKILL if it is still running 3 s later. Signals reach the whole process group of a command in a session of its own, but only the process of a command that shares fnug's terminal.
 
 ### Setup
 
@@ -392,7 +394,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `timeout`    | integer / string  | Time limit in `fnug check` and MCP runs (see below)                 |
 | `exclusive`  | bool              | Never run alongside another command in `fnug check --jobs` runs     |
 
-`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM` (its whole process group, when output is captured), then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
+`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM`, then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. The signals reach every process in the command's process group, unless the command streams to fnug's terminal: then only its own process gets them (see `fnug check` above). `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
 
 `exclusive: true` suits commands that rewrite files, such as formatters, so that nothing reads the files while they change. It matters only when `fnug check --jobs` runs several commands at once; the TUI ignores it.
 

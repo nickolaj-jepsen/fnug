@@ -415,6 +415,38 @@ commands:
 }
 
 #[test]
+fn streamed_timeout_stops_children_without_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: hang
+    cmd: 'sleep 30 >/dev/null 2>&1 & echo $! > pid; wait'
+    auto:
+      always: true
+",
+    );
+    let log = dir.path().join("stderr");
+    let mut child = fnug_command(dir.path(), &["--timeout", "300ms"])
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let sleep = KillOnDrop(common::read_pid(&dir.path().join("pid")));
+    let status = wait(&mut child);
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("[1/1] hang\n"), "{stderr}");
+    assert!(stderr.contains("hang TIMEOUT"), "{stderr}");
+    assert!(
+        common::wait_until(TIMEOUT, || !common::process_alive(sleep.0)),
+        "the command's child outlived its timeout"
+    );
+}
+
+#[test]
 fn captured_command_cannot_block_on_the_terminal() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(
