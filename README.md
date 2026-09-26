@@ -347,6 +347,45 @@ Runs take turns: a run tool called while another run is in progress waits for it
 
 Cancelling a tool call stops its commands with SIGTERM, or stops it waiting for its turn. When the client closes the server's stdin, the server does the same for every running call, waits up to 10 s for the commands to exit and then exits. On SIGINT, SIGTERM or SIGHUP, running commands get the same signal and the server exits with 128 plus its number. A command still running 3 s after its signal gets SIGKILL.
 
+## Python wrapper
+
+The PyPI package (see [Installation](#installation)) ships the `fnug` binary and a small Python module around it, for running checks from a script or generating a config in code. It needs Python 3.10 or later.
+
+```python
+import fnug
+from fnug import Auto, Command, CommandGroup, Config
+
+# The .fnug.yaml found from the working directory, as `fnug check --staged --fail-fast`
+result = fnug.check(staged=True, fail_fast=True)
+print(result.returncode)  # 0: passed, 1: a check failed, 2: fnug couldn't run them
+
+config = Config(
+    name="my-project",
+    children=[
+        CommandGroup(
+            name="python",
+            auto=Auto(git=True, path=["./src"], regex=[r"\.py$"]),
+            commands=[
+                Command(name="ruff", cmd="ruff check {files}"),
+                Command(name="pytest", cmd="pytest", depends_on=["ruff"]),
+            ],
+        ),
+    ],
+)
+fnug.check(config, all_=True)  # run a config that only exists in memory
+fnug.start(config)             # or open it in the TUI
+config.write(".fnug.yaml")     # or save it: JSON for a .json path, YAML otherwise
+```
+
+- `fnug.check()` runs `fnug check`, with its options as keyword arguments: `targets`, `all_`, `include_manual`, `base`, `staged`, `stash`, `fail_fast`, `no_tui`, `mute_success`, `jobs`, `timeout` and `allow_modifications`.
+- `fnug.start()` opens the TUI.
+- Both take the global options `config_path`, `no_workspace` and `log_file`, or a `Config` as their first argument instead of `config_path`. They return the `subprocess.CompletedProcess`, with the output left on the terminal, and don't raise when a check fails.
+- `fnug.run(*args)` runs the binary with any arguments.
+
+They run the `fnug` installed next to the Python interpreter, as the wheel does, or else the first one on `PATH`.
+
+`Config`, `CommandGroup`, `Command`, `Auto` and `WorkspaceOptions` are dataclasses with keyword-only fields named after the config keys (see [Configuration reference](#configuration-reference)). `to_dict()`, `to_yaml()`, `to_json()` and `write(path)` leave out the fields you didn't set. A `Config` passed to `check()` or `start()` is written to a temporary JSON file, and fnug gets `--root` set to the working directory, so the config's paths and commands work as they would in a `.fnug.yaml` there. A `Config` with `workspace` set raises `ValueError`; write it with `Config.write()` and pass `config_path` instead.
+
 ## Configuration
 
 Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from the current directory upward.
