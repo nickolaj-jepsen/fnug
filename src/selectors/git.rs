@@ -1,150 +1,549 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use git2::{Repository, RepositoryOpenFlags};
+use git2::{Diff, DiffOptions, ErrorCode, Index, Repository, RepositoryOpenFlags, StatusOptions};
 use log::debug;
 
 use crate::commands::command::Command;
-use crate::selectors::{RunnableSelector, SelectorError};
+use crate::selectors::matching::command_matches;
+use crate::selectors::{GitScope, IndexOverride, SelectOptions, SelectionIssue};
 
-/// Discover the work tree root of the git repo containing `path`, using a cache
-/// to avoid repeated filesystem traversal for paths in the same repo.
-/// Fails if no repo contains `path` or the repo is bare.
-fn discover_repo(
-    path: &Path,
-    cache: &mut HashMap<PathBuf, PathBuf>,
-) -> Result<PathBuf, git2::Error> {
-    if let Some(cached) = cache.get(path) {
-        return Ok(cached.clone());
-    }
-    // Not `Repository::discover`: it reopens the gitdir, so a `.git` file without
-    // `core.worktree` (as `git init --separate-git-dir` writes) gets the wrong work tree.
-    let repo = Repository::open_ext(path, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path])?;
-    let repo_path = repo
-        .workdir()
-        .ok_or_else(|| git2::Error::from_str("bare repository has no working tree"))?
-        .to_path_buf();
-    debug!("Discovered git repo at {}", repo_path.display());
-    cache.insert(path.to_path_buf(), repo_path.clone());
-    Ok(repo_path)
+/// What git selection found for the commands passed to [`select`].
+pub(super) struct GitSelection {
+    /// Per command, in input order: the existing changed files that select it, or `None` if
+    /// no change does.
+    pub matches: Vec<Option<Vec<PathBuf>>>,
+    pub changed_files: usize,
+    pub issues: Vec<SelectionIssue>,
 }
 
-/// Open a repo and collect all non-ignored changed file paths.
-/// This is the expensive I/O operation we want to parallelize.
-fn scan_repo(repo_path: &Path) -> Result<Vec<PathBuf>, git2::Error> {
-    let changes: Vec<PathBuf> = Repository::open(repo_path)?
-        .statuses(None)?
-        .iter()
-        .filter(|entry| !entry.status().is_ignored())
-        .filter_map(|status| status.path().map(PathBuf::from))
-        .collect();
+/// A repo containing at least one `auto.path`, keyed by its canonical work tree.
+struct RepoEntry {
+    workdir: PathBuf,
+    repo: Repository,
+    /// The auto paths in this repo, relative to `workdir`; `None` scans the whole work tree.
+    /// Git gets them as literal paths: as globs, names with `[` or `*` would misfire, and
+    /// disjoint specs wouldn't narrow the walk.
+    pathspecs: Option<Vec<PathBuf>>,
+}
+
+impl RepoEntry {
+    /// Include `path` in the scan. The work tree root, or a path that isn't under it, lifts
+    /// the limit altogether.
+    fn add_path(&mut self, path: &Path) {
+        let rel = path
+            .strip_prefix(&self.workdir)
+            .ok()
+            .filter(|rel| !rel.as_os_str().is_empty());
+        match (rel, &mut self.pathspecs) {
+            (Some(rel), Some(specs)) => {
+                if !specs.iter().any(|spec| spec == rel) {
+                    specs.push(rel.to_path_buf());
+                }
+            }
+            (None, specs) => *specs = None,
+            (Some(_), None) => {}
+        }
+    }
+}
+
+/// A changed path in a scanned repo.
+struct Change {
+    path: PathBuf,
+    /// It still exists and isn't a directory, such as an untracked nested repo.
+    is_file: bool,
+}
+
+impl Change {
+    /// A change git reports as `rel`, a path relative to `workdir` in raw bytes: git doesn't
+    /// require names to be UTF-8.
+    fn new(workdir: &Path, rel: &[u8]) -> Self {
+        let path = workdir.join(OsStr::from_bytes(rel));
+        Change {
+            is_file: path.symlink_metadata().is_ok_and(|meta| !meta.is_dir()),
+            path,
+        }
+    }
+}
+
+/// Open the repo whose work tree contains `path`, with its canonical work tree root. `path`
+/// may be missing, such as a deleted directory: discovery starts from its nearest existing
+/// ancestor. Fails if no repo contains `path` or the repo is bare.
+fn discover(path: &Path) -> Result<RepoEntry, String> {
+    let (workdir, repo) = open_work_tree(path)?;
+    debug!("Discovered git repo at {}", workdir.display());
+    Ok(RepoEntry {
+        workdir,
+        repo,
+        pathspecs: Some(Vec::new()),
+    })
+}
+
+/// The canonical root of the work tree containing `path`, and its repo; see [`discover`].
+pub(super) fn open_work_tree(path: &Path) -> Result<(PathBuf, Repository), String> {
+    let start = path.ancestors().find(|p| p.is_dir()).unwrap_or(path);
+    // Not `Repository::discover`: it reopens the gitdir, so a `.git` file without
+    // `core.worktree` (as `git init --separate-git-dir` writes) gets the wrong work tree.
+    let repo = Repository::open_ext(start, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path])
+        .map_err(|e| e.message().to_string())?;
+    let Some(workdir) = repo.workdir() else {
+        return Err(format!(
+            "bare repository at {} has no working tree",
+            repo.path().display()
+        ));
+    };
+    let workdir = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    Ok((workdir, repo))
+}
+
+/// The temporary index named by `index_file` (`GIT_INDEX_FILE`), for the repo at `git_dir`
+/// (`GIT_DIR`) or else the one containing `cwd`. A relative `git_dir` resolves against `cwd`,
+/// and a relative `index_file` against the repo's work tree.
+pub(super) fn index_override(
+    git_dir: Option<&OsStr>,
+    index_file: Option<&OsStr>,
+    cwd: &Path,
+) -> Option<IndexOverride> {
+    let index_file = index_file.filter(|file| !file.is_empty())?;
+    let named = git_dir
+        .filter(|dir| !dir.is_empty())
+        .and_then(|dir| Repository::open(cwd.join(dir)).ok());
+    let repo = match named {
+        Some(repo) => repo,
+        None => Repository::open_ext(cwd, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]).ok()?,
+    };
+    let base = repo.workdir().unwrap_or_else(|| repo.path());
+    Some(IndexOverride {
+        git_dir: repo.path().canonicalize().ok()?,
+        index_file: base.join(index_file),
+    })
+}
+
+/// The index file to read for `entry` under the staged scope: the override's, if it belongs to
+/// this repo, or else `None` for the repo's own.
+fn index_file_for(entry: &RepoEntry, opts: &SelectOptions) -> Option<PathBuf> {
+    let over = opts.index_override.as_ref()?;
+    let own = entry.repo.path().canonicalize().ok()?;
+    (over.git_dir.canonicalize().ok()? == own).then(|| over.index_file.clone())
+}
+
+/// Why a repo could not be scanned.
+enum ScanError {
+    Git(git2::Error),
+    /// The since-base scope's base can't be resolved, or shares no history with `HEAD`.
+    BaseRefNotFound {
+        base: String,
+        message: String,
+    },
+    /// The since-base scope needs a `HEAD` commit.
+    UnbornHead,
+}
+
+impl From<git2::Error> for ScanError {
+    fn from(e: git2::Error) -> Self {
+        ScanError::Git(e)
+    }
+}
+
+/// Collect the changed files under a repo's pathspecs within `scope`, reading `index_file`
+/// instead of the repo's index if given.
+fn scan(
+    entry: &RepoEntry,
+    scope: &GitScope,
+    index_file: Option<&Path>,
+) -> Result<Vec<Change>, ScanError> {
+    let changes = match scope {
+        GitScope::WorkingTree => scan_working_tree(entry)?,
+        GitScope::Staged => scan_staged(entry, index_file)?,
+        GitScope::Since(base) => scan_since(entry, base)?,
+    };
     debug!(
         "Found {} changed files in {}",
         changes.len(),
-        repo_path.display()
+        entry.workdir.display()
     );
     Ok(changes)
 }
 
-/// Check whether a command has matching git changes given pre-scanned repo data.
-fn command_has_changes(
-    cmd: &Command,
-    path_to_repo: &HashMap<PathBuf, PathBuf>,
-    repo_changes: &HashMap<PathBuf, Vec<PathBuf>>,
-) -> bool {
-    cmd.auto.paths().iter().any(|path| {
-        let Some(repo_path) = path_to_repo.get(path) else {
-            return false;
-        };
-        let Some(changes) = repo_changes.get(repo_path) else {
-            return false;
-        };
-        let has_match = changes
-            .iter()
-            .map(|change| repo_path.join(change))
-            .filter(|change| change.starts_with(path))
-            .any(|change| {
-                let regexes = cmd.auto.regexes();
-                if regexes.is_empty() {
-                    return true;
-                }
-                let s = change.to_string_lossy();
-                regexes.iter().any(|pattern| pattern.is_match(&s))
-            });
-        if has_match {
-            debug!("Path {} has git changes", path.display());
+fn scan_working_tree(entry: &RepoEntry) -> Result<Vec<Change>, git2::Error> {
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+    if let Some(specs) = &entry.pathspecs {
+        opts.disable_pathspec_match(true);
+        for spec in specs {
+            opts.pathspec(spec.as_path());
         }
-        has_match
+    }
+    Ok(entry
+        .repo
+        .statuses(Some(&mut opts))?
+        .iter()
+        .map(|status| Change::new(&entry.workdir, status.path_bytes()))
+        .collect())
+}
+
+fn diff_options(entry: &RepoEntry) -> DiffOptions {
+    let mut opts = DiffOptions::new();
+    if let Some(specs) = &entry.pathspecs {
+        opts.disable_pathspec_match(true);
+        for spec in specs {
+            opts.pathspec(spec.as_path());
+        }
+    }
+    opts
+}
+
+fn scan_staged(entry: &RepoEntry, index_file: Option<&Path>) -> Result<Vec<Change>, git2::Error> {
+    let head_tree = match entry.repo.head() {
+        Ok(head) => Some(head.peel_to_tree()?),
+        Err(e) if matches!(e.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => None,
+        Err(e) => return Err(e),
+    };
+    let index = match index_file {
+        // libgit2 opens a missing file as an empty index, where every file looks deleted.
+        Some(file) if !file.is_file() => {
+            return Err(git2::Error::from_str(&format!(
+                "index file {} does not exist",
+                file.display()
+            )));
+        }
+        Some(file) => Index::open(file)?,
+        None => entry.repo.index()?,
+    };
+    let diff = entry.repo.diff_tree_to_index(
+        head_tree.as_ref(),
+        Some(&index),
+        Some(&mut diff_options(entry)),
+    )?;
+    Ok(diff_changes(entry, &diff))
+}
+
+fn scan_since(entry: &RepoEntry, base: &str) -> Result<Vec<Change>, ScanError> {
+    let repo = &entry.repo;
+    let head = match repo.head() {
+        Ok(head) => head.peel_to_commit()?,
+        Err(e) if matches!(e.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
+            return Err(ScanError::UnbornHead);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let not_found = |message: String| ScanError::BaseRefNotFound {
+        base: base.to_string(),
+        message,
+    };
+    let base_commit = repo
+        .revparse_single(base)
+        .and_then(|object| object.peel_to_commit())
+        .map_err(|e| not_found(e.message().to_string()))?;
+    let merge_base = repo.merge_base(head.id(), base_commit.id()).map_err(|e| {
+        not_found(if e.code() != ErrorCode::NotFound {
+            e.message().to_string()
+        } else if repo.is_shallow() {
+            "no common history with HEAD in this shallow clone".to_string()
+        } else {
+            "no common history with HEAD".to_string()
+        })
+    })?;
+    let tree = repo.find_commit(merge_base)?.tree()?;
+    let mut opts = diff_options(entry);
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))?;
+    Ok(diff_changes(entry, &diff))
+}
+
+/// Both sides of every delta, so renames and deletions count too.
+fn diff_changes(entry: &RepoEntry, diff: &Diff) -> Vec<Change> {
+    let mut paths: Vec<&[u8]> = diff
+        .deltas()
+        .flat_map(|delta| [delta.old_file().path_bytes(), delta.new_file().path_bytes()])
+        .flatten()
+        .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| Change::new(&entry.workdir, path))
+        .collect()
+}
+
+/// Under the staged scope, the repo whose index git commits must exist: the override's, or
+/// else the one containing `current_dir`. Returns the fatal issue if it doesn't.
+fn check_current_repo(opts: &SelectOptions, current_dir: Option<&Path>) -> Option<SelectionIssue> {
+    if opts.scope != GitScope::Staged || opts.index_override.is_some() {
+        return None;
+    }
+    let (path, message) = match current_dir {
+        Some(dir) => match discover(dir) {
+            Ok(_) => return None,
+            Err(message) => (dir.to_path_buf(), message),
+        },
+        None => (
+            PathBuf::new(),
+            "the working directory is unknown".to_string(),
+        ),
+    };
+    Some(SelectionIssue::NotInRepo {
+        path,
+        command_ids: Vec::new(),
+        message,
+        fatal: true,
     })
 }
 
-pub(crate) struct GitSelector {}
-
-impl RunnableSelector for GitSelector {
-    fn split_active_commands(
-        commands: Vec<Command>,
-    ) -> Result<(Vec<Command>, Vec<Command>), SelectorError> {
-        // 1. Separate git-enabled commands from non-git commands
-        let (git_commands, non_git): (Vec<_>, Vec<_>) = commands
-            .into_iter()
-            .partition(|c| c.auto.git.unwrap_or(false));
-
-        if git_commands.is_empty() {
-            return Ok((vec![], non_git));
-        }
-
-        // 2. Discover repos for each command's paths (sequential, fast filesystem traversal)
-        let mut discover_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-        let mut path_to_repo: HashMap<PathBuf, PathBuf> = HashMap::new();
-        for cmd in &git_commands {
-            for path in cmd.auto.paths() {
-                if !path_to_repo.contains_key(path) {
-                    let repo_path = discover_repo(path, &mut discover_cache)?;
-                    path_to_repo.insert(path.clone(), repo_path);
-                }
+/// Discover the repo of every `auto.path` of the git-enabled `commands`, once per path.
+/// Returns the distinct repos and the index of each path's repo; paths outside a work tree
+/// become a `NotInRepo` issue naming the commands that use them.
+fn discover_repos<'a>(
+    commands: &[&'a Command],
+    issues: &mut Vec<SelectionIssue>,
+) -> (Vec<RepoEntry>, HashMap<&'a Path, usize>) {
+    let mut paths: Vec<(&Path, Vec<String>)> = Vec::new();
+    for cmd in commands.iter().filter(|c| c.auto.git == Some(true)) {
+        for path in cmd.auto.paths() {
+            match paths.iter_mut().find(|(p, _)| p == path) {
+                Some((_, ids)) if !ids.contains(&cmd.id) => ids.push(cmd.id.clone()),
+                Some(_) => {}
+                None => paths.push((path, vec![cmd.id.clone()])),
             }
         }
+    }
 
-        // 3. Collect unique repo paths
-        let unique_repos: Vec<PathBuf> = path_to_repo
-            .values()
-            .collect::<HashSet<_>>()
+    let mut repos: Vec<RepoEntry> = Vec::new();
+    let mut path_repo = HashMap::new();
+    for (path, command_ids) in paths {
+        match discover(path) {
+            Ok(entry) => {
+                let index = repos
+                    .iter()
+                    .position(|r| r.workdir == entry.workdir)
+                    .unwrap_or_else(|| {
+                        repos.push(entry);
+                        repos.len() - 1
+                    });
+                repos[index].add_path(path);
+                path_repo.insert(path, index);
+            }
+            Err(message) => issues.push(SelectionIssue::NotInRepo {
+                path: path.to_path_buf(),
+                command_ids,
+                message,
+                fatal: false,
+            }),
+        }
+    }
+    (repos, path_repo)
+}
+
+/// Scan `repos` in parallel. A repo that fails becomes an issue and `None`.
+fn scan_repos(
+    repos: Vec<RepoEntry>,
+    opts: &SelectOptions,
+    issues: &mut Vec<SelectionIssue>,
+) -> Vec<Option<Vec<Change>>> {
+    let workdirs: Vec<PathBuf> = repos.iter().map(|r| r.workdir.clone()).collect();
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = repos
             .into_iter()
-            .cloned()
+            .map(|entry| {
+                let index_file = (opts.scope == GitScope::Staged)
+                    .then(|| index_file_for(&entry, opts))
+                    .flatten();
+                s.spawn(move || scan(&entry, &opts.scope, index_file.as_deref()))
+            })
             .collect();
+        handles
+            .into_iter()
+            .map(std::thread::ScopedJoinHandle::join)
+            .collect()
+    });
+    results
+        .into_iter()
+        .zip(workdirs)
+        .map(|(result, repo)| {
+            let issue = match result {
+                Ok(Ok(changes)) => return Some(changes),
+                Ok(Err(ScanError::Git(e))) => SelectionIssue::ScanFailed {
+                    repo,
+                    message: e.message().to_string(),
+                },
+                Ok(Err(ScanError::BaseRefNotFound { base, message })) => {
+                    SelectionIssue::BaseRefNotFound {
+                        repo,
+                        base,
+                        message,
+                    }
+                }
+                Ok(Err(ScanError::UnbornHead)) => SelectionIssue::UnbornHead { repo },
+                Err(_) => SelectionIssue::ScanFailed {
+                    repo,
+                    message: "the scan panicked".to_string(),
+                },
+            };
+            issues.push(issue);
+            None
+        })
+        .collect()
+}
 
-        // 4. Scan all repos in parallel (the expensive I/O part)
-        let repo_changes: HashMap<PathBuf, Vec<PathBuf>> = std::thread::scope(|s| {
-            let handles: Vec<_> = unique_repos
-                .into_iter()
-                .map(|repo_path| {
-                    s.spawn(move || -> Result<(PathBuf, Vec<PathBuf>), git2::Error> {
-                        let changes = scan_repo(&repo_path)?;
-                        Ok((repo_path, changes))
-                    })
-                })
-                .collect();
-
-            let mut results = HashMap::new();
-            for handle in handles {
-                let (path, changes) = handle.join().map_err(|_| SelectorError::ThreadPanic)??;
-                results.insert(path, changes);
-            }
-            Ok::<_, SelectorError>(results)
-        })?;
-
-        // 5. Match each command's patterns against its repo's cached changes
-        let mut with_git = Vec::new();
-        let mut without_git = Vec::new();
-        for cmd in git_commands {
-            if command_has_changes(&cmd, &path_to_repo, &repo_changes) {
-                debug!("Git-selected command '{}'", cmd.name);
-                with_git.push(cmd);
-            } else {
-                without_git.push(cmd);
+/// The existing changed files that select `cmd`, or `None` if no change does.
+fn command_files(
+    cmd: &Command,
+    path_repo: &HashMap<&Path, usize>,
+    scanned: &[Option<Vec<Change>>],
+) -> Option<Vec<PathBuf>> {
+    let mut selected = false;
+    let mut files = Vec::new();
+    for path in cmd.auto.paths() {
+        let Some(Some(changes)) = path_repo.get(path.as_path()).map(|&i| &scanned[i]) else {
+            continue;
+        };
+        for change in changes
+            .iter()
+            .filter(|c| command_matches(cmd, path, &c.path))
+        {
+            selected = true;
+            if change.is_file {
+                files.push(change.path.clone());
             }
         }
+    }
+    if !selected {
+        return None;
+    }
+    debug!("Git-selected command '{}'", cmd.name);
+    files.sort();
+    files.dedup();
+    Some(files)
+}
 
-        Ok((with_git, without_git.into_iter().chain(non_git).collect()))
+/// Scan every repo that holds an `auto.path` of a git-enabled command, and match the changes.
+/// `current_dir` is the process working directory.
+pub(super) fn select(
+    commands: &[&Command],
+    opts: &SelectOptions,
+    current_dir: Option<&Path>,
+) -> GitSelection {
+    let mut issues: Vec<SelectionIssue> =
+        check_current_repo(opts, current_dir).into_iter().collect();
+    let (repos, path_repo) = discover_repos(commands, &mut issues);
+    let scanned = scan_repos(repos, opts, &mut issues);
+    let changed_files = scanned
+        .iter()
+        .flatten()
+        .flatten()
+        .map(|c| c.path.as_path())
+        .collect::<HashSet<_>>()
+        .len();
+    let matches = commands
+        .iter()
+        .map(|cmd| {
+            (cmd.auto.git == Some(true))
+                .then(|| command_files(cmd, &path_repo, &scanned))
+                .flatten()
+        })
+        .collect();
+    GitSelection {
+        matches,
+        changed_files,
+        issues,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn index_override_resolves_relative_index_in_work_tree() {
+        let (_tmp, root) = canonical_tempdir();
+        Repository::init(&root).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+
+        let over = index_override(None, Some(OsStr::new(".git/index")), &root.join("sub")).unwrap();
+        assert_eq!(over.git_dir, root.join(".git"));
+        assert_eq!(over.index_file, root.join(".git/index"));
+    }
+
+    #[test]
+    fn index_override_prefers_git_dir() {
+        let (_tmp, root) = canonical_tempdir();
+        for name in ["a", "b"] {
+            Repository::init(root.join(name)).unwrap();
+        }
+        let git_dir = root.join("b/.git");
+
+        let over = index_override(
+            Some(git_dir.as_os_str()),
+            Some(OsStr::new("next-index.lock")),
+            &root.join("a"),
+        )
+        .unwrap();
+        assert_eq!(over.git_dir, git_dir);
+        assert_eq!(over.index_file, root.join("b/next-index.lock"));
+
+        let absolute = root.join("b/.git/index.lock");
+        let over = index_override(None, Some(absolute.as_os_str()), &root.join("a")).unwrap();
+        assert_eq!(over.git_dir, root.join("a/.git"));
+        assert_eq!(over.index_file, absolute);
+    }
+
+    #[test]
+    fn index_override_needs_index_file() {
+        let (_tmp, root) = canonical_tempdir();
+        Repository::init(&root).unwrap();
+        assert_eq!(index_override(None, None, &root), None);
+        assert_eq!(index_override(None, Some(OsStr::new("")), &root), None);
+    }
+
+    fn staged() -> SelectOptions {
+        SelectOptions {
+            scope: GitScope::Staged,
+            index_override: None,
+        }
+    }
+
+    #[test]
+    fn staged_outside_repo_is_fatal() {
+        let (_tmp, root) = canonical_tempdir();
+        if Repository::open_ext(&root, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]).is_ok() {
+            eprintln!("skipping: the temp dir is inside a git repo");
+            return;
+        }
+
+        let issues = select(&[], &staged(), Some(&root)).issues;
+        assert!(
+            matches!(
+                issues.as_slice(),
+                [SelectionIssue::NotInRepo { path, command_ids, fatal: true, .. }]
+                    if path == &root && command_ids.is_empty()
+            ),
+            "{issues:?}"
+        );
+        assert!(issues[0].is_fatal());
+
+        assert!(
+            select(&[], &SelectOptions::default(), Some(&root))
+                .issues
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn staged_inside_repo_is_not_fatal() {
+        let (_tmp, root) = canonical_tempdir();
+        Repository::init(&root).unwrap();
+        assert!(select(&[], &staged(), Some(&root)).issues.is_empty());
     }
 }

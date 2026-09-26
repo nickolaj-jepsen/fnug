@@ -13,6 +13,7 @@ use crate::commands::group::CommandGroup;
 use crate::process::{ExitInfo, StopSignal};
 use crate::pty::terminal::Terminal;
 use crate::selectors::get_selected_commands;
+use crate::selectors::watch::WatchMatch;
 
 use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
@@ -80,7 +81,7 @@ pub enum AppEvent {
         generation: u64,
         message: String,
     },
-    WatcherTriggered(Vec<Command>),
+    WatcherTriggered(Vec<WatchMatch>),
     LogUpdated,
     GitSelectionComplete(u64, Result<Vec<Command>, String>),
 }
@@ -501,9 +502,9 @@ impl App {
                 self.fail_dependents(&id);
                 self.mark_tree_dirty();
             }
-            AppEvent::WatcherTriggered(commands) => {
-                for cmd in &commands {
-                    self.selected.insert(cmd.id.clone());
+            AppEvent::WatcherTriggered(matches) => {
+                for m in matches {
+                    self.selected.insert(m.id);
                 }
                 self.collapse_inactive_groups();
                 self.mark_tree_dirty();

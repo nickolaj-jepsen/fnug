@@ -87,12 +87,29 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `-c <path>`       | Path to config file, always loaded as the root                  |
 | `--no-workspace`  | Disable workspace resolution (don't search for a parent root)   |
 | `--root <dir>`    | Resolve the config's paths and workspace against `<dir>` instead of the config's directory, and don't look for a parent workspace root; without `-c`, search for the config from `<dir>` |
-| `--log-file`      | Write logs to a file                                            |
-| `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info) |
+| `--log-file`      | Also write logs to a file                                       |
+| `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info, and warn on stderr) |
 | `--fail-fast`     | Stop on first failure (`check` only)                            |
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
 | `--mute-success`  | Suppress output for passing commands (`check` only)             |
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
+| `-V`, `--version` | Print fnug's version                                            |
+
+`-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
+
+### Setup
+
+`fnug setup` installs a git pre-commit hook that runs `fnug check`, and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it.
+
+The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead. A `pre-commit` that is a symlink counts as the file it links to: setup edits that file, shows it in the list of changes, and prints the lines instead if it is outside the repository.
+
+fnug's lines sit between `# >>> fnug >>>` and `# <<< fnug <<<`, right after the shebang of any existing hook, and the rest of that hook runs after fnug passes. If fnug needs something your hook sets up first, such as `PATH`, move the block below it; updates leave it where it is. A hook that isn't a shell script, such as a Python one, can be chained instead: it moves to `pre-commit.local` and runs after fnug, and removing fnug's hook puts it back.
+
+The hook runs `fnug` from `PATH`, or else the binary that ran `fnug setup`, with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given. A different or older fnug on `PATH` still comes first, so setup tells you when the one on its `PATH` isn't the binary running setup. It runs from the config's directory. With `--root`, it runs from that directory instead, and goes in that directory's repository even when the config is in another one. Run setup again after moving the config, and it offers to update the hook. If the hook runs a different config that still exists, as when you run setup from a nested config or with other flags, setup leaves it alone, even when you deselect the hook, and says which config it runs; it repoints the hook only if you say yes when asked. If fnug isn't installed, the commit fails with a hint; a hook in the work tree, such as one in a committed `core.hooksPath` or a committed script that `.git/hooks/pre-commit` links to, only warns, so teammates without fnug can still commit.
+
+In a workspace, setup also offers a hook for each package whose config is in another repository, such as a git submodule. That hook runs the package's checks with `--no-workspace`.
+
+Setup edits the editor configs in place, keeping comments and formatting, and adds or removes only the `fnug` entry. The entry runs `fnug mcp` with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given, with paths relative to the project directory the editor starts it in, since the editor config is usually committed. fnug has to be on the editor's `PATH`. Run setup again with other flags, and it offers to update the entry.
 
 ## Configuration
 
@@ -383,8 +400,12 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `watch`  | bool              | Select when watched files match `path`/`regex`                          |
 | `always` | bool              | Always selected regardless of changes                                   |
 | `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`); they may not exist yet |
-| `regex`  | list of strings   | Regex patterns to match against file paths (e.g. `"\\.rs$"`)           |
+| `regex`  | list of strings   | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)      |
 | `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
+
+A changed file selects a command when it is under one of its `path` entries and matches one of its `regex` patterns (any file, if there are none). The patterns see the file's path relative to the command's `cwd`, such as `src/main.rs`, or `../shared/lib.rs` for a file outside it. Anchor with `^` to match from the `cwd` (`^tests/`), or write `(^|/)tests/` to match a directory at any depth.
+
+Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `.git/info/exclude` or `core.excludesFile`) or anything inside a `.git` directory. The watcher makes one exception: below a `path` that git ignores itself, such as `./target/doc`, every change counts. It goes by the ignore rules alone, so it also skips a file that git tracks although a rule matches it, which `git` still counts. A watch `path` that doesn't exist when fnug starts is not watched. Like `git`, the watcher doesn't follow symlinked directories. On Linux, a directory that a `.gitignore` edit stops ignoring is only watched once fnug restarts.
 
 ## Keyboard Shortcuts
 
@@ -433,3 +454,14 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 - Library API: `tui::app::AppEvent::ProcessExited` and `ProcessError` are struct variants that carry the run's generation, `ProcessExited` carries an `ExitInfo` instead of an exit code, and `CommandStatus` has a new `Stopped` variant.
 - Quitting waits up to 1 s for commands to exit after `SIGHUP`, then sends `SIGKILL` to whatever is left, including background processes still holding a command's terminal. Library API: `tui::app::App::shutdown` is async and waits for the commands to exit.
 - Windows binaries and wheels are no longer published. fnug supports Linux and macOS; on Windows, run it under WSL.
+- `fnug setup` installs the pre-commit hook where git reads it: in `core.hooksPath` if that is set, otherwise in the main repository's hooks directory, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, it installs nothing and prints the lines to add yourself. Hooks installed from a linked worktree or with `core.hooksPath` set never ran; run `fnug setup` again. Library API: `setup::hooks::HookError` has new variants.
+- `fnug setup` no longer edits a `pre-commit` that is a symlink to a file outside the repository; it prints the lines to add yourself instead. One that links into the work tree is treated as shared, so the lines setup adds hold no machine-specific path.
+- fnug's lines in the pre-commit hook are fenced by `# >>> fnug >>>` and `# <<< fnug <<<` and sit right after the shebang, so a failing command later in your hook still blocks the commit and an `exec` can't skip fnug. `fnug setup` moves the old `# fnug` lines there. Hooks that aren't shell scripts, such as Python or fish ones, are refused unless you let setup chain them: yours moves to `pre-commit.local`, without the old `# fnug` lines, and runs after fnug. Library API: `setup::hooks::is_installed` also counts an outdated block.
+- `fnug setup` offers sub-repo hooks only for workspace packages whose config is in another repository, such as a git submodule, and installs one hook per repository. A plain child group whose `cwd` points into another repository is no longer offered; update or remove a hook installed there by hand. Library API: `setup::workspace::find_sub_repos` returns only workspace packages, with `path` set to the package's config directory, and skips packages that share a hook.
+- Library API: `setup::run` takes the `LoadedConfig` instead of its root group, and the `LoadOptions` it was loaded with.
+- Library API: `setup::mcp::McpError` has a `Parse` variant instead of `Json`, and `NotAnObject` names the file.
+- Library API: `logger::init` takes a `LoggerConfig` and returns a `LoggerHandle`, or an error instead of panicking when a logger is already installed. `logger::connect_event_sender` is replaced by `LoggerHandle::set_notifier`, and `logger::level_color` moved to `tui::log_state`. `LogBuffer` and `LogEntry` are defined in `logger` and still re-exported from `tui::log_state`.
+- `auto.regex` is matched against the changed file's path relative to the command's `cwd` (`src/main.rs`) instead of its absolute path, in both git and watch selection. Suffix patterns such as `\.rs$` work as before. Rewrite patterns that relied on the absolute path, such as `/tests/`, as `^tests/` or `(^|/)tests/`.
+- `auto.watch` ignores changes that git ignores (through `.gitignore`, `.git/info/exclude` or `core.excludesFile`), even to a tracked file that an ignore rule matches, and anything inside a `.git` directory, so build output and git's own writes no longer select commands. To watch generated or ignored files, add their ignored directory as a watch `path` (e.g. `./target/doc`): every change below such a path counts.
+- On Linux, `auto.watch` no longer follows symlinked directories below a watch `path` (macOS never did), just as `auto.git` doesn't. To watch a linked directory, add the link's target as its own `path`.
+- Library API: `selectors::watch::watch_commands` returns a `WatchHandle` (`events`, `report`) instead of a tuple, `WatchError` is `#[non_exhaustive]` and has `NothingWatched` instead of `Io`, and `WatchHandle::events` and `tui::app::AppEvent::WatcherTriggered` carry `Vec<WatchMatch>` instead of `Vec<Command>`.

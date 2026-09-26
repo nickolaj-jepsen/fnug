@@ -22,6 +22,8 @@ fn fnug(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_fnug"))
         .current_dir(dir)
         .args(args)
+        // It sets the stderr threshold, which some tests rely on being the default
+        .env_remove("FNUG_LOG")
         .output()
         .unwrap()
 }
@@ -44,6 +46,19 @@ fn assert_success(output: &Output) {
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn version_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    for flag in ["--version", "-V"] {
+        let output = fnug(dir.path(), &[flag]);
+        assert_success(&output);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("fnug {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
 }
 
 #[test]
@@ -155,4 +170,154 @@ fn cursor_remove_drops_legacy_servers_entry() {
         read_json(&path),
         json!({"mcpServers": {"other": {"command": "other"}}})
     );
+}
+
+/// Loads with two warnings: a version mismatch and an undefined env var.
+const WARNING_CONFIG: &str = r#"
+fnug_version: "99.0.0"
+name: root
+commands:
+  - name: pass
+    cmd: "true"
+    env:
+      GREETING: "$FNUG_TEST_UNDEFINED_VAR"
+    auto:
+      always: true
+"#;
+
+fn repo_with_warning_config() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(dir.path()).unwrap();
+    std::fs::write(dir.path().join(".fnug.yaml"), WARNING_CONFIG).unwrap();
+    dir
+}
+
+fn assert_load_warnings(stderr: &str) {
+    assert!(
+        stderr.contains("warning:") && stderr.contains("Config requires fnug >= 99.0.0"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("$FNUG_TEST_UNDEFINED_VAR"), "{stderr}");
+}
+
+#[test]
+fn check_prints_load_warnings_to_stderr() {
+    let dir = repo_with_warning_config();
+    let output = fnug(dir.path(), &["check", "--no-tui"]);
+    assert_success(&output);
+    assert_load_warnings(&String::from_utf8_lossy(&output.stderr));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("warning"));
+}
+
+#[test]
+fn log_file_written_in_check_mode() {
+    let dir = repo_with_warning_config();
+    let log = dir.path().join("fnug.log");
+    let output = fnug(
+        dir.path(),
+        &[
+            "--log-file",
+            "fnug.log",
+            "--log-level",
+            "debug",
+            "check",
+            "--no-tui",
+        ],
+    );
+    assert_success(&output);
+    let content = std::fs::read_to_string(&log).expect("log file was not created");
+    assert!(
+        content.contains("Config requires fnug >= 99.0.0"),
+        "{content}"
+    );
+    assert!(content.contains("[DEBUG]"), "{content}");
+}
+
+#[test]
+fn mcp_stdout_is_pure_jsonrpc() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let dir = repo_with_warning_config();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(dir.path())
+        .args(["--log-level", "debug", "mcp"])
+        .env_remove("FNUG_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"test","version":"0"}}}}}}"#
+    )
+    .unwrap();
+
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let first = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("no reply to initialize");
+    drop(stdin);
+    let status = child.wait().unwrap();
+
+    let mut lines = vec![first];
+    lines.extend(rx.try_iter());
+    for line in &lines {
+        let message: Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
+        assert_eq!(message["jsonrpc"], "2.0", "{line}");
+    }
+    assert_eq!(serde_json::from_str::<Value>(&lines[0]).unwrap()["id"], 1);
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_load_warnings(&stderr);
+    assert!(
+        stderr.contains("[DEBUG"),
+        "--log-level applies to stderr: {stderr} ({status})"
+    );
+}
+
+#[test]
+fn subcommand_help_lists_global_options_separately() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = fnug(dir.path(), &["check", "--help"]);
+    assert_success(&output);
+    let help = String::from_utf8_lossy(&output.stdout);
+    let (own, global) = help
+        .split_once("Global options:")
+        .unwrap_or_else(|| panic!("no global options heading:\n{help}"));
+    assert!(own.contains("--fail-fast"), "{help}");
+    for flag in [
+        "--config",
+        "--log-file",
+        "--log-level",
+        "--no-workspace",
+        "--root",
+    ] {
+        assert!(
+            global.contains(flag),
+            "{flag} not under the heading:\n{help}"
+        );
+        assert!(
+            !own.contains(flag),
+            "{flag} among the check options:\n{help}"
+        );
+    }
 }

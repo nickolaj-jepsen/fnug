@@ -15,10 +15,11 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: usize
         &mut state,
     );
 }
+use super::log_state::level_color;
 use super::terminal_widget::PseudoTerminal;
 use super::toolbar;
 use super::tree_widget::TreeWidget;
-use crate::{logger, theme};
+use crate::theme;
 
 impl App {
     /// Render the app
@@ -257,10 +258,7 @@ impl App {
                         format!("{elapsed:>6.1}s "),
                         Style::default().fg(Color::DarkGray),
                     ),
-                    Span::styled(
-                        level_str,
-                        Style::default().fg(logger::level_color(entry.level)),
-                    ),
+                    Span::styled(level_str, Style::default().fg(level_color(entry.level))),
                     Span::styled(" ", Style::default()),
                     Span::styled(
                         format!("{}: ", entry.target),

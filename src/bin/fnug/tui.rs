@@ -15,9 +15,9 @@ use ratatui::backend::CrosstermBackend;
 
 use fnug::check::CheckResult;
 use fnug::commands::group::CommandGroup;
-use fnug::selectors::watch::watch_commands;
+use fnug::logger::LoggerHandle;
+use fnug::selectors::watch::{WatchError, WatchReport, watch_commands};
 use fnug::tui::app::{App, AppEvent};
-use fnug::tui::log_state::LogBuffer;
 
 /// Start a file watcher that forwards watch events to the app event channel.
 /// The watcher setup (inotify registration) runs on a blocking thread to avoid
@@ -33,12 +33,19 @@ fn start_file_watcher(
         // large directory trees is slow and would block the TUI event loop).
         let result = tokio::task::spawn_blocking(move || watch_commands(all_commands)).await;
 
-        let (mut watcher_rx, _watcher) = match result {
+        let mut handle = match result {
             Ok(Ok(handle)) => {
-                info!("File watcher started");
+                log_watch_report(&handle.report);
                 handle
             }
+            Ok(Err(WatchError::NoWatchableCommands)) => {
+                debug!("File watcher not started: no command uses auto.watch");
+                return;
+            }
             Ok(Err(e)) => {
+                if let WatchError::NothingWatched(report) = &e {
+                    log_watch_report(report);
+                }
                 warn!("File watcher not started: {e}");
                 return;
             }
@@ -48,10 +55,10 @@ fn start_file_watcher(
             }
         };
 
-        // Forward watch events to app. _watcher is kept alive by this scope.
-        while let Some(commands) = watcher_rx.recv().await {
+        // Forward watch events to app. The handle keeps watching while this scope lives.
+        while let Some(matches) = handle.events.recv().await {
             if event_tx
-                .send(AppEvent::WatcherTriggered(commands))
+                .send(AppEvent::WatcherTriggered(matches))
                 .await
                 .is_err()
             {
@@ -59,6 +66,28 @@ fn start_file_watcher(
             }
         }
     })
+}
+
+fn log_watch_report(report: &WatchReport) {
+    for path in &report.missing {
+        warn!("Not watching {}: it does not exist", path.display());
+    }
+    for (path, error) in &report.failed {
+        warn!("Could not watch {}: {error}", path.display());
+    }
+    if report.limit_reached {
+        warn!(
+            "Ran out of file watches, so some directories are not watched; \
+             on Linux, raise fs.inotify.max_user_watches"
+        );
+    }
+    if !report.roots.is_empty() {
+        info!(
+            "File watcher started: {} paths, {} directories",
+            report.roots.len(),
+            report.watched_dirs
+        );
+    }
 }
 
 /// Log line for a panic on `thread`, or `None` for the main thread, which runs the UI.
@@ -75,15 +104,9 @@ fn worker_panic_message(thread: Option<&str>, panic: &impl Display) -> Option<St
 pub async fn run(
     config: CommandGroup,
     cwd: PathBuf,
-    log_file: Option<String>,
-    log_level: Option<log::LevelFilter>,
+    logger: LoggerHandle,
     check_result: Option<CheckResult>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    // Initialize the log buffer and custom logger
-    let log_buffer = LogBuffer::new();
-    let log_file = log_file.as_ref().map(std::fs::File::create).transpose()?;
-    fnug::logger::init(log_buffer.clone(), log_file, log_level);
-
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         if let Some(message) = worker_panic_message(std::thread::current().name(), panic_info) {
@@ -95,7 +118,8 @@ pub async fn run(
         }
     }));
 
-    // Setup terminal
+    // Log lines would corrupt the TUI; the log panel shows them instead
+    logger.set_stderr(false);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -103,7 +127,7 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(config.clone(), cwd, log_buffer);
+    let mut app = App::new(config.clone(), cwd, logger.buffer());
     if let Some(ref result) = check_result {
         let initial_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.apply_check_result(result, initial_area);
@@ -112,17 +136,25 @@ pub async fn run(
         app.spawn_git_selection();
     }
 
-    // Connect the logger to the app's event channel for redraw notifications
-    fnug::logger::connect_event_sender(app.event_tx.clone());
+    let log_tx = app.event_tx.clone();
+    logger.set_notifier(Box::new(move || {
+        let _ = log_tx.try_send(AppEvent::LogUpdated);
+    }));
 
     let file_watcher_handle = start_file_watcher(&config, app.event_tx.clone());
 
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app).await;
     file_watcher_handle.abort();
+    if let Err(e) = &result {
+        // Only to the log panel's buffer and the log file; stderr gets it once, below
+        error!("Application error: {e}");
+    }
 
     // Give the terminal back before waiting for commands to stop
     let restored = restore_terminal(&mut terminal);
+    // So problems stopping the commands reach stderr
+    logger.set_stderr(true);
     let running = app
         .processes
         .values()
@@ -135,7 +167,6 @@ pub async fn run(
     restored?;
 
     if let Err(e) = result {
-        error!("Application error: {e}");
         eprintln!("Error: {e}");
         return Ok(ExitCode::FAILURE);
     }
