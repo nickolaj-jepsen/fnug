@@ -713,13 +713,17 @@ impl App {
 
     /// Select the commands whose watched files changed, and say which in the toolbar.
     pub(super) fn select_watch_matches(&mut self, matches: Vec<WatchMatch>) {
-        let names: Vec<String> = matches
-            .iter()
-            .map(|m| {
-                self.find_command(&m.id)
-                    .map_or_else(|| m.id.clone(), |c| c.name)
+        // The watcher a reload replaced can still name commands the reload removed
+        let (matches, names): (Vec<WatchMatch>, Vec<String>) = matches
+            .into_iter()
+            .filter_map(|m| {
+                let name = self.find_command(&m.id)?.name;
+                Some((m, name))
             })
-            .collect();
+            .unzip();
+        if matches.is_empty() {
+            return;
+        }
         self.set_status(watch_status(&matches, &names, &self.cwd), StatusLevel::Info);
         let ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
         for m in matches {
@@ -749,6 +753,10 @@ impl App {
         self.git_selection_handle = None;
         debug!("Git-selected {} commands", selected.len());
         for cmd in selected {
+            // Chosen from the config before a reload
+            if self.find_command(&cmd.id).is_none() {
+                continue;
+            }
             let reason = match cmd.by {
                 SelectedBy::Always => SelectionReason::Always,
                 SelectedBy::Git => SelectionReason::Git(cmd.files),

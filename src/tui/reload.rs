@@ -195,6 +195,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -202,8 +203,11 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use crate::pty::test_util::pty_available;
+    use crate::selectors::watch::WatchMatch;
     use crate::tui::app::{App, AppEvent};
-    use crate::tui::test_util::{AREA, cursor_node, draw, press, shell_app, shell_group};
+    use crate::tui::test_util::{
+        AREA, cursor_node, draw, git_selected, press, shell_app, shell_group,
+    };
     use crate::{LoadOptions, LoadedConfig};
 
     fn loaded(dir: &Path, commands: &[(&str, &str)]) -> LoadedConfig {
@@ -312,6 +316,26 @@ mod tests {
         app.apply_config(loaded(dir.path(), &commands));
         assert_eq!(status(&app), restart);
         app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn late_results_for_removed_commands_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = shell_app(dir.path(), &[("a", "true"), ("b", "true")]);
+        app.apply_config(loaded(dir.path(), &[("a", "true")]));
+
+        // From the git selection and the watcher of the config before
+        let selected = vec![git_selected("b", &[]), git_selected("a", &[])];
+        app.handle_app_event(AppEvent::GitSelectionComplete(0, selected));
+        app.status = None;
+        app.handle_app_event(AppEvent::WatcherTriggered(vec![WatchMatch {
+            id: "b".into(),
+            files: vec![dir.path().join("x.rs")],
+        }]));
+
+        assert_eq!(app.selected, HashSet::from(["a".to_string()]));
+        assert!(app.selection_reason.keys().all(|id| id == "a"));
+        assert_eq!(status(&app), "", "said it selected a removed command");
     }
 
     #[tokio::test]
