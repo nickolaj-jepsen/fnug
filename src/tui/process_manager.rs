@@ -315,17 +315,41 @@ impl App {
         self.run_commands(&ids, terminal_area, focus.as_deref());
     }
 
-    /// Resize all active terminals
-    pub fn resize_terminals(&self, area: Rect) {
+    /// Resize the terminals of running commands to fit `area`. Returns whether any changed.
+    ///
+    /// Finished commands keep their size: they can't redraw, and vt100 doesn't reflow, so
+    /// shrinking would cut their output.
+    fn resize_terminals(&self, area: Rect) -> bool {
+        let size = TerminalSize::new(area.width.max(2), area.height.max(2));
+        let mut resized = false;
         for proc in self.processes.values() {
-            if matches!(proc.status, CommandStatus::Running)
-                && let Err(e) = proc
-                    .terminal
-                    .resize(TerminalSize::new(area.width.max(2), area.height.max(2)))
-            {
-                debug!("Failed to resize terminal: {e}");
+            if proc.status != CommandStatus::Running || proc.terminal.size() == size {
+                continue;
+            }
+            match proc.terminal.resize(size) {
+                Ok(()) => resized = true,
+                Err(e) => debug!("Failed to resize terminal: {e}"),
             }
         }
+        resized
+    }
+
+    /// Resize the running commands' terminals to `area`, the terminal pane as just drawn, if
+    /// it changed size since the last call. Returns whether any terminal was resized.
+    ///
+    /// Waits while the user drags the divider, so the commands get one resize on release
+    /// rather than one per step.
+    pub fn sync_pty_size(&mut self, area: Rect) -> bool {
+        if self.mouse.resizing || area.is_empty() {
+            return false;
+        }
+        self.last_terminal_area = area;
+        let size = (area.width, area.height);
+        if self.applied_pty_size == Some(size) {
+            return false;
+        }
+        self.applied_pty_size = Some(size);
+        self.resize_terminals(area)
     }
 }
 
@@ -339,10 +363,12 @@ mod tests {
     use crate::commands::command::Command;
     use crate::commands::group::CommandGroup;
     use crate::process::ExitInfo;
+    use crate::pty::terminal::TerminalSize;
     use crate::pty::test_util::{pty_available, wait_until};
     use crate::runner::NodeState;
     use crate::tui::app::{App, AppEvent, CommandStatus};
     use crate::tui::log_state::LogBuffer;
+    use crate::tui::test_util::draw;
     use crate::tui::tree_widget::NodeKind;
 
     const AREA: Rect = Rect::new(0, 0, 80, 24);
@@ -834,6 +860,44 @@ mod tests {
             ),
             "{:?}",
             node.kind
+        );
+        app.shutdown().await;
+    }
+
+    fn size_of(app: &App, id: &str) -> TerminalSize {
+        app.processes[id].terminal.size()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_pty_size_after_fullscreen() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = single_command_app(dir.path(), "exec sleep 30", dir.path().to_path_buf());
+        let (_, (_, pane)) = draw(&mut app, 100, 30);
+        app.run_command("a", pane);
+        assert!(
+            !app.sync_pty_size(pane),
+            "resized to the size it started at"
+        );
+
+        app.fullscreen = true;
+        let (_, (_, full)) = draw(&mut app, 100, 30);
+        assert!(app.sync_pty_size(full));
+        assert_eq!(size_of(&app, "a"), TerminalSize::new(100, 29));
+
+        // A divider drag resizes once, on release
+        app.fullscreen = false;
+        app.mouse.resizing = true;
+        let (_, (_, split)) = draw(&mut app, 100, 30);
+        assert!(!app.sync_pty_size(split));
+        assert_eq!(size_of(&app, "a"), TerminalSize::new(100, 29));
+        app.mouse.resizing = false;
+        assert!(app.sync_pty_size(split));
+        assert_eq!(
+            size_of(&app, "a"),
+            TerminalSize::new(split.width, split.height)
         );
         app.shutdown().await;
     }

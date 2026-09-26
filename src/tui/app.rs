@@ -254,6 +254,8 @@ pub struct App {
     pub context_menu: Option<ContextMenu>,
     /// Last known terminal area, which sizes commands started once their dependencies pass
     pub last_terminal_area: Rect,
+    /// Pane size the running commands' terminals were last resized to, as (columns, rows)
+    pub(super) applied_pty_size: Option<(u16, u16)>,
     /// Handle for in-flight async git selection task
     git_selection_handle: Option<JoinHandle<()>>,
     /// Generation counter for staleness detection of git selection results
@@ -342,6 +344,7 @@ impl App {
             queued_generation: HashMap::new(),
             context_menu: None,
             last_terminal_area: Rect::default(),
+            applied_pty_size: None,
             git_selection_handle: None,
             git_selection_generation: 0,
             next_generation: 0,

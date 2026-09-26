@@ -194,7 +194,6 @@ async fn run_event_loop(
     let mut tree_area = ratatui::layout::Rect::default();
     let mut terminal_area = ratatui::layout::Rect::default();
     let mut needs_render = true;
-    let mut pending_resize = false;
 
     // Frame rate limiter: ~60 FPS max
     let mut render_tick = tokio::time::interval(Duration::from_millis(16));
@@ -212,12 +211,8 @@ async fn run_event_loop(
                 terminal_area = term_a;
             })?;
             needs_render = false;
-
-            // Resize PTYs after render so terminal_area reflects the new size
-            if pending_resize {
-                pending_resize = false;
-                app.resize_terminals(terminal_area);
-            }
+            // Whatever changed the pane: a window resize, fullscreen, or the divider
+            app.sync_pty_size(terminal_area);
         }
 
         if app.should_quit {
@@ -260,7 +255,6 @@ async fn run_event_loop(
                     }
                     Some(Ok(Event::Resize(_w, _h))) => {
                         needs_render = true;
-                        pending_resize = true;
                     }
                     Some(Err(e)) => {
                         error!("Event error: {e}");
