@@ -214,7 +214,7 @@ impl App {
             }
             KeyCode::Char('r') => {
                 if let Some(id) = self.current_command_id() {
-                    self.start_command(&id, terminal_area, true);
+                    self.run_command(&id, terminal_area);
                 } else if let Some(id) = self.current_group_id() {
                     self.run_group(&id, terminal_area);
                 }
