@@ -1265,3 +1265,34 @@ commands:
     );
     drop(shell);
 }
+
+#[test]
+fn cancel_before_selection_finishes_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: marker
+    cmd: 'touch ran'
+    auto:
+      always: true
+",
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(fnug::check::run(
+            &config,
+            &cwd,
+            &fnug::check::CheckOptions::default(),
+            cancel,
+        ))
+        .unwrap();
+    assert_eq!(result.exit_code, 1);
+    assert!(result.report.cancelled);
+    assert!(result.report.commands.is_empty(), "{:?}", result.report);
+    assert!(!dir.path().join("ran").exists());
+}
