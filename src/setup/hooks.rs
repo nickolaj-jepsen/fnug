@@ -18,7 +18,7 @@ use crate::config_file::find_config_in_dir;
 
 /// Version of the hook block's format. Bump it when the block changes, so [`status`] reports
 /// older blocks as [`HookStatus::Outdated`] and setup offers to update them.
-pub const HOOK_FORMAT_VERSION: u32 = 2;
+pub const HOOK_FORMAT_VERSION: u32 = 3;
 
 const BEGIN: &str = "# >>> fnug >>>";
 const END: &str = "# <<< fnug <<<";
@@ -876,6 +876,9 @@ fn render_block(spec: &BlockSpec) -> String {
             "    # git passes a GIT_INDEX_FILE relative to the top; keep it valid after the cd"
                 .to_string(),
             "    case ${GIT_INDEX_FILE-} in ''|/*) ;; *) GIT_INDEX_FILE=$PWD/$GIT_INDEX_FILE; export GIT_INDEX_FILE ;; esac".to_string(),
+            "    # with GIT_DIR alone, as in a linked worktree, git would take the cd's target as the top"
+                .to_string(),
+            "    if [ -n \"${GIT_DIR-}\" ] && [ -z \"${GIT_WORK_TREE+x}\" ]; then GIT_WORK_TREE=$PWD; export GIT_WORK_TREE; fi".to_string(),
             format!(
                 "    cd -- {} && exec {run}",
                 sh_quote(&spec.config_rel.to_string_lossy())

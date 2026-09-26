@@ -3,7 +3,7 @@
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::Duration;
 
@@ -727,17 +727,11 @@ commands:
 /// checkout relative to `sub/` would put there.
 const SUB_FILES: &[(&str, &str)] = &[("a.txt", "top\n"), ("sub/a.txt", "sub\n")];
 
-/// Commit through the pre-commit hook `fnug setup` installs for a config in `top/sub`, where
-/// `sub/a.txt` has staged and unstaged changes, and check that the command saw exactly the
-/// staged `sub/a.txt`. `git_dir` is the work tree's own git dir.
-fn commit_in_sub_sees_staged_content(top: &Path, git_dir: &Path) {
+/// Install the pre-commit hook `fnug setup` writes for the config in `top/sub`, and commit
+/// through it with this `fnug` first on `PATH` and `$SEEN` set to `seen`.
+fn commit_through_sub_hook(top: &Path, seen: &Path) -> Output {
     use fnug::setup::hooks;
 
-    write(top, "sub/a.txt", "sub staged\n");
-    git(top, &["add", "sub/a.txt"]);
-    write(top, "sub/a.txt", "sub staged\nunstaged\n");
-
-    // The hook runs whichever `fnug` is first on PATH
     let bin = top.parent().unwrap().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fnug"), bin.join("fnug")).unwrap();
@@ -747,16 +741,27 @@ fn commit_in_sub_sees_staged_content(top: &Path, git_dir: &Path) {
     };
     hooks::install_with(&hooks::resolve(&top.join("sub")).unwrap(), &opts).unwrap();
 
-    let seen = top.parent().unwrap().join("seen");
     let path = std::env::var("PATH").unwrap_or_default();
-    let output = common::git::command(top)
+    common::git::command(top)
         .args(["commit", "-qm", "sub"])
         .env("PATH", format!("{}:{path}", bin.display()))
-        .env("SEEN", &seen)
+        .env("SEEN", seen)
         .env_remove("FNUG_LOG")
         .stdin(Stdio::null())
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+/// Commit through the pre-commit hook for a config in `top/sub`, where `sub/a.txt` has staged
+/// and unstaged changes, and check that the command saw exactly the staged `sub/a.txt`.
+/// `git_dir` is the work tree's own git dir.
+fn commit_in_sub_sees_staged_content(top: &Path, git_dir: &Path) {
+    write(top, "sub/a.txt", "sub staged\n");
+    git(top, &["add", "sub/a.txt"]);
+    write(top, "sub/a.txt", "sub staged\nunstaged\n");
+
+    let seen = top.parent().unwrap().join("seen");
+    let output = commit_through_sub_hook(top, &seen);
     assert!(output.status.success(), "{}", printed(&output));
     // Not the top's a.txt, nor a copy of the index under sub/
     assert_eq!(read(&seen), "sub staged\na.txt\n", "{}", printed(&output));
@@ -767,15 +772,15 @@ fn commit_in_sub_sees_staged_content(top: &Path, git_dir: &Path) {
     assert!(!git_dir.join("fnug-stash.lock").exists());
 }
 
-#[test]
-fn stash_hook_in_linked_worktree_with_config_in_subdir() {
-    let tmp = tempfile::tempdir().unwrap();
-    let main = tmp.path().join("main");
+/// A linked worktree `root/wt` of a repo `root/main` holding [`SUB_FILES`] and `sub_config` in
+/// `sub/`, with its hooks in `main/.git/hooks`. `None` when git isn't available.
+fn linked_worktree(root: &Path, sub_config: &str) -> Option<PathBuf> {
+    let main = root.join("main");
     std::fs::create_dir(&main).unwrap();
     if !repo(&main, "name: root\n", SUB_FILES) {
-        return;
+        return None;
     }
-    common::write_config(&main.join("sub"), SUB_RECORD);
+    common::write_config(&main.join("sub"), sub_config);
     git(&main, &["add", "-A"]);
     git(&main, &["commit", "-qm", "sub config"]);
     // Absolute, since a linked worktree's `.git` is a file
@@ -784,10 +789,49 @@ fn stash_hook_in_linked_worktree_with_config_in_subdir() {
         &main,
         &["config", "core.hooksPath", hooks.to_str().unwrap()],
     );
-    let wt = tmp.path().join("wt");
+    let wt = root.join("wt");
     git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    Some(wt)
+}
 
-    commit_in_sub_sees_staged_content(&wt, &main.join(".git/worktrees/wt"));
+#[test]
+fn stash_hook_in_linked_worktree_with_config_in_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(wt) = linked_worktree(tmp.path(), SUB_RECORD) else {
+        return;
+    };
+    commit_in_sub_sees_staged_content(&wt, &tmp.path().join("main/.git/worktrees/wt"));
+}
+
+/// Records, in `$SEEN`, the top of the work tree that git finds from the command's directory.
+const SUB_TOPLEVEL: &str = r#"
+name: sub
+commands:
+  - name: toplevel
+    cmd: 'git rev-parse --show-toplevel > "$SEEN"'
+    auto:
+      always: true
+"#;
+
+#[test]
+fn hook_in_linked_worktree_gives_commands_the_top() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(wt) = linked_worktree(tmp.path(), SUB_TOPLEVEL) else {
+        return;
+    };
+    write(&wt, "sub/a.txt", "changed\n");
+    git(&wt, &["add", "sub/a.txt"]);
+
+    let seen = tmp.path().join("seen");
+    let output = commit_through_sub_hook(&wt, &seen);
+    assert!(output.status.success(), "{}", printed(&output));
+    // git hands the hook an absolute GIT_DIR, which alone makes the command's directory the top
+    assert_eq!(
+        Path::new(read(&seen).trim()),
+        wt.canonicalize().unwrap(),
+        "{}",
+        printed(&output)
+    );
 }
 
 #[test]

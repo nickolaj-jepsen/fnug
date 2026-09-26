@@ -304,8 +304,8 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
-/// A directory holding a `fnug` that logs its working directory and arguments, then exits with
-/// `$FNUG_SHIM_EXIT`.
+/// A directory holding a `fnug` that logs its working directory, git variables and arguments,
+/// then exits with `$FNUG_SHIM_EXIT`.
 struct Shim {
     _dir: tempfile::TempDir,
     bin: PathBuf,
@@ -319,7 +319,7 @@ impl Shim {
         let log = dir.path().join("log");
         write_executable(
             &bin.join("fnug"),
-            "#!/bin/sh\n{ printf 'pwd=%s\\n' \"$PWD\"; printf 'index=%s\\n' \"${GIT_INDEX_FILE-}\"; printf 'arg=%s\\n' \"$@\"; } >> \"$FNUG_SHIM_LOG\"\nexit \"${FNUG_SHIM_EXIT:-0}\"\n",
+            "#!/bin/sh\n{ printf 'pwd=%s\\n' \"$PWD\"; printf 'index=%s\\n' \"${GIT_INDEX_FILE-}\"; printf 'work-tree=%s\\n' \"${GIT_WORK_TREE-(unset)}\"; printf 'arg=%s\\n' \"$@\"; } >> \"$FNUG_SHIM_LOG\"\nexit \"${FNUG_SHIM_EXIT:-0}\"\n",
         );
         Self {
             _dir: dir,
@@ -362,6 +362,9 @@ impl Shim {
             .env("PATH", path)
             .env("FNUG_SHIM_LOG", &self.log)
             .env("FNUG_SHIM_EXIT", fnug_exit.to_string())
+            // Set when the tests themselves run from a git hook
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .envs(env.iter().copied())
             .output()
             .unwrap();
@@ -819,6 +822,33 @@ fn subdir_config_hook_cds() {
             root.display().to_string(),
             "the user's lines still run from the top"
         );
+    }
+}
+
+#[test]
+fn subdir_config_hook_keeps_git_on_the_top() {
+    let (_tmp, root, hook) = repo();
+    let shim = Shim::new();
+    let app = root.join("app");
+    std::fs::create_dir(&app).unwrap();
+    hooks::install_with(
+        &hooks::resolve(&app).unwrap(),
+        &options(ForeignPolicy::Refuse),
+    )
+    .unwrap();
+    let git_dir = root.join(".git");
+    let git_dir = git_dir.to_str().unwrap();
+
+    for (env, work_tree) in [
+        (vec![], "(unset)".to_string()),
+        (vec![("GIT_DIR", git_dir)], root.display().to_string()),
+        (
+            vec![("GIT_DIR", git_dir), ("GIT_WORK_TREE", "/elsewhere")],
+            "/elsewhere".to_string(),
+        ),
+    ] {
+        assert_eq!(shim.run_hook(&hook, &root, 0, &shim.path(), &env).0, 0);
+        assert_eq!(shim.logged("work-tree"), [work_tree], "{env:?}");
     }
 }
 
