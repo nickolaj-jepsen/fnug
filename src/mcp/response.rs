@@ -6,6 +6,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rmcp::model::{CallToolResult, Content};
 use serde::Serialize;
@@ -139,6 +140,9 @@ struct Summary {
     cancelled: usize,
     not_run: usize,
     duration_ms: u128,
+    /// How long the run waited for another to finish first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queued_ms: Option<u128>,
     /// Distinct changed files git selection found, for `run_lints`.
     #[serde(skip_serializing_if = "Option::is_none")]
     changed_files: Option<usize>,
@@ -188,6 +192,8 @@ pub(super) struct Run<'a> {
     /// The config's directory; matched files are listed relative to it.
     pub root: &'a Path,
     pub verbose: bool,
+    /// How long it waited for another run to finish, if it had to.
+    pub queued: Option<Duration>,
 }
 
 /// The result of a run: the summary, then a text block per command whose output is shown.
@@ -202,6 +208,7 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
         report,
         root,
         verbose,
+        queued,
     } = *run;
     // Reports are in plan order
     let entries: Vec<(&PlannedCommand, &CommandReport)> =
@@ -234,6 +241,7 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
         cancelled: counts.cancelled,
         not_run: counts.not_run,
         duration_ms: report.duration.as_millis(),
+        queued_ms: queued.map(|q| q.as_millis()),
         changed_files: matches!(scope, RunScope::Changes { .. }).then_some(plan.changed_files),
         warnings: plan.warnings.clone(),
         commands: order

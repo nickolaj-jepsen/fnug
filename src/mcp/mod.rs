@@ -5,15 +5,16 @@ mod response;
 mod text;
 
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::warn;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router, transport::stdio};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::command::Command;
@@ -34,6 +35,9 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// How many commands an error for an unknown command lists.
 const MAX_LISTED: usize = 50;
 
+/// Time limit for commands without a `timeout` when a run leaves out `timeout_secs`.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 /// Output kept of each command: more than a result shows, so cleaning can shrink it first.
 const CAPTURE: CaptureLimits = CaptureLimits {
     head: 64 * 1024,
@@ -49,6 +53,20 @@ const CAPTURE: CaptureLimits = CaptureLimits {
 struct RunOptions {
     fail_fast: bool,
     verbose: bool,
+    /// For commands without a `timeout` of their own.
+    timeout: Option<Duration>,
+    jobs: NonZeroUsize,
+}
+
+/// The `jobs` parameter: one per CPU when left out or 0.
+fn jobs(jobs: Option<usize>) -> NonZeroUsize {
+    jobs.and_then(NonZeroUsize::new)
+        .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+}
+
+/// The `timeout_secs` parameter: [`DEFAULT_TIMEOUT`] when left out, and no limit for 0.
+fn timeout(secs: Option<u64>) -> Duration {
+    secs.map_or(DEFAULT_TIMEOUT, Duration::from_secs)
 }
 
 #[derive(Debug, Clone)]
@@ -57,8 +75,9 @@ pub struct FnugMcp {
     load: LoadOptions,
     /// The signal that shut the server down, which running commands then get too.
     cancel_cause: CancelCause,
-    /// Held for reading by every run; shutdown takes it for writing to wait for them.
-    runs: Arc<RwLock<()>>,
+    /// Held by each run from planning to its last command, so overlapping calls take turns;
+    /// shutdown takes it to wait for the running one.
+    run_lock: Arc<Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -156,7 +175,7 @@ impl FnugMcp {
         Self {
             load,
             cancel_cause,
-            runs: Arc::default(),
+            run_lock: Arc::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -234,6 +253,8 @@ impl FnugMcp {
         let run = RunOptions {
             fail_fast: params.fail_fast.unwrap_or(false),
             verbose: params.verbose.unwrap_or(false),
+            timeout: Some(timeout(params.timeout_secs)),
+            jobs: jobs(params.jobs),
         };
         self.run_and_serialize(scope, run, ct).await
     }
@@ -257,6 +278,8 @@ impl FnugMcp {
         let run = RunOptions {
             fail_fast: false,
             verbose: params.verbose.unwrap_or(false),
+            timeout: Some(timeout(params.timeout_secs)),
+            jobs: NonZeroUsize::MIN,
         };
         self.run_and_serialize(RunScope::Named(params.command), run, ct)
             .await
@@ -285,6 +308,8 @@ impl FnugMcp {
         let run = RunOptions {
             fail_fast: params.fail_fast.unwrap_or(false),
             verbose: params.verbose.unwrap_or(false),
+            timeout: Some(timeout(params.timeout_secs)),
+            jobs: jobs(params.jobs),
         };
         self.run_and_serialize(scope, run, ct).await
     }
@@ -303,15 +328,28 @@ impl FnugMcp {
             .unwrap_or_else(|e| Err(tool_error(format!("fnug failed: {e}"))))
     }
 
-    /// Plan and run what `scope` asks for, one command at a time with captured output.
-    /// Cancelling `ct` kills the running command's process group.
+    /// Plan and run what `scope` asks for, with captured output, once no other run is in
+    /// progress. Cancelling `ct` stops waiting, or kills the running commands' process groups.
     async fn run_and_serialize(
         &self,
         scope: RunScope,
         run: RunOptions,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let _running = self.runs.read().await;
+        let (_turn, queued) = if let Ok(turn) = self.run_lock.try_lock() {
+            (turn, None)
+        } else {
+            let since = Instant::now();
+            tokio::select! {
+                biased;
+                () = ct.cancelled() => {
+                    return Ok(tool_error(
+                        "Cancelled while waiting for another run to finish; nothing ran.".into(),
+                    ));
+                }
+                turn = self.run_lock.lock() => (turn, Some(since.elapsed())),
+            }
+        };
         let selection = selection(&scope);
         let planned = self.with_config(move |loaded| {
             let plan = runner::plan(&loaded.root, &selection, &PlanOptions::default())
@@ -327,8 +365,10 @@ impl FnugMcp {
         }
 
         let opts = ExecOptions {
+            jobs: run.jobs,
             fail_fast: run.fail_fast,
             output: OutputMode::Capture(CAPTURE),
+            default_timeout: run.timeout,
             cancel: ct,
             cancel_cause: self.cancel_cause.clone(),
             ..ExecOptions::default()
@@ -340,6 +380,7 @@ impl FnugMcp {
             report: &report,
             root: &cwd,
             verbose: run.verbose,
+            queued,
         })
         .map_err(mcp_err)
     }
@@ -360,7 +401,9 @@ impl ServerHandler for FnugMcp {
                 tools over running shell commands directly — they automatically select the \
                 right checks for the files you changed and handle dependency ordering. Each \
                 run returns a JSON summary with failures first, then the output of each \
-                command that failed; read the summary's message before the output."
+                command that failed; read the summary's message before the output. Runs take \
+                turns, so a call made while another run is in progress waits for it. The \
+                config is reloaded on every call."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -402,7 +445,7 @@ pub async fn run(
         warn!("{e}; every tool call reports this until the config is fixed");
     }
     let server = FnugMcp::new(load, cancel_cause);
-    let runs = server.runs.clone();
+    let run_lock = server.run_lock.clone();
     let service = server.serve(stdio()).await?;
     // Dropping the service, whichever branch wins, cancels every request's token
     tokio::select! {
@@ -411,7 +454,7 @@ pub async fn run(
         }
         () = shutdown.cancelled() => {}
     }
-    if tokio::time::timeout(SHUTDOWN_GRACE, runs.write())
+    if tokio::time::timeout(SHUTDOWN_GRACE, run_lock.lock())
         .await
         .is_err()
     {
