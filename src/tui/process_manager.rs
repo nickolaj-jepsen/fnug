@@ -1318,6 +1318,24 @@ mod tests {
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn watch_run_keeps_git_matched_files() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = show_app(dir.path(), "true");
+            app.config.commands[0].auto.run_on_change = Some(true);
+            let file = dir.path().join("a.txt");
+            let selected = vec![git_selected("show", &[file.to_str().unwrap()])];
+            app.handle_app_event(AppEvent::GitSelectionComplete(0, selected));
+
+            app.handle_app_event(changed(dir.path(), "b.txt"));
+
+            assert_eq!(runs(dir.path(), 1), ["args: a.txt b.txt env:a.txt b.txt"]);
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn rerun_gets_changes_made_while_it_ran() {
             if !pty_available() {
                 return;

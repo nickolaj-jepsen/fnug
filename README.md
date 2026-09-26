@@ -391,7 +391,7 @@ commands:
 
 A command without such a list gets no `FNUG_FILES`, and `{files}` becomes its `auto.path` entries (`.` for its own `cwd`, or when it has none), so it checks everything it covers. That happens when you name it or pass `--all`, when it runs only as another command's dependency, when it has no `auto.git`, when all its matched files were deleted, and, with a warning, when the list is longer than 100 KiB.
 
-In the TUI, a command that git selected gets the files git matched when you run it (`Enter`, `r` or a group run), and one the file watcher selected gets the files that changed since it last passed, `auto.run_on_change` runs included; a change while it runs adds to the files of the rerun queued for it. A command you selected by hand, one selected by `auto.always` or by a failed `fnug check` that opened the TUI, one that isn't selected, and one that runs only as another's dependency get the `auto.path` fallback.
+In the TUI, a command that git selected gets the files git matched when you run it (`Enter`, `r` or a group run), and one the file watcher selected gets the files that changed since it last passed, `auto.run_on_change` runs included; a change while it runs adds to the files of the rerun queued for it. When the watcher selects a command that git selected, the changed files are added to the ones git matched. A command you selected by hand, one selected by `auto.always` or by a failed `fnug check` that opened the TUI, one that isn't selected, and one that runs only as another's dependency get the `auto.path` fallback.
 
 ### Ids and dependencies
 
