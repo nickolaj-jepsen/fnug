@@ -4,11 +4,12 @@ pub mod mcp;
 pub mod workspace;
 
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use inquire::{Confirm, MultiSelect};
 use thiserror::Error;
 
+use crate::selectors::relative_to;
 use crate::{LoadOptions, LoadedConfig};
 use hooks::{
     ForeignPolicy, HookError, HookPlan, HookStatus, HookTarget, InstallOptions, InstallOutcome,
@@ -287,28 +288,20 @@ fn root_hook_options(config: Option<&LoadedConfig>, load: &LoadOptions) -> Insta
             .and_then(|c| c.config_path.file_name())
             .map(PathBuf::from),
         root_dir: pinned(load.root_dir.is_some())
-            .and_then(|c| Some(relative_path(&c.cwd, c.config_path.parent()?))),
+            .and_then(|c| Some(path_arg(&c.cwd, c.config_path.parent()?))),
         ..InstallOptions::default()
     }
 }
 
-/// `path` relative to `base`, both absolute.
-fn relative_path(path: &Path, base: &Path) -> PathBuf {
-    let common = path
-        .components()
-        .zip(base.components())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut relative: PathBuf = base
-        .components()
-        .skip(common)
-        .map(|_| Component::ParentDir)
-        .collect();
-    relative.extend(path.components().skip(common));
+/// `path` relative to `base`, both canonical, as a command-line argument: `.` when they are the
+/// same directory.
+fn path_arg(path: &Path, base: &Path) -> PathBuf {
+    let relative = relative_to(path, base);
     if relative.as_os_str().is_empty() {
-        relative.push(Component::CurDir);
+        PathBuf::from(".")
+    } else {
+        relative
     }
-    relative
 }
 
 /// Find the hooks and editor configs, printing why any of them can't be set up.
@@ -639,22 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn relative_path_climbs_and_descends() {
-        for (path, base, expected) in [
-            ("/a/b", "/a/b", "."),
-            ("/a", "/a/b/c", "../.."),
-            ("/a/x/y", "/a/b", "../x/y"),
-            ("/a/b/c", "/a", "b/c"),
-        ] {
-            assert_eq!(
-                relative_path(Path::new(path), Path::new(base)),
-                Path::new(expected),
-                "{path} from {base}"
-            );
-        }
-    }
-
-    #[test]
     fn root_hook_loads_the_config_like_setup_did() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -682,6 +659,16 @@ mod tests {
         assert_eq!(
             root_hook_options(Some(&loaded), &found),
             InstallOptions::default()
+        );
+
+        let root_is_config_dir = LoadOptions {
+            root_dir: Some(root.join("app")),
+            ..found
+        };
+        let loaded = crate::load(&root_is_config_dir).unwrap();
+        assert_eq!(
+            root_hook_options(Some(&loaded), &root_is_config_dir).root_dir,
+            Some(PathBuf::from("."))
         );
     }
 }
