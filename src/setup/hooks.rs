@@ -266,8 +266,8 @@ pub enum InstallOutcome {
 /// Arguments the pre-commit hook passes to `fnug`: check what is being committed, with
 /// unstaged changes set aside and one command per CPU at once.
 ///
-/// Global flags come before the subcommand so the hook also parses with
-/// fnug versions where they weren't global yet.
+/// A fnug from before `--staged` and `--stash` rejects them, so an older `fnug` first on `PATH`
+/// fails every commit.
 #[must_use]
 pub fn hook_args(no_workspace: bool) -> Vec<&'static str> {
     let mut args = Vec::with_capacity(8);
