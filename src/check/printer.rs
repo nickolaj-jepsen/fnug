@@ -228,6 +228,9 @@ fn counter(index: usize, total: usize) -> String {
     format!("[{index:>width$}/{total}]")
 }
 
+/// How many modified files a failure names before it only counts the rest.
+const MAX_LISTED: usize = 10;
+
 fn describe_failure(failure: &Failure) -> String {
     match failure {
         Failure::Exit(code) => format!("exit {code}"),
@@ -242,8 +245,15 @@ fn describe_failure(failure: &Failure) -> String {
         }
         Failure::Spawn(message) => message.clone(),
         Failure::Modified(paths) => {
-            let paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-            format!("modified: {}", paths.join(", "))
+            let mut listed: Vec<String> = paths
+                .iter()
+                .take(MAX_LISTED)
+                .map(|p| p.display().to_string())
+                .collect();
+            if paths.len() > MAX_LISTED {
+                listed.push(format!("and {} more", paths.len() - MAX_LISTED));
+            }
+            format!("modified: {} — review and re-stage", listed.join(", "))
         }
     }
 }

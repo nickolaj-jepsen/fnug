@@ -1,5 +1,6 @@
 //! Headless check mode: run the selected commands without the TUI and report the results.
 
+mod modified;
 mod printer;
 
 use std::num::NonZeroUsize;
@@ -13,10 +14,11 @@ use tokio_util::sync::CancellationToken;
 use crate::commands::group::CommandGroup;
 use crate::runner::{
     self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions,
-    RunReport, Selection,
+    RunEvent, RunReport, Selection,
 };
 use crate::selectors::SelectOptions;
 
+use modified::ModificationGuard;
 use printer::Printer;
 
 #[derive(Error, Debug)]
@@ -41,10 +43,14 @@ pub struct CheckOptions {
     /// The signal fnug received that cancels [`run`]'s token, if any, which decides what
     /// running commands get.
     pub cancel_cause: CancelCause,
+    /// Fail a command that passes but changes tracked files in its git work tree, as a
+    /// formatter does when it finds something to fix.
+    pub detect_modifications: bool,
 }
 
 impl Default for CheckOptions {
-    /// Commands selected by their `auto` rules, one at a time, with live output.
+    /// Commands selected by their `auto` rules, one at a time, with live output, failing ones
+    /// that change tracked files.
     fn default() -> Self {
         Self {
             selection: Selection::Auto {
@@ -56,6 +62,7 @@ impl Default for CheckOptions {
             jobs: NonZeroUsize::MIN,
             timeout: None,
             cancel_cause: CancelCause::default(),
+            detect_modifications: true,
         }
     }
 }
@@ -113,10 +120,13 @@ pub async fn run(
         cancel_cause: opts.cancel_cause.clone(),
         kill_grace: runner::KILL_GRACE,
     };
-    let report = runner::execute(&plan, cwd, &exec, &NoHook, &mut |event| {
-        printer.event(&event);
-    })
-    .await;
+    let mut on_event = |event: RunEvent<'_>| printer.event(&event);
+    let report = if opts.detect_modifications {
+        let hook = ModificationGuard::new(cwd);
+        runner::execute(&plan, cwd, &exec, &hook, &mut on_event).await
+    } else {
+        runner::execute(&plan, cwd, &exec, &NoHook, &mut on_event).await
+    };
     printer.summary(&report);
     Ok(CheckResult {
         exit_code: i32::from(!report.success()),

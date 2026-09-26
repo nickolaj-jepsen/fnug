@@ -16,7 +16,7 @@ children:
         cmd: cargo check --locked
       - name: fmt
         id: rust-fmt
-        cmd: cargo fmt
+        cmd: cargo fmt --check
       - name: test
         cmd: cargo test
       - name: clippy fix
@@ -24,10 +24,13 @@ children:
         cmd: cargo clippy --fix --allow-dirty --allow-staged
         depends_on:
           - rust-fmt
+        auto:
+          # Rewrites sources, which fails a check
+          check: false
       - name: clippy check
         cmd: cargo clippy --all-targets -- -D warnings
         depends_on:
-          - rust-clippy-fix
+          - rust-fmt
       - name: cwd
         cmd: pwd
   - name: python

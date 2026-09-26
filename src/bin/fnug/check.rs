@@ -63,6 +63,11 @@ pub struct CheckArgs {
     /// output is captured and printed as each command finishes
     #[arg(short, long, value_name = "N", default_value_t = 1)]
     jobs: usize,
+
+    /// Let commands change tracked files, such as a formatter that fixes what it finds, without
+    /// failing
+    #[arg(long)]
+    allow_modifications: bool,
 }
 
 impl CheckArgs {
@@ -122,6 +127,7 @@ pub async fn run(
         jobs: args.jobs(),
         timeout: args.timeout.filter(|t| !t.is_zero()),
         cancel_cause: signals.cause.clone(),
+        detect_modifications: !args.allow_modifications,
     };
     let result = fnug::check::run(config, cwd, &opts, signals.cancel.clone()).await?;
     if let Some(code) = signals.exit_code() {
