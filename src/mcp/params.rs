@@ -49,6 +49,14 @@ pub(super) struct RunLintsParams {
     /// Also return the output of commands that passed or were cancelled. Output stays capped.
     #[schemars(default)]
     pub verbose: Option<bool>,
+    /// Stop a command that runs longer than this many seconds and report it as `timeout`,
+    /// unless its config sets its own `timeout`. 600 (10 minutes) by default, 0 for no limit.
+    #[schemars(default)]
+    pub timeout_secs: Option<u64>,
+    /// How many commands may run at once, each after its dependencies: one per CPU by default
+    /// or with 0, and 1 to run them one at a time.
+    #[schemars(default)]
+    pub jobs: Option<usize>,
 }
 
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
@@ -64,6 +72,14 @@ pub(super) struct RunAllParams {
     /// Also return the output of commands that passed or were cancelled. Output stays capped.
     #[schemars(default)]
     pub verbose: Option<bool>,
+    /// Stop a command that runs longer than this many seconds and report it as `timeout`,
+    /// unless its config sets its own `timeout`. 600 (10 minutes) by default, 0 for no limit.
+    #[schemars(default)]
+    pub timeout_secs: Option<u64>,
+    /// How many commands may run at once, each after its dependencies: one per CPU by default
+    /// or with 0, and 1 to run them one at a time.
+    #[schemars(default)]
+    pub jobs: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -75,4 +91,8 @@ pub(super) struct RunLintParams {
     /// Also return the output of commands that passed or were cancelled. Output stays capped.
     #[schemars(default)]
     pub verbose: Option<bool>,
+    /// Stop a command that runs longer than this many seconds and report it as `timeout`,
+    /// unless its config sets its own `timeout`. 600 (10 minutes) by default, 0 for no limit.
+    #[schemars(default)]
+    pub timeout_secs: Option<u64>,
 }

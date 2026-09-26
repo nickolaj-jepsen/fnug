@@ -41,6 +41,7 @@ fn run_lint(command: &str) -> Parameters<RunLintParams> {
     Parameters(RunLintParams {
         command: command.to_string(),
         verbose: None,
+        timeout_secs: None,
     })
 }
 
@@ -418,8 +419,14 @@ commands:
     cmd: 'true'
 ",
     );
+    // One at a time, so `second` hasn't started when `first` fails
+    let params = Parameters(RunAllParams {
+        fail_fast: Some(true),
+        jobs: Some(1),
+        ..RunAllParams::default()
+    });
     let result = server
-        .run_all(all(true), CancellationToken::new())
+        .run_all(params, CancellationToken::new())
         .await
         .unwrap();
     let result = json(&result);
@@ -428,30 +435,172 @@ commands:
     assert_eq!(result["commands"][1]["status"], "not_run");
 }
 
+#[test]
+fn run_defaults() {
+    let per_cpu = std::thread::available_parallelism().unwrap();
+    assert_eq!(super::jobs(None), per_cpu);
+    assert_eq!(super::jobs(Some(0)), per_cpu);
+    assert_eq!(super::jobs(Some(3)).get(), 3);
+    assert_eq!(super::timeout(None), super::DEFAULT_TIMEOUT);
+    assert_eq!(super::timeout(Some(0)), Duration::ZERO);
+    assert_eq!(super::timeout(Some(5)), Duration::from_secs(5));
+}
+
+/// Whether `pid` is a live process; a zombie counts as dead.
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the pid exists.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(')')
+            .is_none_or(|(_, rest)| !rest.trim_start().starts_with('Z'))
+    })
+}
+
+/// Cancel `ct` once `path` exists.
+fn cancel_when_exists(path: std::path::PathBuf, ct: &CancellationToken) {
+    let ct = ct.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(crate::pty::test_util::wait_until(
+            Duration::from_secs(10),
+            || path.exists()
+        ));
+        ct.cancel();
+    });
+}
+
 #[tokio::test]
-async fn cancelled_run_reports_cancelled() {
+async fn cancel_kills_process_group() {
+    let (server, dir) = server(
+        r"
+name: root
+commands:
+  - name: hang
+    cmd: 'sleep 30 & echo $! > pid; touch started; wait'
+",
+    );
+    let ct = CancellationToken::new();
+    cancel_when_exists(dir.path().join("started"), &ct);
+    let started = std::time::Instant::now();
+    let result = server.run_lint(run_lint("hang"), ct).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let result = json(&result);
+    assert_eq!(result["cancelled"], 1);
+    assert_eq!(result["commands"][0]["status"], "cancelled");
+
+    let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+    let pid: i32 = pid.trim().parse().unwrap();
+    assert!(
+        crate::pty::test_util::wait_until(Duration::from_secs(5), || !alive(pid)),
+        "the command's background sleep survived"
+    );
+}
+
+#[tokio::test]
+async fn cancel_while_queued_runs_nothing() {
     let (server, dir) = server(
         r"
 name: root
 commands:
   - name: hang
     cmd: 'touch started; exec sleep 30'
+  - name: marker
+    cmd: 'touch ran'
 ",
     );
-    let ct = CancellationToken::new();
-    let started = dir.path().join("started");
-    let cancel = ct.clone();
-    tokio::task::spawn_blocking(move || {
-        assert!(crate::pty::test_util::wait_until(
-            Duration::from_secs(10),
-            || { started.exists() }
-        ));
-        cancel.cancel();
-    });
-    let result = server.run_lint(run_lint("hang"), ct).await.unwrap();
-    let result = json(&result);
-    assert_eq!(result["cancelled"], 1);
-    assert_eq!(result["commands"][0]["status"], "cancelled");
+    let first = CancellationToken::new();
+    let second = CancellationToken::new();
+    cancel_when_exists(dir.path().join("started"), &second);
+    let (hang, queued) = tokio::join!(server.run_lint(run_lint("hang"), first.clone()), async {
+        let result = server.run_lint(run_lint("marker"), second).await;
+        first.cancel();
+        result
+    },);
+    let queued = queued.unwrap();
+    assert_eq!(queued.is_error, Some(true));
+    assert!(text(&queued).contains("nothing ran"), "{}", text(&queued));
+    assert!(!dir.path().join("ran").exists());
+    assert_eq!(json(&hang.unwrap())["cancelled"], 1);
+}
+
+#[tokio::test]
+async fn timeout_secs_reports_timeout() {
+    let (server, _dir) = server(
+        r"
+name: root
+commands:
+  - name: slow
+    cmd: 'echo waiting; exec sleep 30'
+  - name: own
+    cmd: 'sleep 0.5'
+    timeout: 0
+",
+    );
+    let params = RunAllParams {
+        timeout_secs: Some(1),
+        ..RunAllParams::default()
+    };
+    let started = std::time::Instant::now();
+    let result = server
+        .run_all(Parameters(params), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(blocks(&result), ["### slow: timed out after 1s\nwaiting\n"]);
+    let summary = json(&result);
+    assert_eq!(summary["timed_out"], 1);
+    assert_eq!(summary["commands"][0]["status"], "timeout");
+    assert_eq!(summary["commands"][0]["detail"], "timed out after 1s");
+    // A command's own `timeout` wins over timeout_secs
+    assert_eq!(summary["commands"][1]["status"], "passed");
+}
+
+#[tokio::test]
+async fn jobs_run_commands_at_once() {
+    // Each command waits for the other to start, so they pass only when run together
+    let (server, _dir) = server(
+        r"
+name: root
+commands:
+  - name: a
+    cmd: 'touch a; i=0; while [ ! -e b ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; [ -e b ]'
+  - name: b
+    cmd: 'touch b; i=0; while [ ! -e a ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; [ -e a ]'
+",
+    );
+    let params = RunAllParams {
+        jobs: Some(2),
+        ..RunAllParams::default()
+    };
+    let result = server
+        .run_all(Parameters(params), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(json(&result)["passed"], 2, "{}", text(&result));
+}
+
+#[tokio::test]
+async fn overlapping_runs_do_not_overlap() {
+    let (server, dir) = server(
+        r"
+name: root
+commands:
+  - name: guarded
+    cmd: 'mkdir held 2>/dev/null || echo overlap >> log; sleep 0.3; rmdir held 2>/dev/null; true'
+",
+    );
+    let (first, second) = tokio::join!(
+        server.run_lint(run_lint("guarded"), CancellationToken::new()),
+        server.run_lint(run_lint("guarded"), CancellationToken::new()),
+    );
+    assert!(!dir.path().join("log").exists(), "the runs overlapped");
+    let queued: Vec<_> = [first, second]
+        .iter()
+        .map(|result| json(result.as_ref().unwrap())["queued_ms"].as_u64())
+        .collect();
+    assert!(queued.contains(&None), "{queued:?}");
+    assert!(queued.iter().flatten().any(|&ms| ms >= 200), "{queued:?}");
 }
 
 /// Stage everything in the work tree and commit it.
