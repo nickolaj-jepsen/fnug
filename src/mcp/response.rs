@@ -194,6 +194,8 @@ pub(super) struct Run<'a> {
     pub verbose: bool,
     /// How long it waited for another run to finish, if it had to.
     pub queued: Option<Duration>,
+    /// Whether any command has `auto.git` or `auto.always`, the rules `run_lints` selects by.
+    pub selectable: bool,
 }
 
 /// The result of a run: the summary, then a text block per command whose output is shown.
@@ -209,6 +211,7 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
         root,
         verbose,
         queued,
+        selectable,
     } = *run;
     // Reports are in plan order
     let entries: Vec<(&PlannedCommand, &CommandReport)> =
@@ -232,7 +235,7 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
     let counts = report.counts();
     let summary = Summary {
         ok: report.success(),
-        message: message(scope, plan, report),
+        message: message(scope, plan, report, selectable),
         total: counts.total,
         passed: counts.passed,
         failed: counts.failed,
@@ -432,9 +435,13 @@ fn list_ids(ids: &[String]) -> String {
 }
 
 /// Why a run has no commands, and what to try instead.
-fn nothing_selected(scope: &RunScope, plan: &Plan) -> String {
+fn nothing_selected(scope: &RunScope, plan: &Plan, selectable: bool) -> String {
     let manual = &plan.excluded_manual;
     match scope {
+        RunScope::Changes { .. } if !selectable => "No command has auto.git or auto.always \
+            set, so run_lints never selects any. run_all runs every command, and run_lint \
+            runs one."
+            .into(),
         RunScope::Changes { base, .. } => {
             let changed = plan.changed_files;
             let mut message = match changed {
@@ -476,10 +483,10 @@ fn nothing_selected(scope: &RunScope, plan: &Plan) -> String {
 }
 
 /// One sentence or two on how the run went, for the summary.
-fn message(scope: &RunScope, plan: &Plan, report: &RunReport) -> String {
+fn message(scope: &RunScope, plan: &Plan, report: &RunReport, selectable: bool) -> String {
     let counts = report.counts();
     if counts.total == 0 {
-        return nothing_selected(scope, plan);
+        return nothing_selected(scope, plan, selectable);
     }
     let mut message = outcome_message(report);
     if !plan.excluded_manual.is_empty() {
