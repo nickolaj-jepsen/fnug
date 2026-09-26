@@ -14,7 +14,6 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 - **File watching** — monitor the file system and re-select commands when files change
 - **Terminal emulation with scrollback** — full PTY support for interactive commands and long output
 - **Headless mode** (`fnug check`) — run selected commands without the TUI, in a pre-commit hook or in CI
-- **Headless mode** (`fnug check`) — run selected commands without the TUI, useful for CI
 - **Config scaffolding** (`fnug init`) — write a starter `.fnug.yaml` for the Rust, Python, Node, Go or Nix tooling it finds
 - **Setup wizard** (`fnug setup`) — install a pre-commit hook that runs `fnug check` and add the MCP server to your editor
 - **Command dependencies** — define `depends_on` to control execution order
@@ -78,7 +77,6 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | ------------- | --------------------------------------------------------------- |
 | `fnug`        | Launch the TUI                                                  |
 | `fnug check`  | Run selected commands headlessly; see [What `fnug check` runs](#what-fnug-check-runs) |
-| `fnug check`  | Run selected commands headlessly (exit code reflects pass/fail) |
 | `fnug init [dir]` | Create a `.fnug.yaml` for the project's tooling             |
 | `fnug setup`  | Interactive wizard: git pre-commit hook and editor MCP config   |
 | `fnug mcp`    | Run an MCP server over stdio                                    |
@@ -163,6 +161,7 @@ If the checkout belongs to another user than the one running fnug, as in some co
 - When a command changed a file that also has unstaged changes, as a formatter can, fnug discards the command's changes to that file to put yours back, and says so. Its changes to other files stay. The command has already failed for changing files.
 - fnug deletes the patch once the files it changes hold exactly your changes again. Otherwise it keeps the patch and prints its path.
 - A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that repository puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Until then, other `fnug check` runs warn that changes are still set aside. Only one such run works on a repository at a time; another one exits with 2.
+
 ### Init
 
 `fnug init` writes a `.fnug.yaml` in the current directory, or in the directory you pass, with a group of commands for each kind of tooling it finds there:
@@ -181,8 +180,7 @@ It never replaces an existing config unless you pass `--force`, which rewrites t
 
 ### Setup
 
-`fnug setup` installs a git pre-commit hook that runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`, which checks what is being committed (see [Checking what is committed](#checking-what-is-committed)), and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it.
-`fnug setup` installs a git pre-commit hook that runs `fnug check`, and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it. When neither the directory nor a parent has a config, setup first offers to create one with the groups `fnug init` would propose, and writes it before the hook and the editor entries that run it.
+`fnug setup` installs a git pre-commit hook that runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`, which checks what is being committed (see [Checking what is committed](#checking-what-is-committed)), and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it. When neither the directory nor a parent has a config, setup first offers to create one with the groups `fnug init` would propose, and writes it before the hook and the editor entries that run it.
 
 The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead. A `pre-commit` that is a symlink counts as the file it links to: setup edits that file, shows it in the list of changes, and prints the lines instead if it is outside the repository.
 
