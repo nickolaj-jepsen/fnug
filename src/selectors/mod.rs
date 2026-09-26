@@ -105,7 +105,8 @@ pub enum SelectionIssue {
     /// The since-base scope's `base` can't be resolved in this repo, or shares no history with
     /// its `HEAD`, so nothing in it selects. Fatal in the repo of the working directory, or in
     /// any repo when that one isn't scanned; elsewhere, such as in another repo of a workspace,
-    /// its commands just aren't selected.
+    /// its commands just aren't selected. With no repo to scan, the working directory's repo is
+    /// checked all the same.
     BaseRefNotFound {
         repo: PathBuf,
         base: String,

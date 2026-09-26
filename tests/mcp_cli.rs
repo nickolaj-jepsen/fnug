@@ -215,6 +215,33 @@ fn base_outside_repo_is_an_error() {
 }
 
 #[test]
+fn bad_base_is_an_error_without_git_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        "name: root\ncommands:\n  - name: build\n    cmd: 'true'\n    auto:\n      always: true\n",
+    );
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    common::commit_all(&repo);
+    let mut server = Server::start(dir.path());
+
+    // No command has auto.git, so no repo is scanned, yet the base must still resolve
+    for (id, tool) in [(2, "run_lints"), (3, "list_lints")] {
+        server.call(id, tool, &json!({"base": "no-such-ref"}));
+        let result = &server.response(id)["result"];
+        assert_eq!(result["isError"], true, "{tool}: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("base 'no-such-ref'"), "{tool}: {text}");
+    }
+    server.call(4, "run_lints", &json!({"base": "HEAD"}));
+    let result = &server.response(4)["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let summary: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(summary["passed"], 1, "{summary}");
+}
+
+#[test]
 fn closing_stdin_stops_commands_and_server() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(dir.path(), HANG_CONFIG);
