@@ -329,7 +329,7 @@ async fn run_command<H: ExecHook>(
     stop: &CancellationToken,
 ) -> Ended {
     let token = hook.before(cmd);
-    let invocation = shell_invocation(&cmd.command, cwd);
+    let invocation = shell_invocation(&cmd.command, cwd, cmd.files.as_deref());
     let timeout = cmd
         .command
         .timeout

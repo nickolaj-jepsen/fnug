@@ -1086,3 +1086,142 @@ fn allow_modifications_passes() {
         "x = 1\n"
     );
 }
+
+/// Each command writes the files it was given to `.git/<name>.out`.
+const FILES: &str = r#"
+name: root
+commands:
+  - name: here
+    cwd: src
+    cmd: 'printf "%s" "${FNUG_FILES-unset}" > ../.git/here.out'
+    auto:
+      git: true
+      path: [.]
+  - name: elsewhere
+    cwd: docs
+    cmd: 'printf "%s" "${FNUG_FILES-unset}" > ../.git/elsewhere.out'
+    auto:
+      git: true
+      path: [../src]
+  - name: quoted
+    cmd: 'for f in {files}; do echo "[$f]"; done > .git/quoted.out'
+    auto:
+      git: true
+      path: [src]
+"#;
+
+/// A repo with [`FILES`], where two files in `src` changed, one was deleted and one is new.
+/// Returns its canonical path.
+fn files_repo(dir: &Path) -> std::path::PathBuf {
+    let root = dir.canonicalize().unwrap();
+    let repo = git2::Repository::init(&root).unwrap();
+    common::write_config(&root, FILES);
+    for file in ["src/a.py", "src/lib/b.py", "src/gone.py", "docs/x.md"] {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "old\n").unwrap();
+    }
+    common::commit_all(&repo);
+    std::fs::write(root.join("src/a.py"), "new\n").unwrap();
+    std::fs::write(root.join("src/lib/b.py"), "new\n").unwrap();
+    std::fs::remove_file(root.join("src/gone.py")).unwrap();
+    std::fs::write(root.join("src/new file.py"), "new\n").unwrap();
+    root
+}
+
+fn out(root: &Path, name: &str) -> String {
+    std::fs::read_to_string(root.join(format!(".git/{name}.out"))).unwrap()
+}
+
+#[test]
+fn fnug_files_env_relative_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = files_repo(dir.path());
+
+    let output = check(&root, &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(out(&root, "here"), "a.py\nlib/b.py\nnew file.py");
+    // Absolute outside the command's cwd
+    let src = root.join("src");
+    assert_eq!(
+        out(&root, "elsewhere"),
+        format!(
+            "{}\n{}\n{}",
+            src.join("a.py").display(),
+            src.join("lib/b.py").display(),
+            src.join("new file.py").display()
+        )
+    );
+}
+
+#[test]
+fn files_placeholder_quotes_spaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = files_repo(dir.path());
+    std::fs::write(root.join("src/it's.py"), "new\n").unwrap();
+
+    let output = check(&root, &["quoted"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    // Named as a target, so it has no matched files
+    assert_eq!(out(&root, "quoted"), "[src]\n");
+
+    let output = check(&root, &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        out(&root, "quoted"),
+        "[src/a.py]\n[src/it's.py]\n[src/lib/b.py]\n[src/new file.py]\n"
+    );
+}
+
+#[test]
+fn deleted_files_excluded() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = files_repo(dir.path());
+
+    let output = check(&root, &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!out(&root, "here").contains("gone"));
+    assert!(!out(&root, "quoted").contains("gone"));
+
+    // Only deletions: the command is selected, with nothing to pass
+    std::fs::write(root.join("src/a.py"), "old\n").unwrap();
+    std::fs::write(root.join("src/lib/b.py"), "old\n").unwrap();
+    std::fs::remove_file(root.join("src/new file.py")).unwrap();
+    let output = check(&root, &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(out(&root, "here"), "unset");
+    assert_eq!(out(&root, "quoted"), "[src]\n");
+}
+
+#[test]
+fn files_fallback_to_auto_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = files_repo(dir.path());
+
+    // Every command, none selected by its files; a FNUG_FILES fnug got isn't passed on
+    let output = fnug_command(&root, &["--all"])
+        .env("FNUG_FILES", "stale")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(out(&root, "here"), "unset");
+    assert_eq!(out(&root, "elsewhere"), "unset");
+    assert_eq!(out(&root, "quoted"), "[src]\n");
+}
+
+#[test]
+fn oversize_list_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = files_repo(dir.path());
+    let name = "f".repeat(200);
+    for i in 0..600 {
+        std::fs::write(root.join(format!("src/{name}{i}")), "").unwrap();
+    }
+
+    let output = check(&root, &["--mute-success"]);
+    let err = stderr(&output);
+    assert!(output.status.success(), "{err}");
+    assert!(err.contains("too many to pass"), "{err}");
+    assert_eq!(out(&root, "here"), "unset");
+    assert_eq!(out(&root, "quoted"), "[src]\n");
+}
