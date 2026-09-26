@@ -12,6 +12,21 @@ fn map_color(color: vt100::Color) -> Color {
     }
 }
 
+/// The text attributes of a vt100 cell as ratatui modifiers
+fn modifiers(cell: &vt100::Cell) -> Modifier {
+    [
+        (cell.bold(), Modifier::BOLD),
+        (cell.dim(), Modifier::DIM),
+        (cell.italic(), Modifier::ITALIC),
+        (cell.underline(), Modifier::UNDERLINED),
+        (cell.inverse(), Modifier::REVERSED),
+        (cell.strikethrough(), Modifier::CROSSED_OUT),
+    ]
+    .into_iter()
+    .filter(|(set, _)| *set)
+    .fold(Modifier::empty(), |all, (_, modifier)| all | modifier)
+}
+
 /// Widget that renders a `vt100::Screen` into a ratatui buffer
 pub struct PseudoTerminal<'a> {
     screen: &'a vt100::Screen,
@@ -38,53 +53,34 @@ impl Widget for PseudoTerminal<'_> {
             .saturating_sub(area.height)
             .min(screen_rows.saturating_sub(area.height));
 
+        // Reused for every cell, so a grapheme with combining marks needs no allocation
+        let mut symbol = String::new();
         for row in 0..rows {
             for col in 0..cols {
-                let cell = self.screen.cell(row + row_offset, col);
-                if let Some(cell) = cell {
-                    let x = area.x + col;
-                    let y = area.y + row;
-
-                    if x >= area.right() || y >= area.bottom() {
-                        continue;
-                    }
-
-                    let Some(buf_cell) = buf.cell_mut((x, y)) else {
-                        continue;
-                    };
-
-                    let ch = cell.contents();
-                    if ch.is_empty() {
-                        buf_cell.set_char(' ');
-                    } else {
-                        // Set the first char; for wide chars this handles the main cell
-                        let mut chars = ch.chars();
-                        if let Some(c) = chars.next() {
-                            buf_cell.set_char(c);
-                        }
-                    }
-
-                    let mut modifier = Modifier::empty();
-                    if cell.bold() {
-                        modifier |= Modifier::BOLD;
-                    }
-                    if cell.italic() {
-                        modifier |= Modifier::ITALIC;
-                    }
-                    if cell.underline() {
-                        modifier |= Modifier::UNDERLINED;
-                    }
-                    if cell.inverse() {
-                        modifier |= Modifier::REVERSED;
-                    }
-
-                    buf_cell.set_style(
-                        Style::default()
-                            .fg(map_color(cell.fgcolor()))
-                            .bg(map_color(cell.bgcolor()))
-                            .add_modifier(modifier),
-                    );
+                let Some(cell) = self.screen.cell(row + row_offset, col) else {
+                    continue;
+                };
+                // The wide character in the cell before covers it
+                if cell.is_wide_continuation() {
+                    continue;
                 }
+                let Some(buf_cell) = buf.cell_mut((area.x + col, area.y + row)) else {
+                    continue;
+                };
+
+                symbol.clear();
+                symbol.extend(cell.chars());
+                if symbol.is_empty() {
+                    buf_cell.set_char(' ');
+                } else {
+                    buf_cell.set_symbol(&symbol);
+                }
+                buf_cell.set_style(
+                    Style::default()
+                        .fg(map_color(cell.fgcolor()))
+                        .bg(map_color(cell.bgcolor()))
+                        .add_modifier(modifiers(cell)),
+                );
             }
         }
 
@@ -135,6 +131,24 @@ mod tests {
             draw(&output, 5),
             ["line6", "line7", "line8", "line9", "line10"]
         );
+    }
+
+    #[test]
+    fn widget_renders_dim_strike_grapheme() {
+        use ratatui::style::Modifier;
+
+        let mut parser = vt100::Parser::new(2, 10, 0);
+        parser.process("\x1b[2mD\x1b[0m\x1b[9mS\x1b[0me\u{301}中x".as_bytes());
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        PseudoTerminal::new(parser.screen()).render(area, &mut buf);
+
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::CROSSED_OUT));
+        assert!(buf[(1, 0)].modifier.contains(Modifier::CROSSED_OUT));
+        assert_eq!(buf[(2, 0)].symbol(), "e\u{301}");
+        assert_eq!(buf[(3, 0)].symbol(), "中");
+        assert_eq!(buf[(5, 0)].symbol(), "x");
     }
 
     #[test]
