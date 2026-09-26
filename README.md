@@ -541,27 +541,36 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 
 ## Keyboard Shortcuts
 
-| Key       | Context  | Action                            |
-| --------- | -------- | --------------------------------- |
-| `j` / `↓` | Tree     | Move down                         |
-| `k` / `↑` | Tree     | Move up                           |
-| `h` / `←` | Tree     | Collapse group / Deselect command |
-| `l` / `→` | Tree     | Expand group / Select command     |
-| `Space`   | Tree     | Toggle expand/select              |
-| `Enter`   | Tree     | Run all selected commands         |
-| `r`       | Tree     | Run current command               |
-| `s`       | Tree     | Stop current command              |
-| `c`       | Tree     | Clear current command             |
-| `g`       | Tree     | Git auto-select                   |
-| `/`       | Tree     | Search/filter commands            |
-| `Esc`     | Search   | Clear search                      |
-| `L`       | Tree     | Toggle log panel                  |
-| `Tab`     | Tree     | Type into the running command     |
-| `Ctrl+]`  | Terminal | Back to tree                      |
-| `Esc`     | Terminal | Back to tree, unless full-screen  |
-| `Ctrl+R`  | Tree     | Toggle fullscreen                 |
-| `Ctrl+C`  | Tree     | Quit                              |
-| `q`       | Tree     | Quit                              |
+| Key            | Context    | Action                   |
+| -------------- | ---------- | ------------------------ |
+| `j` / `↓`      | Tree       | Move down                |
+| `k` / `↑`      | Tree       | Move up                  |
+| `h` / `←`      | Tree       | Collapse / deselect      |
+| `l` / `→`      | Tree       | Expand / select          |
+| `Space`        | Tree       | Toggle selection         |
+| `E`            | Tree       | Expand all groups        |
+| `W`            | Tree       | Collapse all groups      |
+| `/`            | Tree       | Search and filter        |
+| `Enter`        | Tree       | Run selected commands    |
+| `r`            | Tree       | Run command or group     |
+| `s`            | Tree       | Stop command             |
+| `x`            | Tree       | Clear command            |
+| `g`            | Tree       | Select by git changes    |
+| `c`            | Tree       | Copy output              |
+| `Shift+↑/↓`    | Tree       | Scroll output            |
+| `{` / `}`      | Tree       | Output top / bottom      |
+| `Tab`          | Tree       | Type into the command    |
+| `Ctrl+R`       | Tree       | Toggle fullscreen        |
+| `L`            | Tree       | Toggle log panel         |
+| `?`            | Tree       | Toggle this help         |
+| `q` / `Ctrl+C` | Tree       | Quit                     |
+| `Enter`        | Search     | Keep the filter          |
+| `Esc`          | Search     | Clear the search         |
+| `Ctrl+]`       | Terminal   | Back to the tree         |
+| `Esc`          | Terminal   | Back, unless full-screen |
+| `Esc`          | Fullscreen | Exit fullscreen          |
+
+`?` shows this list in the TUI. `Shift+Home` and `Shift+End` also jump to the top and bottom of the output. While a command has the keyboard, every key but `Ctrl+]` goes to it, and so does `Esc` if it runs a full-screen program.
 
 ### Mouse
 

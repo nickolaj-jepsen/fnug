@@ -294,6 +294,8 @@ pub struct App {
     pub(super) output_notify: Arc<Notify>,
     /// Whether the help overlay is shown
     pub show_help: bool,
+    /// Lines the help overlay is scrolled down, when it doesn't fit
+    pub(super) help_scroll: usize,
     /// Written to the terminal after the next draw; see [`take_outbox`](Self::take_outbox)
     pub(super) outbox: Vec<Outbound>,
 }
@@ -384,6 +386,7 @@ impl App {
             batch_run_ids: None,
             output_notify: Arc::new(Notify::new()),
             show_help: false,
+            help_scroll: 0,
             outbox: Vec::new(),
         };
         app.rebuild_visible_nodes();
@@ -1228,6 +1231,7 @@ impl App {
             }
             ToolbarAction::ShowHelp => {
                 self.show_help = !self.show_help;
+                self.help_scroll = 0;
             }
         }
     }

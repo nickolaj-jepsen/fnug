@@ -1,0 +1,5 @@
+---
+source: src/tui/toolbar.rs
+expression: text.trim_end()
+---
+ ENTER  Run selected (1)   SPACE  Deselect   r  Run   c  Copy            ?  Help

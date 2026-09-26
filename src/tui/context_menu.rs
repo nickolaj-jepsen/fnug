@@ -211,7 +211,7 @@ pub fn build_command_menu(selected: bool, status: &CommandStatus) -> Vec<Context
         },
         ContextMenuItem {
             label: "Clear",
-            hint: "",
+            hint: "x",
             action: ContextMenuAction::Clear,
             enabled: true,
         },
@@ -231,13 +231,13 @@ pub fn build_terminal_menu(
     if has_process {
         items.push(ContextMenuItem {
             label: "Scroll to top",
-            hint: "",
+            hint: "{",
             action: ContextMenuAction::ScrollToTop,
             enabled: has_scrollback,
         });
         items.push(ContextMenuItem {
             label: "Scroll to bottom",
-            hint: "",
+            hint: "}",
             action: ContextMenuAction::ScrollToBottom,
             enabled: is_scrolled,
         });
@@ -270,7 +270,7 @@ pub fn build_terminal_menu(
     });
     items.push(ContextMenuItem {
         label: "Clear",
-        hint: "",
+        hint: "x",
         action: ContextMenuAction::Clear,
         enabled: has_process,
     });
