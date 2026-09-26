@@ -152,6 +152,44 @@ def test_check_flag_mapping(fake_fnug):
     ]
 
 
+def test_check_selection_and_run_options(fake_fnug):
+    fnug.check(
+        targets=["lint", "-odd"],
+        jobs=0,
+        timeout="5m",
+        allow_modifications=True,
+    )
+
+    assert fake_fnug.last()["argv"] == [
+        "check",
+        "--allow-modifications",
+        "--jobs",
+        "0",
+        "--timeout",
+        "5m",
+        "--",
+        "lint",
+        "-odd",
+    ]
+
+    fnug.check(all_=True, include_manual=True)
+    assert fake_fnug.last()["argv"] == ["check", "--all", "--include-manual"]
+
+
+def test_check_staged_stash_and_base(fake_fnug):
+    fnug.check(staged=True, stash=True, timeout=90)
+    assert fake_fnug.last()["argv"] == [
+        "check",
+        "--staged",
+        "--stash",
+        "--timeout",
+        "90",
+    ]
+
+    fnug.check(base="origin/main")
+    assert fake_fnug.last()["argv"] == ["check", "--base", "origin/main"]
+
+
 def test_start_no_workspace(fake_fnug):
     fnug.start(no_workspace=True)
 
