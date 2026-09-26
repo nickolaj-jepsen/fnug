@@ -56,6 +56,8 @@ pub struct ProcessInstance {
     pub exit: Option<ExitInfo>,
     /// Distinguishes this run's events from those of earlier runs of the same command
     pub generation: u64,
+    /// The command as it was started, its cwd resolved
+    pub(super) command: Command,
 }
 
 /// How long a stopped (or restarted, or cleared) command gets before it is killed

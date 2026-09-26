@@ -1,7 +1,7 @@
 //! Reloading the config while the TUI runs, keeping what it can by command and group id.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use log::{info, warn};
@@ -11,7 +11,7 @@ use crate::commands::group::CommandGroup;
 use crate::process::StopSignal;
 use crate::{LoadOptions, LoadedConfig};
 
-use super::app::{App, AppEvent};
+use super::app::{App, AppEvent, ProcessInstance};
 use super::selection::SelectionReason;
 use super::status::StatusLevel;
 use super::watcher;
@@ -23,9 +23,11 @@ fn group_ids(group: &CommandGroup, ids: &mut HashSet<String>) {
     }
 }
 
-/// Whether a running `old` would behave like `new`, so it needs no restart
-fn same_process(old: &Command, new: &Command) -> bool {
-    old.cmd == new.cmd && old.cwd == new.cwd && old.env == new.env
+/// Whether `proc` runs what `new` would, with `cwd` as the config's directory, so it needs no
+/// restart
+fn runs_as(proc: &ProcessInstance, new: &Command, cwd: &Path) -> bool {
+    let started = &proc.command;
+    started.cmd == new.cmd && started.cwd == new.effective_cwd(cwd) && started.env == new.env
 }
 
 impl App {
@@ -134,10 +136,7 @@ impl App {
             .filter(|new| {
                 self.processes
                     .get(&new.id)
-                    .is_some_and(|p| p.terminal.is_running())
-                    && self
-                        .find_command(&new.id)
-                        .is_some_and(|old| !same_process(&old, new))
+                    .is_some_and(|p| p.terminal.is_running() && !runs_as(p, new, &loaded.cwd))
             })
             .map(|c| c.name.clone())
             .collect();
@@ -289,6 +288,29 @@ mod tests {
             status(&app),
             "Config reloaded; restart a to apply the changes"
         );
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_reminder_follows_what_runs() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = shell_app(dir.path(), &[("a", "exec sleep 30")]);
+        app.run_command("a", AREA);
+        let restart = "Config reloaded; restart a to apply the changes";
+
+        app.apply_config(loaded(dir.path(), &[("a", "exec sleep 31")]));
+        assert_eq!(status(&app), restart);
+        // Back to what it runs
+        app.apply_config(loaded(dir.path(), &[("a", "exec sleep 30")]));
+        assert_eq!(status(&app), "Config reloaded");
+        // Changed again, then left alone while it still runs the old one
+        app.apply_config(loaded(dir.path(), &[("a", "exec sleep 31")]));
+        let commands = [("a", "exec sleep 31"), ("b", "true")];
+        app.apply_config(loaded(dir.path(), &commands));
+        assert_eq!(status(&app), restart);
         app.shutdown().await;
     }
 
