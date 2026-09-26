@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from fnug.config import Auto, Command, CommandGroup, Config, WorkspaceOptions
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
 __all__ = [
     "Auto",
@@ -173,23 +173,45 @@ def check(  # noqa: PLR0913
     config: Config | None = None,
     *,
     config_path: str | Path | None = None,
+    targets: Sequence[str] = (),
+    all_: bool = False,
+    include_manual: bool = False,
+    base: str | None = None,
+    staged: bool = False,
+    stash: bool = False,
     fail_fast: bool = False,
     no_tui: bool = False,
     mute_success: bool = False,
-    all_: bool = False,
+    jobs: int | None = None,
+    timeout: str | int | None = None,
+    allow_modifications: bool = False,
     no_workspace: bool = False,
     log_file: str | Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run fnug in headless check mode.
 
+    Without ``targets``, ``all_``, ``base`` or ``staged``, it runs the commands that
+    uncommitted changes select. Exit code 0 means every command passed, 1 that a
+    check failed, and 2 that fnug couldn't run them.
+
     Args:
         config: A Config to use. It is written to a temporary file, and its root
             ``cwd`` is resolved against the caller's working directory (the default).
         config_path: Path to an existing .fnug.yaml file.
+        targets: Run these commands, by id or name, after their dependencies.
+        all_: Run every command.
+        include_manual: Also run commands with ``auto.check: false``.
+        base: Select by the changes since the merge base of HEAD and this ref,
+            such as ``"origin/main"``.
+        staged: Select by the changes staged for the next commit.
+        stash: With ``staged``, set unstaged changes aside while commands run.
         fail_fast: Stop on first failure.
         no_tui: Never prompt to open the TUI on failure.
         mute_success: Suppress output for commands that pass.
-        all_: Pass ``--all`` to ``fnug check``.
+        jobs: Run up to this many commands at once; 0 means one per CPU.
+        timeout: Kill commands that run longer than this, in seconds or as a
+            duration such as ``"5m"``, unless their config sets ``timeout``.
+        allow_modifications: Don't fail commands that change tracked files.
         no_workspace: Don't resolve upward to a parent workspace root.
         log_file: Path for file logging.
 
@@ -207,14 +229,25 @@ def check(  # noqa: PLR0913
         no_workspace=no_workspace,
     )
     args.append("check")
-    if fail_fast:
-        args.append("--fail-fast")
-    if no_tui:
-        args.append("--no-tui")
-    if mute_success:
-        args.append("--mute-success")
-    if all_:
-        args.append("--all")
+    flags = {
+        "--fail-fast": fail_fast,
+        "--no-tui": no_tui,
+        "--mute-success": mute_success,
+        "--all": all_,
+        "--include-manual": include_manual,
+        "--staged": staged,
+        "--stash": stash,
+        "--allow-modifications": allow_modifications,
+    }
+    args.extend(flag for flag, enabled in flags.items() if enabled)
+    if base is not None:
+        args.extend(["--base", base])
+    if jobs is not None:
+        args.extend(["--jobs", str(jobs)])
+    if timeout is not None:
+        args.extend(["--timeout", str(timeout)])
+    if targets:
+        args.extend(["--", *targets])
     return _run_with_config(config, *args)
 
 
