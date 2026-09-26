@@ -13,7 +13,8 @@ Nix dev environment via `flake.nix` + `direnv`. All tools (rust toolchain, ruff,
 cargo fmt                                              # Format
 cargo clippy --fix --allow-dirty --allow-staged        # Lint (auto-fix)
 cargo clippy --all-targets -- -D warnings              # Lint (check only)
-cargo test                                             # Run tests
+cargo nextest run                                      # Run tests (cargo test also works)
+cargo test --doc                                       # Doctests (nextest skips them)
 cargo build                                            # Debug build
 
 # Nix
