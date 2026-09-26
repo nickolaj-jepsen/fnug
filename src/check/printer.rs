@@ -95,8 +95,14 @@ impl Printer {
         }
     }
 
-    pub(super) fn nothing_selected(&self) {
-        eprintln!("{}", self.sty.dim("No commands selected."));
+    pub(super) fn nothing_selected(&self, configured: usize) {
+        eprintln!(
+            "{}",
+            self.sty.dim(&format!(
+                "No commands selected ({configured} configured; use --all, --base <ref>, or name \
+                 commands)"
+            ))
+        );
     }
 
     pub(super) fn event(&mut self, event: &RunEvent) {
