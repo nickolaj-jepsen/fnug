@@ -25,6 +25,7 @@
             lib,
             rustPlatform,
             pkg-config,
+            git,
           }: let
             cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
           in
@@ -36,6 +37,8 @@
               cargoLock.lockFile = ./Cargo.lock;
 
               nativeBuildInputs = [pkg-config];
+              # check --stash tests drive the git CLI
+              nativeCheckInputs = [git];
 
               meta = {
                 description = "A nice lint runner";
