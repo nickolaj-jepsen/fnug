@@ -244,6 +244,8 @@ async fn run_event_loop(
                     }
                     Some(Ok(Event::Resize(_w, _h))) => {
                         needs_render = true;
+                        // A divider drag whose release got lost would hold back the PTY resize
+                        app.mouse.resizing = false;
                     }
                     Some(Err(e)) => {
                         error!("Event error: {e}");

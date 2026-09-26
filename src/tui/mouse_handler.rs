@@ -70,6 +70,13 @@ impl App {
         reason = "mouse handler covers all mouse interactions in one function"
     )]
     pub fn handle_mouse(&mut self, mouse: MouseEvent, tree_area: Rect, terminal_area: Rect) {
+        // Only a drag shows the button is still down: its release can land on the toolbar or
+        // outside the window, and a stuck divider drag would hold back every PTY resize
+        if !matches!(mouse.kind, MouseEventKind::Drag(_)) {
+            self.mouse.resizing = false;
+            self.mouse.scrollbar_dragging = false;
+        }
+
         // Handle context menu interactions when open
         if let Some(ref menu) = self.context_menu {
             let menu_area = menu.area;
@@ -146,7 +153,13 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(event::MouseButton::Left) => {
-                match mouse.column.cmp(&tree_area.width) {
+                // Without a tree, as in fullscreen, there is no divider either
+                let side = if tree_area.width == 0 {
+                    std::cmp::Ordering::Greater
+                } else {
+                    mouse.column.cmp(&tree_area.width)
+                };
+                match side {
                     std::cmp::Ordering::Less => {
                         self.focus = Focus::Tree;
                         if let Some(row) = self.node_at_row(mouse.row, tree_area) {
@@ -235,10 +248,6 @@ impl App {
                 {
                     Self::scroll_to_scrollbar_position(proc, mouse.row, terminal_area);
                 }
-            }
-            MouseEventKind::Up(event::MouseButton::Left) => {
-                self.mouse.resizing = false;
-                self.mouse.scrollbar_dragging = false;
             }
             MouseEventKind::Moved => {
                 self.mouse.hover_row = if mouse.column < tree_area.width {
