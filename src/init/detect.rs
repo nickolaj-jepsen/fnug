@@ -263,10 +263,12 @@ fn go(project: &Project) -> Option<Proposal> {
             &["go.mod"],
             &[r"\.go$", r"(^|/)go\.(mod|sum)$"],
             vec![
-                // gofmt -l exits 0 when it lists unformatted files
+                // gofmt -l exits 0 when it lists unformatted files. The files are those
+                // `go vet ./...` checks: not in vendor/, testdata/, or a directory whose name
+                // starts with . or _
                 command(
                     "gofmt",
-                    r#"files=$(gofmt -l .) && test -z "$files" || { echo "$files"; exit 1; }"#,
+                    r#"files=$(find . -type d \( -name vendor -o -name testdata -o -name '.?*' -o -name '_*' \) -prune -o -type f -name '*.go' -exec gofmt -l {} +) && test -z "$files" || { echo "$files"; exit 1; }"#,
                 ),
                 command("vet", "go vet ./..."),
                 command("test", "go test ./..."),
