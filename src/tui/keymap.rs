@@ -78,6 +78,7 @@ pub const KEYMAP: &[KeyHelp] = &[
     key("s", KeyContext::Run, "Stop command"),
     key("x", KeyContext::Run, "Clear command"),
     key("g", KeyContext::Run, "Select by git changes"),
+    key("F5", KeyContext::Run, "Reload the config"),
     key("c", KeyContext::Output, "Copy output"),
     key("Shift+↑/↓", KeyContext::Output, "Scroll output"),
     key("{ / }", KeyContext::Output, "Output top / bottom"),

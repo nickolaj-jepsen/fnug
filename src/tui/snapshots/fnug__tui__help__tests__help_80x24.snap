@@ -20,7 +20,7 @@ expression: screen
   │s           Stop command              Esc         Clear the search        │
   │x           Clear command             Typing into a command               │
   │g           Select by git changes     Ctrl+]      Back to the tree        │
-  │                                      Esc         Back, unless full-screen│
+  │F5          Reload the config         Esc         Back, unless full-screen│
   │                                      Fullscreen                          │
   │                                      Esc         Exit fullscreen         │
   └──────────────────────────────────────────────────────────────────────────┘

@@ -1,6 +1,5 @@
 use std::fmt::Display;
 use std::io;
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crossterm::clipboard::CopyToClipboard;
@@ -10,98 +9,15 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 
 use fnug::check::CheckResult;
-use fnug::commands::group::CommandGroup;
 use fnug::logger::LoggerHandle;
-use fnug::selectors::watch::{WatchError, WatchReport, watch_commands};
 use fnug::tui::app::{App, AppEvent, Outbound};
-use fnug::tui::status::{StatusLevel, watch_problems};
-
-/// Start a file watcher that forwards watch events to the app event channel.
-/// The watcher setup (inotify registration) runs on a blocking thread to avoid
-/// stalling TUI startup when watching many/large directories.
-fn start_file_watcher(
-    config: &CommandGroup,
-    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
-) -> tokio::task::JoinHandle<()> {
-    let all_commands: Vec<_> = config.all_commands().into_iter().cloned().collect();
-
-    tokio::spawn(async move {
-        // Setup watcher on a blocking thread (registering inotify watches for
-        // large directory trees is slow and would block the TUI event loop).
-        let result = tokio::task::spawn_blocking(move || watch_commands(all_commands)).await;
-
-        let status = |text: String| AppEvent::Status {
-            text,
-            level: StatusLevel::Warn,
-        };
-        let mut handle = match result {
-            Ok(Ok(handle)) => {
-                log_watch_report(&handle.report);
-                if let Some(problems) = watch_problems(&handle.report) {
-                    let _ = event_tx.send(status(problems)).await;
-                }
-                handle
-            }
-            Ok(Err(WatchError::NoWatchableCommands)) => {
-                debug!("File watcher not started: no command uses auto.watch");
-                return;
-            }
-            Ok(Err(e)) => {
-                if let WatchError::NothingWatched(report) = &e {
-                    log_watch_report(report);
-                }
-                warn!("File watcher not started: {e}");
-                let _ = event_tx
-                    .send(status(format!("File watcher not started: {e}")))
-                    .await;
-                return;
-            }
-            Err(e) => {
-                warn!("File watcher task failed: {e}");
-                return;
-            }
-        };
-
-        // Forward watch events to app. The handle keeps watching while this scope lives.
-        while let Some(matches) = handle.events.recv().await {
-            if event_tx
-                .send(AppEvent::WatcherTriggered(matches))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    })
-}
-
-fn log_watch_report(report: &WatchReport) {
-    for path in &report.missing {
-        warn!("Not watching {}: it does not exist", path.display());
-    }
-    for (path, error) in &report.failed {
-        warn!("Could not watch {}: {error}", path.display());
-    }
-    if report.limit_reached {
-        warn!(
-            "Ran out of file watches, so some directories are not watched; \
-             on Linux, raise fs.inotify.max_user_watches"
-        );
-    }
-    if !report.roots.is_empty() {
-        info!(
-            "File watcher started: {} paths, {} directories",
-            report.roots.len(),
-            report.watched_dirs
-        );
-    }
-}
+use fnug::{LoadOptions, LoadedConfig};
 
 /// Log line for a panic on `thread`, or `None` for the main thread, which runs the UI.
 ///
@@ -114,9 +30,10 @@ fn worker_panic_message(thread: Option<&str>, panic: &impl Display) -> Option<St
     }
 }
 
+/// Run the TUI on `loaded`, reloading it with `reload` when its files change.
 pub async fn run(
-    config: CommandGroup,
-    cwd: PathBuf,
+    loaded: LoadedConfig,
+    reload: LoadOptions,
     logger: LoggerHandle,
     check_result: Option<CheckResult>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -140,7 +57,7 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(config.clone(), cwd, logger.buffer());
+    let mut app = App::new(loaded.root, loaded.cwd, logger.buffer());
     if let Some(ref result) = check_result {
         apply_check_result(&mut terminal, &mut app, result)?;
     } else {
@@ -153,11 +70,11 @@ pub async fn run(
         let _ = log_tx.try_send(AppEvent::LogUpdated);
     }));
 
-    let file_watcher_handle = start_file_watcher(&config, app.event_tx.clone());
+    app.start_file_watcher();
+    app.watch_config(reload, &loaded.sources);
 
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app).await;
-    file_watcher_handle.abort();
     if let Err(e) = &result {
         // Only to the log panel's buffer and the log file; stderr gets it once, below
         error!("Application error: {e}");

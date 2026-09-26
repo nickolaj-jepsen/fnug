@@ -48,7 +48,7 @@ pub(super) fn two_groups() -> App {
 }
 
 /// `root` holding a command per `(id, cmd)`, each running `cmd` in `dir`
-pub(super) fn shell_app(dir: &Path, commands: &[(&str, &str)]) -> App {
+pub(super) fn shell_group(dir: &Path, commands: &[(&str, &str)]) -> CommandGroup {
     let commands = commands
         .iter()
         .map(|(id, cmd)| Command {
@@ -57,8 +57,13 @@ pub(super) fn shell_app(dir: &Path, commands: &[(&str, &str)]) -> App {
             ..command(id)
         })
         .collect();
+    group("root", vec![], commands)
+}
+
+/// An app for [`shell_group`]
+pub(super) fn shell_app(dir: &Path, commands: &[(&str, &str)]) -> App {
     App::new(
-        group("root", vec![], commands),
+        shell_group(dir, commands),
         dir.to_path_buf(),
         LogBuffer::new(),
     )

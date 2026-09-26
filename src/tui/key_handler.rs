@@ -234,6 +234,7 @@ impl App {
                     self.clear_command(&id);
                 }
             }
+            KeyCode::F(5) => self.reload_config(),
             KeyCode::Char('/') => {
                 self.search = super::app::SearchState::Editing(String::new());
             }
