@@ -890,7 +890,8 @@ fn staged_index_override() {
     let output = select_with(&config, &with_index(other_repo.path().to_path_buf()));
     assert!(output.commands.is_empty());
 
-    // Only the staged scope reads it.
+    // Only the staged scope reads it: a diff against it would miss this unstaged edit.
+    std::fs::write(root.join("modified/keep.txt"), "two\n").unwrap();
     let output = select_with(
         &config,
         &SelectOptions {
@@ -898,7 +899,7 @@ fn staged_index_override() {
             ..with_index(repo.path().to_path_buf())
         },
     );
-    assert_eq!(output.ids().collect::<Vec<_>>(), ["added"]);
+    assert_eq!(output.ids().collect::<Vec<_>>(), ["modified", "added"]);
 }
 
 fn since(base: &str) -> SelectOptions {
