@@ -1,0 +1,28 @@
+---
+source: src/tui/help.rs
+expression: screen
+---
+▼ root (0/4)                  │No command running. Press 'r' to run a command.
+├─▼ alpha (0/2)               │
+│ ┌────────────────────────────── Keybindings ───────────────────────────────┐
+│ │Navigate                              Output                              │
+└─│j / ↓       Move down                 c           Copy output             │
+  │k / ↑       Move up                   Shift+↑/↓   Scroll output           │
+  │h / ←       Collapse / deselect       { / }       Output top / bottom     │
+  │l / →       Expand / select           Tab         Type into the command   │
+  │Space       Toggle selection          Ctrl+R      Toggle fullscreen       │
+  │E           Expand all groups         L           Toggle log panel        │
+  │W           Collapse all groups       Other                               │
+  │/           Search and filter         ?           Toggle this help        │
+  │Run                                   q / Ctrl+C  Quit                    │
+  │Enter       Run selected commands     Searching                           │
+  │r           Run command or group      Enter       Keep the filter         │
+  │s           Stop command              Esc         Clear the search        │
+  │x           Clear command             Typing into a command               │
+  │g           Select by git changes     Ctrl+]      Back to the tree        │
+  │                                      Esc         Back, unless full-screen│
+  │                                      Fullscreen                          │
+  │                                      Esc         Exit fullscreen         │
+  └──────────────────────────────────────────────────────────────────────────┘
+                              │
+ SPACE  Select all   r  Run all   g  Git select   ^R  Fullscreen         ?  Help

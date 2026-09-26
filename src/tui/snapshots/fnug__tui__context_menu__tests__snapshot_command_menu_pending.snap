@@ -7,4 +7,4 @@ expression: render_menu_text(&items)
 ~Restart
 ~Stop  [s]
 ~Copy output  [c]
- Clear
+ Clear  [x]

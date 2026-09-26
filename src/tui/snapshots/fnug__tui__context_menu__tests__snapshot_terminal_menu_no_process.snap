@@ -4,4 +4,4 @@ expression: render_menu_text(&items)
 ---
  Run  [r]
 ~Copy output  [c]
-~Clear
+~Clear  [x]

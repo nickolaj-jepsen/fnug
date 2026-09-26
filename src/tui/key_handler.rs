@@ -19,11 +19,13 @@ impl App {
             self.rebuild_visible_nodes();
         }
 
-        // Help overlay dismissal
         if self.show_help {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('?' | 'q') => {
-                    self.show_help = false;
+                KeyCode::Esc | KeyCode::Char('?' | 'q') => self.show_help = false,
+                // Rendering clamps the scroll to what doesn't fit
+                KeyCode::Char('j') | KeyCode::Down => self.help_scroll += 1,
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
                 }
                 _ => {}
             }
@@ -227,11 +229,17 @@ impl App {
                     self.copy_command_output(&id);
                 }
             }
+            KeyCode::Char('x') => {
+                if let Some(id) = self.current_command_id() {
+                    self.clear_command(&id);
+                }
+            }
             KeyCode::Char('/') => {
                 self.search = super::app::SearchState::Editing(String::new());
             }
             KeyCode::Char('?') => {
                 self.show_help = true;
+                self.help_scroll = 0;
             }
             KeyCode::Char('E') => {
                 self.expand_all();
@@ -311,6 +319,18 @@ mod tests {
 
         press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn x_clears_command() {
+        let mut app = test_app();
+        app.error_messages
+            .insert("a".into(), "failed to start".into());
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+
+        assert!(app.error_messages.is_empty());
     }
 
     #[test]
