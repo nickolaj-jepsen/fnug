@@ -189,6 +189,7 @@ impl App {
                 finished_at: None,
                 exit: None,
                 generation,
+                command: cmd,
             },
         );
         Ok(())
