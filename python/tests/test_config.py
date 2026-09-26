@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import MISSING, fields, is_dataclass
+from importlib import metadata
 
 import pytest
 import yaml
 
+from fnug import config as config_module
 from fnug.config import (
     Auto,
     Command,
@@ -227,6 +229,46 @@ def test_config_to_dict_strips_none():
         "fnug_version": "0.1.0",
         "commands": [{"name": "hello", "cmd": "echo hi", "auto": {"git": True}}],
     }
+
+
+@pytest.mark.parametrize(
+    ("pep440", "semver"),
+    [
+        ("0.1.0", "0.1.0"),
+        ("0.1.0a13", "0.1.0-alpha.13"),
+        ("1.2.3b1", "1.2.3-beta.1"),
+        ("1.2.3rc2", "1.2.3-rc.2"),
+        ("1.2.3.post1", "1.2.3-post.1"),
+        ("1.2.3.dev4", "1.2.3-dev.4"),
+        ("1.2.3a1.dev4", "1.2.3-alpha.1.dev.4"),
+        ("1.2.3+build.7", "1.2.3+build.7"),
+        ("1.2", "1.2.0"),
+        ("1!2.0", "1!2.0"),
+    ],
+)
+def test_semver_from_pep440(pep440, semver):
+    assert config_module.semver_from_pep440(pep440) == semver
+
+
+def test_fnug_version_defaults_to_the_package_version(monkeypatch):
+    monkeypatch.setattr(metadata, "version", {"fnug": "0.1.0a13"}.__getitem__)
+
+    config = Config(name="demo")
+
+    assert config.fnug_version == "0.1.0-alpha.13"
+    assert config.to_dict()["fnug_version"] == "0.1.0-alpha.13"
+
+
+def test_fnug_version_left_out_without_the_package(monkeypatch):
+    def not_installed(name):
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(metadata, "version", not_installed)
+
+    config = Config(name="demo")
+
+    assert config.fnug_version is None
+    assert "fnug_version" not in config.to_dict()
 
 
 def test_schema_is_written_first_as_dollar_schema():
