@@ -206,6 +206,8 @@ pub(super) struct Run<'a> {
     pub queued: Option<Duration>,
     /// Whether any command has `auto.git` or `auto.always`, the rules `run_lints` selects by.
     pub selectable: bool,
+    /// For `run_lint` by an exact id: the other commands with that name, as `(id, group path)`.
+    pub also_named: &'a [(String, String)],
 }
 
 /// The result of a run: the summary, then a text block per command whose output is shown.
@@ -222,6 +224,7 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
         verbose,
         queued,
         selectable,
+        also_named,
     } = *run;
     // Reports are in plan order
     let entries: Vec<(&PlannedCommand, &CommandReport)> =
@@ -249,6 +252,20 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
         .sort_by_key(|block| (rank(&entries[block.index].1.outcome), block.index));
 
     let mut message = message(scope, plan, report, selectable);
+    if let RunScope::Named(target) = scope
+        && !also_named.is_empty()
+    {
+        let others: Vec<String> = also_named
+            .iter()
+            .map(|(id, group)| format!("{id} ({group})"))
+            .collect();
+        let _ = write!(
+            message,
+            " '{target}' is also the name of {}; run_lint takes an id to run one of those \
+             instead.",
+            list_ids(&others)
+        );
+    }
     if !failures_left_out.is_empty() {
         let _ = write!(
             message,

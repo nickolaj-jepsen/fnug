@@ -160,6 +160,40 @@ async fn ambiguous_name_is_tool_error() {
 }
 
 #[tokio::test]
+async fn exact_id_notes_commands_with_that_name() {
+    let (server, _dir) = server(
+        r"
+name: root
+children:
+  - name: rust
+    commands:
+      - {name: fmt, id: rust-fmt, cmd: 'true'}
+  - name: nix
+    commands:
+      - {name: fmt, cmd: 'true'}
+",
+    );
+    let result = server
+        .run_lint(run_lint("fmt"), CancellationToken::new())
+        .await
+        .unwrap();
+    let summary = json(&result);
+    assert_eq!(summary["commands"][0]["group"], "root > nix", "{summary}");
+    let message = summary["message"].as_str().unwrap();
+    assert!(
+        message.contains("'fmt' is also the name of rust-fmt (root > rust)"),
+        "{message}"
+    );
+
+    // By its id, the other one has no namesake to mention
+    let result = server
+        .run_lint(run_lint("rust-fmt"), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(json(&result)["message"], "1 command passed.");
+}
+
+#[tokio::test]
 async fn not_found_is_tool_error_listing_ids() {
     let (server, _dir) = server(SAME_NAMES);
     let result = server

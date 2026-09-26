@@ -159,6 +159,21 @@ fn selection(scope: &RunScope) -> Selection {
     }
 }
 
+/// The other commands named `target`, ignoring case, as `(id, group path)`, when `target` is a
+/// command's exact id and so wins over them.
+fn also_named(config: &CommandGroup, target: &str) -> Vec<(String, String)> {
+    let commands = commands_with_group_path(config);
+    if !commands.iter().any(|(cmd, _)| cmd.id == target) {
+        return Vec::new();
+    }
+    let wanted = target.to_lowercase();
+    commands
+        .into_iter()
+        .filter(|(cmd, _)| cmd.id != target && cmd.name.to_lowercase() == wanted)
+        .map(|(cmd, group)| (cmd.id.clone(), group))
+        .collect()
+}
+
 /// Check whether a command matches the `list_lints` filter parameters.
 fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParams) -> bool {
     if let Some(ref g) = params.group
@@ -279,8 +294,9 @@ impl FnugMcp {
         description = "Run a single lint/test command by name or id. Use this to re-run a \
         specific failing check after fixing it, or to run a check that wasn't auto-selected. \
         Use list_lints to discover available command names and ids; a name that matches no \
-        command or several is an error listing the candidates. Dependencies are resolved \
-        and run first automatically. Returns a compact JSON summary that lists failures \
+        command or several is an error listing the candidates, and an exact id wins over \
+        names, with the message naming any other command of that name. Dependencies are \
+        resolved and run first automatically. Returns a compact JSON summary that lists failures \
         first, then a text block with the output of each command that failed or timed out: \
         stdout and stderr merged, terminal escapes removed, and cut to about 20 KiB, keeping \
         its start and end. Output of commands that passed is left out unless verbose is set.",
@@ -376,9 +392,16 @@ impl FnugMcp {
             let selectable = commands_with_group_path(&loaded.root)
                 .iter()
                 .any(|(cmd, _)| cmd.auto.git == Some(true) || cmd.auto.always == Some(true));
-            Ok((plan, loaded.cwd, selectable))
+            let also_named = match &selection {
+                Selection::Targets(targets) => targets
+                    .iter()
+                    .flat_map(|target| also_named(&loaded.root, target))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            Ok((plan, loaded.cwd, selectable, also_named))
         });
-        let (plan, cwd, selectable) = match planned.await {
+        let (plan, cwd, selectable, also_named) = match planned.await {
             Ok(planned) => planned,
             Err(result) => return Ok(result),
         };
@@ -404,6 +427,7 @@ impl FnugMcp {
             verbose: run.verbose,
             queued,
             selectable,
+            also_named: &also_named,
         })
         .map_err(mcp_err)
     }
