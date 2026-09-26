@@ -8,6 +8,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use fnug::commands::group::CommandGroup;
+use fnug::process::StopSignal;
 use fnug::runner::{
     CaptureLimits, Counts, ExecHook, ExecOptions, Failure, NoHook, Outcome, OutputMode, Plan,
     PlanError, PlanOptions, PlannedCommand, RunEvent, RunReport, SelectReason, Selection, execute,
@@ -489,6 +490,46 @@ async fn cancel_kills_group() {
     assert_eq!(*outcome(&report, "after"), Outcome::NotRun);
     let pid = canceller.await.unwrap();
     assert!(common::wait_until(TIMEOUT, || !common::process_alive(pid)));
+}
+
+/// Writes the name of the signal it gets to `caught` a moment later, and exits. Short sleeps,
+/// since a trap waits for the command that runs when its signal arrives.
+const GRACEFUL: &str = r#"
+name: root
+commands:
+  - name: graceful
+    cmd: 'for s in INT HUP TERM; do trap "sleep 0.2; echo $s > caught; exit 1" $s; done; touch started; i=0; while [ $i -lt 600 ]; do i=$((i+1)); sleep 0.05; done'
+"#;
+
+#[tokio::test]
+async fn cancel_passes_on_the_signal_fnug_got() {
+    for (signal, expected) in [
+        (None, "TERM"),
+        (Some(StopSignal::Interrupt), "INT"),
+        (Some(StopSignal::Terminate), "TERM"),
+        (Some(StopSignal::Hangup), "HUP"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, cwd) = common::load(dir.path(), GRACEFUL);
+        let opts = capture();
+        if let Some(signal) = signal {
+            opts.cancel_cause.set_signal(signal);
+        }
+        let cancel = opts.cancel.clone();
+        let started = dir.path().join("started");
+        tokio::task::spawn_blocking(move || {
+            assert!(common::wait_until(TIMEOUT, || started.exists()));
+            cancel.cancel();
+        });
+        let report = run(&config, &cwd, &opts).await;
+        assert_eq!(
+            *outcome(&report, "graceful"),
+            Outcome::Cancelled,
+            "{signal:?}"
+        );
+        let caught = std::fs::read_to_string(dir.path().join("caught")).unwrap_or_default();
+        assert_eq!(caught.trim(), expected, "{signal:?}: {report:#?}");
+    }
 }
 
 #[tokio::test]
