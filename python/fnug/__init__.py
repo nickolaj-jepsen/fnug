@@ -204,7 +204,8 @@ def check(  # noqa: PLR0913
             ``cwd`` is resolved against the caller's working directory (the default).
         config_path: Path to an existing .fnug.yaml file.
         targets: Run these commands, by id or name, after their dependencies.
-        all_: Run every command.
+        all_: Run every command, except those with ``auto.check: false`` unless
+            ``include_manual`` is set.
         include_manual: Also run commands with ``auto.check: false``.
         base: Select by the changes since the merge base of HEAD and this ref,
             such as ``"origin/main"``.
