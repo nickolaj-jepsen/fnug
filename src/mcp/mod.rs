@@ -4,6 +4,7 @@ mod params;
 mod response;
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::command::Command;
+use crate::commands::group::CommandGroup;
 use crate::runner::{
     self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions,
     Selection, commands_with_group_path,
@@ -23,11 +25,14 @@ use crate::runner::{
 use crate::selectors::{self, SelectOptions};
 use crate::{LoadOptions, LoadedConfig};
 
-use params::{FailFastParams, ListLintsParams, RunLintParams};
+use params::{AutoType, FailFastParams, ListLintsParams, RunLintParams};
 use response::{AutoRules, LintInfo, RunResult};
 
 /// How long shutdown waits for running commands to stop.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// How many commands an error for an unknown command lists.
+const MAX_LISTED: usize = 50;
 
 // ---------------------------------------------------------------------------
 // Server
@@ -61,9 +66,26 @@ fn load_error(e: &crate::config_file::ConfigError) -> CallToolResult {
     ))
 }
 
-/// Report an unknown or ambiguous command, or unusable selection, as invalid parameters.
-fn plan_err(e: &PlanError) -> rmcp::ErrorData {
-    rmcp::ErrorData::invalid_params(e.to_string(), None)
+/// A tool error for a target that names no single command, listing the candidates or the
+/// available commands, or for git selection that failed as a whole.
+fn plan_error(e: &PlanError, config: &CommandGroup) -> CallToolResult {
+    let mut message = e.to_string();
+    match e {
+        PlanError::NotFound { .. } => {
+            let commands = commands_with_group_path(config);
+            message.push_str("\nAvailable commands (id: name (group)):");
+            for (cmd, group) in commands.iter().take(MAX_LISTED) {
+                let _ = write!(message, "\n- {}: {} ({group})", cmd.id, cmd.name);
+            }
+            if commands.len() > MAX_LISTED {
+                let more = commands.len() - MAX_LISTED;
+                let _ = write!(message, "\n… and {more} more; list_lints shows them all");
+            }
+        }
+        PlanError::Ambiguous { .. } => {}
+        PlanError::Selection(_) => message.insert_str(0, "Git selection failed: "),
+    }
+    tool_error(message)
 }
 
 /// Check whether a command matches the `list_lints` filter parameters.
@@ -80,22 +102,14 @@ fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParam
             return false;
         }
     }
-    if let Some(ref at) = params.auto_type {
-        match at.to_lowercase().as_str() {
-            "git" if cmd.auto.git != Some(true) => return false,
-            "watch" if cmd.auto.watch != Some(true) => return false,
-            "always" if cmd.auto.always != Some(true) => return false,
-            "none"
-                if cmd.auto.git == Some(true)
-                    || cmd.auto.watch == Some(true)
-                    || cmd.auto.always == Some(true) =>
-            {
-                return false;
-            }
-            _ => {}
-        }
+    let auto = &cmd.auto;
+    match params.auto_type {
+        None => true,
+        Some(AutoType::Git) => auto.git == Some(true),
+        Some(AutoType::Watch) => auto.watch == Some(true),
+        Some(AutoType::Always) => auto.always == Some(true),
+        Some(AutoType::None) => ![auto.git, auto.watch, auto.always].contains(&Some(true)),
     }
-    true
 }
 
 #[tool_router]
@@ -184,7 +198,8 @@ impl FnugMcp {
     #[tool(
         description = "Run a single lint/test command by name or id. Use this to re-run a \
         specific failing check after fixing it, or to run a check that wasn't auto-selected. \
-        Use list_lints to discover available command names and ids. Dependencies are resolved \
+        Use list_lints to discover available command names and ids; a name that matches no \
+        command or several is an error listing the candidates. Dependencies are resolved \
         and run first automatically. Returns per-command results with status, exit code, \
         output (stdout and stderr merged), and timing.",
         annotations(open_world_hint = false)
@@ -243,14 +258,14 @@ impl FnugMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let _running = self.runs.read().await;
         let planned = self.with_config(move |loaded| {
-            let plan = runner::plan(&loaded.root, &selection, &PlanOptions::default());
+            let plan = runner::plan(&loaded.root, &selection, &PlanOptions::default())
+                .map_err(|e| plan_error(&e, &loaded.root))?;
             Ok((plan, loaded.cwd))
         });
         let (plan, cwd) = match planned.await {
             Ok(planned) => planned,
             Err(result) => return Ok(result),
         };
-        let plan = plan.map_err(|e| plan_err(&e))?;
         for warning in &plan.warnings {
             warn!("{warning}");
         }
