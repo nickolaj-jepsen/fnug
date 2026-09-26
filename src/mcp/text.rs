@@ -1,6 +1,5 @@
 //! Command output made fit for an LLM: terminal escapes removed and the size capped.
 
-use std::fmt::Write as _;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -99,12 +98,24 @@ pub(super) fn cap(text: &str, gap: Option<Gap>, budget: usize) -> Capped {
     if !capped.is_empty() && !capped.ends_with('\n') {
         capped.push('\n');
     }
-    let _ = writeln!(capped, "… {omitted} bytes omitted …");
+    capped.push_str(&marker(omitted));
     capped.push_str(&text[tail_start..]);
     Capped {
         text: capped,
         omitted,
     }
+}
+
+/// The line [`cap`] puts where it leaves bytes out.
+fn marker(omitted: u64) -> String {
+    format!("… {omitted} bytes omitted …\n")
+}
+
+/// Bytes [`cap`] may add to what it keeps of `text` with `gap`: a marker line, and the line
+/// break before it.
+pub(super) fn marker_room(text: &str, gap: Option<Gap>) -> usize {
+    let most = text.len() as u64 + gap.map_or(0, |gap| gap.bytes);
+    marker(most).len() + 1
 }
 
 /// An end for the kept start at or before `at`: after the last line break in the second half
@@ -209,6 +220,27 @@ mod tests {
                 (head.len() + tail.len()) as u64 + capped.omitted,
                 text.len() as u64
             );
+        }
+    }
+
+    #[test]
+    fn cap_adds_at_most_marker_room() {
+        let text = "some output\n".repeat(50);
+        for gap in [
+            None,
+            Some(Gap {
+                at: 36,
+                bytes: 99_999,
+            }),
+        ] {
+            for budget in [0, 1, 12, 100, text.len(), text.len() + 10] {
+                let capped = cap(&text, gap, budget);
+                assert!(
+                    capped.text.len() <= text.len().min(budget) + marker_room(&text, gap),
+                    "{gap:?} {budget}: {}",
+                    capped.text
+                );
+            }
         }
     }
 

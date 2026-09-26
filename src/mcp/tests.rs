@@ -408,6 +408,69 @@ commands:
 }
 
 #[tokio::test]
+async fn many_failures_stay_within_the_result_budget() {
+    use std::fmt::Write as _;
+
+    let mut yaml = "name: root\ncommands:\n".to_string();
+    for i in 0..120 {
+        let _ = writeln!(
+            yaml,
+            "  - {{name: failing-command-{i:03}, cmd: 'seq 1 2000; exit 1'}}"
+        );
+    }
+    let (server, _dir) = server(&yaml);
+    let params = RunAllParams {
+        jobs: Some(8),
+        ..RunAllParams::default()
+    };
+    let result = server
+        .run_all(Parameters(params), CancellationToken::new())
+        .await
+        .unwrap();
+
+    // Headers and omission markers count too
+    let blocks: Vec<&str> = result.content[1..]
+        .iter()
+        .map(|content| content.as_text().unwrap().text.as_str())
+        .collect();
+    let total: usize = blocks.iter().map(|block| block.len()).sum();
+    assert!(
+        total <= 60 * 1024,
+        "{total} bytes in {} blocks",
+        blocks.len()
+    );
+    assert!(blocks.len() > 50, "{}", blocks.len());
+    for block in &blocks {
+        assert!(block.ends_with("\n2000\n"), "{block}");
+    }
+
+    let summary_text = text(&result);
+    assert!(
+        summary_text.len() <= 16 * 1024,
+        "{} bytes",
+        summary_text.len()
+    );
+    let summary = json(&result);
+    assert_eq!(
+        (&summary["total"], &summary["failed"]),
+        (&120.into(), &120.into())
+    );
+    let listed = summary["commands"].as_array().unwrap().len();
+    assert!(listed > 0, "{summary}");
+    assert_eq!(summary["commands_omitted"], 120 - listed, "{summary}");
+    let message = summary["message"].as_str().unwrap();
+    let left_out = 120 - blocks.len();
+    assert!(
+        message.contains(&format!("Output of {left_out} of them is left out")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("its last {}", 120 - listed)),
+        "{message}"
+    );
+}
+
+#[tokio::test]
 async fn fail_fast_lists_not_run_commands() {
     let (server, _dir) = server(
         r"
