@@ -6,6 +6,8 @@ mod render;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use inquire::MultiSelect;
+use inquire::list_option::ListOption;
 use log::warn;
 use thiserror::Error;
 
@@ -115,6 +117,26 @@ fn project_name(dir: &Path) -> String {
         || "project".to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// Ask which proposals to include, with all of them preselected, and return their indices.
+///
+/// # Errors
+///
+/// Returns `InitError::Prompt` if the prompt fails or the user cancels it.
+pub fn prompt(proposals: &[Proposal]) -> Result<Vec<usize>, InitError> {
+    let answer = |chosen: &[ListOption<&&Proposal>]| {
+        let labels: Vec<_> = chosen.iter().map(|o| o.value.label.as_str()).collect();
+        labels.join(", ")
+    };
+    let chosen = MultiSelect::new(
+        "Which commands should the config include?",
+        proposals.iter().collect(),
+    )
+    .with_all_selected_by_default()
+    .with_formatter(&answer)
+    .raw_prompt()?;
+    Ok(chosen.into_iter().map(|option| option.index).collect())
 }
 
 /// Create a config for the project in `opts.dir` from what [`detect`] finds there, and return
