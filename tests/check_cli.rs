@@ -78,6 +78,12 @@ impl PtyCheck {
         command.args(["--no-workspace", "check", "--no-tui"]);
         command.args(args);
         command.env_remove("FNUG_LOG");
+        // As `common::git::isolate` does
+        for var in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX"] {
+            command.env_remove(var);
+        }
+        command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command.env("GIT_CONFIG_NOSYSTEM", "1");
         let child = pair.slave.spawn_command(command).unwrap();
 
         let mut reader = pair.master.try_clone_reader().unwrap();
@@ -551,6 +557,42 @@ commands:
         assert_eq!(code, 1, "{args:?}:\n{output}");
         assert!(output.contains("prompt"), "{args:?}:\n{output}");
         assert!(output.contains("FAIL"), "{args:?}:\n{output}");
+    }
+}
+
+#[test]
+fn stash_captures_commands_on_a_terminal() {
+    if !common::git::available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: where
+    cmd: 'if [ -t 1 ]; then echo ON-THE-TERMINAL; else echo CAPTURED; fi'
+    auto:
+      always: true
+",
+    );
+    common::commit_all(&repo);
+    // Stopping a command sharing fnug's group would leave what it started writing files
+    for (args, expected) in [
+        (&[][..], "ON-THE-TERMINAL"),
+        (&["--staged", "--stash"], "CAPTURED"),
+    ] {
+        let Some(mut fnug) = PtyCheck::start(dir.path(), args) else {
+            return;
+        };
+        assert_eq!(fnug.wait(), 0, "{args:?}:\n{}", fnug.output());
+        assert!(
+            common::wait_until(TIMEOUT, || fnug.output().contains(expected)),
+            "{args:?}:\n{}",
+            fnug.output()
+        );
     }
 }
 

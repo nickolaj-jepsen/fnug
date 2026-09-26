@@ -52,7 +52,9 @@ pub struct CheckOptions {
     /// formatter does when it finds something to fix.
     pub detect_modifications: bool,
     /// Set unstaged changes to tracked files aside while commands run, so they see what the
-    /// index holds; see [`stash::stash`]. Only in the git work tree containing `cwd`.
+    /// index holds; see [`stash::stash`]. Only in the git work tree containing `cwd`. Output is
+    /// then captured, so each command runs in a process group of its own that is stopped as a
+    /// whole.
     pub stash: bool,
 }
 
@@ -87,8 +89,8 @@ pub struct CheckResult {
 /// Run the commands `opts.selection` picks, after their dependencies, printing each result and
 /// a summary to stderr.
 ///
-/// With one job and `mute_success` off, commands use the terminal directly and their output
-/// streams through. Otherwise it is captured and printed after each command ends.
+/// With one job and `mute_success` and `stash` off, commands use the terminal directly and
+/// their output streams through. Otherwise it is captured and printed after each command ends.
 /// Cancelling `cancel` stops the running commands, and the summary covers what finished; while
 /// git selection still runs, it returns at once with nothing run.
 ///
@@ -119,7 +121,9 @@ pub async fn run(
         warn!("{warning}");
     }
 
-    let output = if opts.jobs.get() == 1 && !opts.mute_success {
+    // A command sharing fnug's process group is signalled alone, so what it started could write
+    // to the work tree after the unstaged changes are back
+    let output = if opts.jobs.get() == 1 && !opts.mute_success && !opts.stash {
         OutputMode::Inherit
     } else {
         OutputMode::Capture(CaptureLimits::DEFAULT)
