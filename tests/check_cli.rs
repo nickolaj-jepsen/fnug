@@ -2,9 +2,13 @@
 
 mod common;
 
+use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -49,6 +53,71 @@ impl Drop for KillOnDrop {
     fn drop(&mut self) {
         // SAFETY: plain syscall; the pid is one of the test's own grandchildren.
         unsafe { libc::kill(self.0, libc::SIGKILL) };
+    }
+}
+
+/// `fnug check` with a pty as its controlling terminal, as when started from a shell. Killed
+/// on drop.
+struct PtyCheck {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    output: Arc<Mutex<Vec<u8>>>,
+    _master: Box<dyn MasterPty + Send>,
+}
+
+impl PtyCheck {
+    /// Start `fnug check` in `dir`, or return `None` when no pty can be opened here.
+    fn start(dir: &Path, args: &[&str]) -> Option<Self> {
+        let Ok(pair) = native_pty_system().openpty(PtySize::default()) else {
+            eprintln!("skipping: no PTY available");
+            return None;
+        };
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_fnug"));
+        command.cwd(dir);
+        command.args(["--no-workspace", "check", "--no-tui"]);
+        command.args(args);
+        command.env_remove("FNUG_LOG");
+        let child = pair.slave.spawn_command(command).unwrap();
+
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let sink = output.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0; 4096];
+            while let Ok(n @ 1..) = reader.read(&mut buf) {
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        Some(Self {
+            child,
+            output,
+            _master: pair.master,
+        })
+    }
+
+    /// What fnug and its commands wrote to the terminal so far.
+    fn output(&self) -> String {
+        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+    }
+
+    /// Wait for fnug to exit and return its exit code, killing it after [`TIMEOUT`].
+    fn wait(&mut self) -> u32 {
+        let mut status = None;
+        let exited = common::wait_until(TIMEOUT, || {
+            status = self.child.try_wait().unwrap();
+            status.is_some()
+        });
+        assert!(
+            exited,
+            "fnug did not exit within {TIMEOUT:?}:\n{}",
+            self.output()
+        );
+        status.unwrap().exit_code()
+    }
+}
+
+impl Drop for PtyCheck {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
     }
 }
 
@@ -335,4 +404,30 @@ commands:
     assert!(common::wait_until(TIMEOUT, || !common::process_alive(
         sleep.0
     )));
+}
+
+#[test]
+fn captured_command_cannot_block_on_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: prompt
+    cmd: 'read answer < /dev/tty && echo got $answer'
+    auto:
+      always: true
+",
+    );
+    for args in [&["--mute-success"][..], &["-j", "2"]] {
+        let Some(mut fnug) = PtyCheck::start(dir.path(), args) else {
+            return;
+        };
+        let code = fnug.wait();
+        let output = fnug.output();
+        assert_eq!(code, 1, "{args:?}:\n{output}");
+        assert!(output.contains("prompt"), "{args:?}:\n{output}");
+        assert!(output.contains("FAIL"), "{args:?}:\n{output}");
+    }
 }
