@@ -5,7 +5,7 @@ use rmcp::model::CallToolResult;
 use tokio_util::sync::CancellationToken;
 
 use super::FnugMcp;
-use super::params::{AutoType, FailFastParams, ListLintsParams, RunLintParams};
+use super::params::{AutoType, ListLintsParams, RunLintParams, RunParams};
 use crate::LoadOptions;
 use crate::runner::CancelCause;
 
@@ -26,15 +26,17 @@ fn json(result: &CallToolResult) -> serde_json::Value {
     serde_json::from_str(text).unwrap()
 }
 
-fn fail_fast(fail_fast: bool) -> Parameters<FailFastParams> {
-    Parameters(FailFastParams {
+fn fail_fast(fail_fast: bool) -> Parameters<RunParams> {
+    Parameters(RunParams {
         fail_fast: Some(fail_fast),
+        verbose: None,
     })
 }
 
 fn run_lint(command: &str) -> Parameters<RunLintParams> {
     Parameters(RunLintParams {
         command: command.to_string(),
+        verbose: None,
     })
 }
 
@@ -238,16 +240,165 @@ commands:
         .run_lint(run_lint("after"), CancellationToken::new())
         .await
         .unwrap();
+    assert_eq!(
+        blocks(&result),
+        ["### mixed: failed with exit code 3\no1\ne1\no2\n"]
+    );
     let result = json(&result);
     let mixed = &result["commands"][0];
     assert_eq!(mixed["status"], "failed");
     assert_eq!(mixed["exit_code"], 3);
-    assert_eq!(mixed["output"], "o1\ne1\no2\n");
+    assert_eq!(mixed["output_bytes"], 9);
     assert_eq!(result["commands"][1]["status"], "skipped");
+    assert_eq!(
+        result["commands"][1]["detail"],
+        "not run because mixed failed"
+    );
     assert_eq!(
         (&result["failed"], &result["skipped"]),
         (&1.into(), &1.into())
     );
+}
+
+/// The text blocks after the JSON summary.
+fn blocks(result: &CallToolResult) -> Vec<String> {
+    result.content[1..]
+        .iter()
+        .map(|content| {
+            let text = &content.as_text().unwrap().text;
+            // The header ends with the duration, which varies
+            let (header, body) = text.split_once('\n').unwrap_or((text, ""));
+            let header = header.rsplit_once(" (").map_or(header, |(h, _)| h);
+            format!("{header}\n{body}")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn passing_output_omitted_by_default() {
+    let (server, _dir) = server(
+        r"
+name: root
+commands:
+  - name: noisy
+    cmd: 'seq 1 5000'
+  - name: failing
+    cmd: 'echo boom; exit 1'
+",
+    );
+    let result = server
+        .run_all(fail_fast(false), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        blocks(&result),
+        ["### failing: failed with exit code 1\nboom\n"]
+    );
+    let summary = json(&result);
+    assert_eq!(summary["ok"], false);
+    // Failures first
+    assert_eq!(summary["commands"][0]["id"], "failing");
+    assert_eq!(summary["commands"][1]["id"], "noisy");
+    assert_eq!(summary["commands"][1]["status"], "passed");
+    assert_eq!(summary["commands"][1]["output_bytes"], 23_893);
+    assert!(summary["commands"][1].get("output").is_none());
+    assert!(text(&result).len() < 2_000, "{}", text(&result));
+}
+
+#[tokio::test]
+async fn failure_output_capped_utf8_safe_and_ansi_stripped() {
+    let (server, _dir) = server(
+        r#"
+name: root
+commands:
+  - name: loud
+    cmd: 'awk ''BEGIN { for (i = 0; i < 3000; i++) printf "\033[31merror\033[0m 日本語 line %d\r\n", i; exit 1 }'''
+"#,
+    );
+    let result = server
+        .run_lint(run_lint("loud"), CancellationToken::new())
+        .await
+        .unwrap();
+    let block = &result.content[1].as_text().unwrap().text;
+    assert!(block.len() < 21 * 1024, "{} bytes", block.len());
+    assert!(!block.contains('\x1b') && !block.contains('\r'), "{block}");
+    assert!(!block.contains('\u{fffd}'), "{block}");
+    assert!(block.contains("\nerror 日本語 line 0\n"), "{block}");
+    assert!(block.ends_with("\nerror 日本語 line 2999\n"), "{block}");
+
+    let summary = json(&result);
+    let loud = &summary["commands"][0];
+    let written =
+        3000 * "\x1b[31merror\x1b[0m 日本語 line \r\n".len() + 10 + 90 * 2 + 900 * 3 + 2000 * 4;
+    assert_eq!(loud["output_bytes"], written);
+    let truncated = loud["truncated_bytes"].as_u64().unwrap();
+    assert!(truncated > 0);
+    assert!(
+        block.contains(&format!("\n… {truncated} bytes omitted …\n")),
+        "{block}"
+    );
+}
+
+#[tokio::test]
+async fn verbose_includes_passing_output() {
+    let (server, _dir) = server(
+        r"
+name: root
+commands:
+  - name: noisy
+    cmd: 'seq 1 5000'
+  - name: quiet
+    cmd: 'echo hi'
+",
+    );
+    let params = RunParams {
+        verbose: Some(true),
+        ..fail_fast(false).0
+    };
+    let result = server
+        .run_all(Parameters(params), CancellationToken::new())
+        .await
+        .unwrap();
+    let blocks = blocks(&result);
+    assert_eq!(blocks.len(), 2, "{blocks:?}");
+    assert!(
+        blocks[0].starts_with("### noisy: passed\n1\n2\n"),
+        "{}",
+        blocks[0]
+    );
+    assert!(blocks[0].ends_with("\n5000\n") && blocks[0].len() < 21 * 1024);
+    assert_eq!(blocks[1], "### quiet: passed\nhi\n");
+    assert!(json(&result)["commands"][0]["truncated_bytes"].as_u64() > Some(0));
+}
+
+#[tokio::test]
+async fn failures_share_the_output_budget() {
+    let (server, _dir) = server(
+        r"
+name: root
+auto:
+  always: true
+commands:
+  - {name: a, cmd: 'seq 1 30000; exit 1'}
+  - {name: b, cmd: 'seq 1 30000; exit 1'}
+  - {name: c, cmd: 'seq 1 30000; exit 1'}
+  - {name: d, cmd: 'seq 1 30000; exit 1'}
+  - {name: e, cmd: 'echo short; exit 1'}
+",
+    );
+    let result = server
+        .run_all(fail_fast(false), CancellationToken::new())
+        .await
+        .unwrap();
+    let blocks = blocks(&result);
+    assert_eq!(blocks.len(), 5);
+    let total: usize = blocks.iter().map(String::len).sum();
+    assert!(total < 62 * 1024, "{total} bytes");
+    for block in &blocks[..4] {
+        assert!(block.len() > 10 * 1024, "{} bytes", block.len());
+        assert!(block.ends_with("\n30000\n"), "{block}");
+    }
+    assert_eq!(blocks[4], "### e: failed with exit code 1\nshort\n");
 }
 
 #[tokio::test]
