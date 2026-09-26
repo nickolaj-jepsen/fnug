@@ -622,3 +622,24 @@ commands:
         interrupted.elapsed()
     );
 }
+
+#[test]
+fn config_error_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(dir.path(), "name: root\ncomands: []\n");
+    let output = check(dir.path(), &[]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+
+    let output = check(dir.path(), &["-c", "missing.yaml"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("Config file not found"));
+
+    // The TUI fails the same way, before it starts
+    let output = Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(dir.path())
+        .args(["-c", "missing.yaml"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
