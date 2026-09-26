@@ -94,11 +94,11 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--fail-fast`     | Stop on first failure (`check` only)                            |
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
 | `--mute-success`  | Capture each command's output and print it only if it fails (`check` only) |
-| `--all`           | Run every command instead of the ones changes select (`check` only) |
+| `--all`           | Run every command except `auto.check: false` ones (add `--include-manual` for those) instead of the ones changes select (`check` only) |
 | `--include-manual` | Also run commands with `auto.check: false` (`check` only)      |
 | `--base <ref>`    | Select by the changes since the merge base of `HEAD` and `<ref>`, such as `origin/main`: commits since then plus uncommitted changes (`check` only) |
 | `--staged`        | Select by the changes staged for the next commit, or in a pre-commit hook the ones being committed; unstaged and untracked changes don't count (`check` only) |
-| `--stash`         | With `--staged`: set unstaged changes to tracked files aside while commands run, so they check exactly what is staged; each command's output is captured and printed when it ends (`check` only) |
+| `--stash`         | Needs `--staged`: set unstaged changes to tracked files aside while commands run, so they check exactly what is staged; each command's output is captured and printed when it ends (`check` only) |
 | `--allow-modifications` | Don't fail commands that change tracked files (`check` only) |
 | `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
 | `-j`, `--jobs <n>` | Run up to `<n>` commands at once, each after its dependencies; `0` means one per CPU (default `1`, `check` only) |
@@ -124,17 +124,19 @@ By default, `fnug check` runs the `always` commands and the commands whose `auto
 | ------------------------------- | -------------------------------------------------------------- |
 | `fnug check --staged`           | Commands the staged changes select. In a pre-commit hook, those are the changes being committed, also with `git commit -a` and `git commit <path>` |
 | `fnug check --base origin/main` | Commands the changes since the merge base of `HEAD` and `origin/main` select: the branch's commits plus uncommitted changes |
-| `fnug check --all`              | Every command                                                  |
+| `fnug check --all`              | Every command except `auto.check: false` ones (all of them with `--include-manual`) |
 | `fnug check lint "unit tests"`  | The named commands, by id or name                              |
 
-Commands with `auto.check: false` are left out unless you add `--include-manual` or name them. When nothing is selected, fnug says so and exits with 0, so a commit that only touches docs still passes: `No commands selected (12 configured; use --all, --base <ref>, or name commands)`.
+Commands with `auto.check: false` are left out unless you add `--include-manual` or name them. When nothing is selected, fnug says so and exits with 0: `No commands selected (12 configured; use --all, --base <ref>, or name commands)`. With `--staged`, as in the pre-commit hook, it leaves out the hint and prints `No commands selected (12 configured)`, so a commit that only touches docs passes with one line of output.
 
 | Exit code | Meaning                                                              |
 | --------- | -------------------------------------------------------------------- |
 | 0         | Every command passed, or none was selected                           |
 | 1         | A command failed, timed out or changed tracked files, or was skipped or not run |
-| 2         | fnug couldn't do its job: a usage error, a config that doesn't load, an unknown or ambiguous name, a `--base` that doesn't resolve, `--staged` or `--base` outside a git repository, or unstaged changes it couldn't set aside or put back |
+| 2         | fnug couldn't do its job: a usage error, a config that doesn't load, an unknown or ambiguous name, a `--base` that doesn't resolve in the current directory's repository, `--staged` or `--base` outside a git repository, or unstaged changes it couldn't set aside or put back |
 | 128+n     | Stopped by signal n                                                  |
+
+The TUI exits with the same codes: 128+n when a signal stops it, 2 when it fails, such as when it can no longer read from or draw to its terminal, and 0 when you quit. When `fnug check` opens the TUI after a failure, quitting it keeps the check's 1.
 
 A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects nothing there. In a pull request, compare with the target branch; elsewhere, run everything. `--base` needs the merge base in the clone, so fetch the whole history:
 
@@ -148,6 +150,8 @@ A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects no
   run: fnug check --all
 ```
 
+`--base` compares in the git repository that contains the current directory, not the config file's, so `fnug -c /elsewhere/fnug.yaml check --base origin/main` works when run inside the repository. The base has to resolve there even when no command has `auto.git`, so a typo in it fails the run instead of running only the `always` commands. In a workspace whose packages are other repositories, such as submodules, a package repository where the base doesn't resolve, or that has no commits yet, gets a warning and none of its commands are selected; the rest still run.
+
 If the checkout belongs to another user than the one running fnug, as in some containers, see [Trusted configs](#trusted-configs).
 
 `fnug check` fails a command that exits with 0 but changes tracked files, and prints `FAIL (modified: src/a.rs — review and re-stage)`. Otherwise a formatter that rewrites files would pass while the commit keeps the unformatted version. Run the checking form in check mode (`cargo fmt --check`, `ruff format --check`), give fixers `auto.check: false` so only the TUI runs them, or pass `--allow-modifications`. New untracked files and ignored files don't count. With `--jobs` above 1, a change counts against every command that was running when it happened; the run fails either way. The TUI and the MCP server let commands change files.
@@ -157,10 +161,10 @@ If the checkout belongs to another user than the one running fnug, as in some co
 `--staged` decides which commands run, but they still see the work tree, with edits you haven't staged. Add `--stash` to check exactly what is staged: fnug saves the unstaged changes to tracked files as a patch in the git directory, checks the tracked files out from the index, and applies the patch again once the commands have exited. The pre-commit hook that `fnug setup` installs runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`.
 
 - Untracked files stay where they are, and files added with `git add -N` stay intent-to-add.
-- It covers the whole repository that contains the config's directory (or `--root`), even when the hook runs from a subdirectory. In a workspace, other repositories, such as submodules, aren't touched.
-- When a command changed a file that also has unstaged changes, as a formatter can, fnug discards the command's changes to that file to put yours back, and says so. Its changes to other files stay. The command has already failed for changing files.
+- It works on the repository that contains the current directory, as `--staged` does, not the one that contains the config file. It covers that whole repository, even when the hook runs fnug from a subdirectory, and works the same in a linked worktree, a submodule or a repository with a separate git directory. In a workspace, other repositories, such as submodules, aren't touched.
+- When a command changes a file that also has unstaged changes, as a formatter can, fnug always discards the command's changes to that file when it puts yours back, even when the two don't overlap, and says so: `Commands changed files that also have unstaged changes, so their changes to those files were discarded to put yours back.` Its changes to files without unstaged changes stay. Unless you pass `--allow-modifications`, the command has already failed for changing files.
 - fnug deletes the patch once the files it changes hold exactly your changes again. Otherwise it keeps the patch and prints its path.
-- A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that repository puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Until then, other `fnug check` runs warn that changes are still set aside. Only one such run works on a repository at a time; another one exits with 2.
+- A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that worktree puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Until then, other `fnug check` runs warn that changes are still set aside. Only one such run works on a worktree at a time; another one exits with 2. Linked worktrees of one repository don't wait for each other.
 
 ### Init
 
@@ -186,7 +190,7 @@ The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwi
 
 fnug's lines sit between `# >>> fnug >>>` and `# <<< fnug <<<`, right after the shebang of any existing hook, and the rest of that hook runs after fnug passes. If fnug needs something your hook sets up first, such as `PATH`, move the block below it; updates leave it where it is. A hook that isn't a shell script, such as a Python one, can be chained instead: it moves to `pre-commit.local` and runs after fnug, and removing fnug's hook puts it back.
 
-The hook runs `fnug` from `PATH`, or else the binary that ran `fnug setup`, with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given. A different or older fnug on `PATH` still comes first, so setup tells you when the one on its `PATH` isn't the binary running setup. It runs from the config's directory. With `--root`, it runs from that directory instead, and goes in that directory's repository even when the config is in another one. Run setup again after moving the config, and it offers to update the hook. If the hook runs a different config that still exists, as when you run setup from a nested config or with other flags, setup leaves it alone, even when you deselect the hook, and says which config it runs; it repoints the hook only if you say yes when asked. If fnug isn't installed, the commit fails with a hint; a hook in the work tree, such as one in a committed `core.hooksPath` or a committed script that `.git/hooks/pre-commit` links to, only warns, so teammates without fnug can still commit.
+The hook runs `fnug` from `PATH`, or else the binary that ran `fnug setup`, with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given. A different or older fnug on `PATH` still comes first, so setup tells you when the one on its `PATH` isn't the binary running setup: one from before `--staged` and `--stash` fails every commit. It runs from the config's directory. With `--root`, it runs from that directory instead, and goes in that directory's repository even when the config is in another one. Run setup again after moving the config, and it offers to update the hook. If the hook runs a different config that still exists, as when you run setup from a nested config or with other flags, setup leaves it alone, even when you deselect the hook, and says which config it runs; it repoints the hook only if you say yes when asked. If fnug isn't installed, the commit fails with a hint; a hook in the work tree, such as one in a committed `core.hooksPath` or a committed script that `.git/hooks/pre-commit` links to, only warns, so teammates without fnug can still commit.
 
 In a workspace, setup also offers a hook for each package whose config is in another repository, such as a git submodule. That hook runs the package's checks with `--no-workspace`.
 
