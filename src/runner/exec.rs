@@ -2,7 +2,7 @@
 //! ended.
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::{Child, Stdio};
@@ -34,8 +34,10 @@ const DRAIN_CAP: Duration = Duration::from_secs(2);
 /// Where commands' output goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
-    /// Straight to fnug's stdout and stderr, with fnug's stdin. Commands stay in fnug's process
-    /// group, so they can use the terminal and get its Ctrl+C; only one runs at a time.
+    /// Straight to fnug's stdout and stderr, with fnug's stdin, one command at a time. When one
+    /// of those is a terminal, commands stay in fnug's process group, so they can use it and get
+    /// its Ctrl+C, and only the command's own process is signalled. Otherwise each leads its
+    /// own session and process group, as with [`Capture`](Self::Capture).
     Inherit,
     /// Into a [`CapturedOutput`] per command, stdout and stderr merged in order. Each command
     /// leads its own session without a terminal, and its process group, which timeouts and
@@ -377,10 +379,13 @@ impl Spawned {
                     .stdin(Stdio::null())
                     .stdout(writer.try_clone()?)
                     .stderr(writer);
-                new_session(&mut command);
                 Some((reader, limits))
             }
         };
+        let group = capture.is_some() || !on_terminal();
+        if group {
+            new_session(&mut command);
+        }
         let child = command.spawn().map_err(|e| {
             io::Error::new(
                 e.kind(),
@@ -391,7 +396,7 @@ impl Spawned {
         // every copy is closed
         drop(command);
 
-        let handle = if capture.is_some() {
+        let handle = if group {
             ProcessHandle::new(child.id())
         } else {
             ProcessHandle::new_single(child.id())
@@ -479,8 +484,8 @@ impl Spawned {
             Err(_) => Err(io::Error::other("the process waiter stopped")),
         };
         if group {
-            // Background processes the shell left behind would hold the pipe open. The group
-            // leader is not reaped yet, so its group id can't have been reused
+            // Background processes the shell left behind would hold the output pipe open, or
+            // fnug's own stdout. The group leader is not reaped yet, so its id can't be reused
             self.signal(StopSignal::Terminate);
             if !eof {
                 let drain = async {
@@ -543,6 +548,12 @@ impl Spawned {
             warn!("Failed to signal pid {}: {e}", handle.pid());
         }
     }
+}
+
+/// Whether any of fnug's stdin, stdout and stderr is a terminal, which a streamed command then
+/// shares.
+fn on_terminal() -> bool {
+    io::stdin().is_terminal() || io::stdout().is_terminal() || io::stderr().is_terminal()
 }
 
 async fn read_pipe(
