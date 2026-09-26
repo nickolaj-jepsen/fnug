@@ -314,6 +314,10 @@ pub struct ConfigCommand {
     /// it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<ConfigDuration>,
+    /// In parallel runs, such as `fnug check --jobs 4`, never run alongside another command;
+    /// meant for fixers that rewrite files. The TUI ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<bool>,
 }
 
 impl TryFrom<ConfigCommand> for Command {
@@ -330,6 +334,7 @@ impl TryFrom<ConfigCommand> for Command {
             depends_on: config.depends_on.unwrap_or_default(),
             scrollback: config.scrollback,
             timeout: config.timeout.map(|t| t.0),
+            exclusive: config.exclusive,
         })
     }
 }
@@ -410,6 +415,9 @@ pub struct ConfigCommandGroup {
     /// Default `timeout` for everything in the group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<ConfigDuration>,
+    /// Default `exclusive` for everything in the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<bool>,
     /// The config file this group is the root of.
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -440,6 +448,7 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
             children,
             env: config.env.unwrap_or_default(),
             timeout: config.timeout.map(|t| t.0),
+            exclusive: config.exclusive,
             source: config.source,
         })
     }
@@ -486,6 +495,9 @@ pub struct Config {
     /// Default `timeout` for every command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<ConfigDuration>,
+    /// Default `exclusive` for every command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<bool>,
 }
 
 /// List of supported configuration file names
@@ -509,6 +521,7 @@ impl Config {
             children: self.children,
             env: self.env,
             timeout: self.timeout,
+            exclusive: self.exclusive,
             source: None,
         };
         (root, self.workspace)

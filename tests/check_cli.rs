@@ -226,6 +226,60 @@ commands:
 }
 
 #[test]
+fn jobs_run_independent_commands_together() {
+    let dir = tempfile::tempdir().unwrap();
+    // Each command marks itself started, then waits until all three have
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+auto:
+  always: true
+commands:
+  - name: a
+    cmd: &wait 'touch $MARK; i=0; until [ -e a ] && [ -e b ] && [ -e c ]; do i=$((i+1)); [ $i -gt 250 ] && exit 1; sleep 0.02; done; echo $MARK done'
+    env: {MARK: a}
+  - name: b
+    cmd: *wait
+    env: {MARK: b}
+  - name: c
+    cmd: *wait
+    env: {MARK: c}
+",
+    );
+    let mut child = fnug_command(dir.path(), &["-j", "3"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status = wait(&mut child);
+    let stderr = stderr(&child.wait_with_output().unwrap());
+    assert!(status.success(), "{stderr}");
+    assert!(stderr.contains("3 commands: 3 passed ("), "{stderr}");
+    // Captured, so each command's output follows its own result line
+    assert!(stderr.contains(" b PASS "), "{stderr}");
+    assert!(stderr.contains("b done\n"), "{stderr}");
+}
+
+#[test]
+fn jobs_zero_means_one_per_cpu() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: greet
+    cmd: 'echo hello'
+    auto:
+      always: true
+",
+    );
+    let output = check(dir.path(), &["--jobs", "0"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stderr(&output).contains("[1/1] greet PASS "), "{output:?}");
+}
+
+#[test]
 fn sigterm_kills_children_exits_143() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(

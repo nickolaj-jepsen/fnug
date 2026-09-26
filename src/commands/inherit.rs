@@ -27,6 +27,7 @@ pub struct Inheritance {
     entry_path: Vec<String>,
     env: HashMap<String, String>,
     timeout: Option<Duration>,
+    exclusive: Option<bool>,
 }
 
 /// A configured path that could not be resolved.
@@ -187,6 +188,7 @@ impl Inheritable for Auto {
             entry_path: inheritance.merge_entry_path("auto"),
             env: inheritance.env.clone(),
             timeout: inheritance.timeout,
+            exclusive: inheritance.exclusive,
         })
     }
 
@@ -235,6 +237,7 @@ fn calculate_common_inheritance(
         entry_path,
         env: merged_env,
         timeout: inheritance.timeout,
+        exclusive: inheritance.exclusive,
     }
 }
 
@@ -242,6 +245,7 @@ impl Inheritable for Command {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
         Ok(Inheritance {
             timeout: self.timeout.or(inheritance.timeout),
+            exclusive: self.exclusive.or(inheritance.exclusive),
             ..calculate_common_inheritance(
                 &self.name,
                 &self.cwd,
@@ -256,6 +260,7 @@ impl Inheritable for Command {
         self.cwd.clone_from(&inheritance.cwd);
         self.env.clone_from(&inheritance.env);
         self.timeout = inheritance.timeout;
+        self.exclusive = inheritance.exclusive;
         self.auto.inherit(inheritance)?;
         Ok(())
     }
@@ -265,6 +270,7 @@ impl Inheritable for CommandGroup {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
         Ok(Inheritance {
             timeout: self.timeout.or(inheritance.timeout),
+            exclusive: self.exclusive.or(inheritance.exclusive),
             ..calculate_common_inheritance(
                 &self.name,
                 &self.cwd,
@@ -279,6 +285,7 @@ impl Inheritable for CommandGroup {
         self.cwd.clone_from(&inheritance.cwd);
         self.env.clone_from(&inheritance.env);
         self.timeout = inheritance.timeout;
+        self.exclusive = inheritance.exclusive;
         self.auto.inherit(inheritance)?;
         for command in &mut self.commands {
             command.inherit(inheritance)?;

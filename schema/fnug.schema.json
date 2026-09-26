@@ -59,6 +59,13 @@
         "type": "string"
       }
     },
+    "exclusive": {
+      "description": "Default `exclusive` for every command.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "fnug_version": {
       "description": "fnug version the config is written for. fnug warns if it needs a newer fnug or targets\nan older release series.",
       "type": [
@@ -206,6 +213,13 @@
             "type": "string"
           }
         },
+        "exclusive": {
+          "description": "In parallel runs, such as `fnug check --jobs 4`, never run alongside another command;\nmeant for fixers that rewrite files. The TUI ignores it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "id": {
           "description": "Identifier used by `depends_on` and the MCP tools. Defaults to the name; must not\ncontain `/`.",
           "type": [
@@ -295,6 +309,13 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "exclusive": {
+          "description": "Default `exclusive` for everything in the group.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "id": {
           "description": "Identifier for the group. Defaults to the name; must not contain `/`.",
