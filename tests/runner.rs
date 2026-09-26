@@ -3,7 +3,9 @@
 
 mod common;
 
+use std::ffi::CString;
 use std::num::NonZeroUsize;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -530,6 +532,39 @@ async fn cancel_passes_on_the_signal_fnug_got() {
         let caught = std::fs::read_to_string(dir.path().join("caught")).unwrap_or_default();
         assert_eq!(caught.trim(), expected, "{signal:?}: {report:#?}");
     }
+}
+
+#[tokio::test]
+async fn failure_ending_during_fail_fast_keeps_its_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = CString::new(dir.path().join("exited").into_os_string().into_vec()).unwrap();
+    // SAFETY: plain syscall with a valid, NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    // `own` exits 3 by itself once its TERM-proof background process is up, and its run
+    // lingers on the pipe that process holds. `fail` fails once `own`'s shell has exited and
+    // closed the fifo, so fail-fast stops the run before `own`'s outcome is known.
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: own
+    cmd: 'exec 3> exited; (trap '''' TERM; exec 3>&-; touch ready; exec sleep 5) & i=0; until [ -e ready ]; do i=$((i+1)); [ $i -gt 500 ] && exit 9; sleep 0.01; done; exit 3'
+  - name: fail
+    cmd: 'cat exited; exit 1'
+",
+    );
+    let opts = ExecOptions {
+        fail_fast: true,
+        jobs: NonZeroUsize::new(2).unwrap(),
+        ..capture()
+    };
+    let report = tokio::time::timeout(TIMEOUT, run(&config, &cwd, &opts))
+        .await
+        .unwrap();
+    assert_eq!(*outcome(&report, "fail"), Outcome::Failed(Failure::Exit(1)));
+    assert_eq!(*outcome(&report, "own"), Outcome::Failed(Failure::Exit(3)));
+    assert!(!report.cancelled);
 }
 
 #[tokio::test]
