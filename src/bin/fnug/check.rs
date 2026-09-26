@@ -1,12 +1,14 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Args;
 use tokio_util::sync::CancellationToken;
 
 use fnug::check::{CheckOptions, CheckResult};
 use fnug::commands::group::CommandGroup;
+use fnug::config_file::parse_duration;
 use fnug::runner::Selection;
 use fnug::selectors::SelectOptions;
 
@@ -30,6 +32,11 @@ pub struct CheckArgs {
     /// Include commands with `auto.check: false`
     #[arg(long)]
     all: bool,
+
+    /// Kill commands that run longer than DURATION (seconds, or e.g. 90s, 5m), unless their
+    /// config sets `timeout`
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    timeout: Option<Duration>,
 }
 
 /// Outcome of the check subcommand.
@@ -59,6 +66,7 @@ pub async fn run(
         },
         fail_fast: args.fail_fast,
         mute_success: args.mute_success,
+        timeout: args.timeout.filter(|t| !t.is_zero()),
         ..CheckOptions::default()
     };
     let result = fnug::check::run(config, cwd, &opts, signals.cancel.clone()).await?;

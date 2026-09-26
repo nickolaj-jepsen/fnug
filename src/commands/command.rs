@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::commands::auto::Auto;
 
@@ -14,6 +15,9 @@ pub struct Command {
     pub env: HashMap<String, String>,
     pub depends_on: Vec<String>,
     pub scrollback: Option<usize>,
+    /// How long a headless run lets the command run before killing it. `Some(Duration::ZERO)`
+    /// means no limit, even when the run has a default timeout.
+    pub timeout: Option<Duration>,
 }
 
 impl Command {

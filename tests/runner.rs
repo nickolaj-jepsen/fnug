@@ -338,6 +338,78 @@ async fn timeout_kills_process_group() {
     assert!(common::wait_until(TIMEOUT, || !common::process_alive(pid)));
 }
 
+#[test]
+fn timeout_is_inherited_and_zero_disables_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, _) = common::load(
+        dir.path(),
+        r"
+name: root
+timeout: 5m
+commands:
+  - name: top
+    cmd: 'true'
+children:
+  - name: group
+    timeout: 30
+    commands:
+      - name: plain
+        cmd: 'true'
+      - name: own
+        cmd: 'true'
+        timeout: 1m 30s
+      - name: off
+        cmd: 'true'
+        timeout: 0
+",
+    );
+    let timeout = |id: &str| {
+        let cmd = config.all_commands().into_iter().find(|c| c.id == id);
+        cmd.unwrap().timeout
+    };
+    assert_eq!(timeout("top"), Some(Duration::from_secs(300)));
+    assert_eq!(timeout("plain"), Some(Duration::from_secs(30)));
+    assert_eq!(timeout("own"), Some(Duration::from_secs(90)));
+    assert_eq!(timeout("off"), Some(Duration::ZERO));
+}
+
+#[tokio::test]
+async fn command_timeout_overrides_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: default
+    cmd: 'exec sleep 30'
+  - name: short
+    cmd: 'exec sleep 30'
+    timeout: 300ms
+  - name: long
+    cmd: 'sleep 0.5'
+    timeout: 10
+  - name: off
+    cmd: 'sleep 0.5'
+    timeout: 0
+",
+    );
+    let default = Duration::from_millis(200);
+    let opts = ExecOptions {
+        jobs: NonZeroUsize::new(4).unwrap(),
+        default_timeout: Some(default),
+        ..capture()
+    };
+    let report = run(&config, &cwd, &opts).await;
+    assert_eq!(*outcome(&report, "default"), Outcome::TimedOut(default));
+    assert_eq!(
+        *outcome(&report, "short"),
+        Outcome::TimedOut(Duration::from_millis(300))
+    );
+    assert_eq!(*outcome(&report, "long"), Outcome::Passed);
+    assert_eq!(*outcome(&report, "off"), Outcome::Passed);
+}
+
 #[tokio::test]
 async fn cancel_kills_group() {
     let dir = tempfile::tempdir().unwrap();

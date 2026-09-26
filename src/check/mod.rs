@@ -36,7 +36,7 @@ pub struct CheckOptions {
     /// How many commands may run at once. Above 1, each command's output is captured and
     /// printed when it ends.
     pub jobs: NonZeroUsize,
-    /// Kill commands that run longer than this.
+    /// Kill commands that run longer than this, unless they have their own `timeout`.
     pub timeout: Option<Duration>,
 }
 

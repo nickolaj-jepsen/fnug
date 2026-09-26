@@ -77,6 +77,17 @@
       "description": "Display name for the root group.",
       "type": "string"
     },
+    "timeout": {
+      "description": "Default `timeout` for every command.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Duration"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "workspace": {
       "description": "Discover and merge package configs from subdirectories.",
       "anyOf": [
@@ -214,6 +225,17 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "timeout": {
+          "description": "In `fnug check` and MCP runs, kill the command once it has run this long. `0` means no\nlimit, overriding the parent group's value and `fnug check --timeout`. The TUI ignores\nit.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -284,11 +306,34 @@
         "name": {
           "description": "Display name.",
           "type": "string"
+        },
+        "timeout": {
+          "description": "Default `timeout` for everything in the group.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
         "name"
+      ]
+    },
+    "Duration": {
+      "description": "Whole seconds, or a duration such as `90s`, `5m` or `1h 30m`.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "WorkspaceConfig": {

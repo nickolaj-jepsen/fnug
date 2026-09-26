@@ -93,6 +93,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
 | `--mute-success`  | Capture each command's output and print it only if it fails (`check` only) |
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
+| `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
 | `-V`, `--version` | Print fnug's version                                            |
 
 `-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
@@ -365,6 +366,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `cwd`          | string            | Working directory (inherited by children)                         |
 | `env`          | map               | Environment variables (inherited by children, `$VAR` expanded)    |
 | `auto`         | object            | Default auto rules (inherited by children)                        |
+| `timeout`      | integer / string  | Default command `timeout` (inherited by children)                 |
 | `$schema`      | string            | JSON Schema URL for editors (mainly for `.fnug.json`); ignored    |
 
 `fnug_version` compares only the `major.minor.patch` numbers, so `0.1.0` matches `0.1.0-alpha.13`. fnug warns when the config needs a newer fnug, when it was written for an older release series (a different minor version before 1.0, a different major version after), or when the version can't be parsed.
@@ -381,6 +383,9 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `auto`       | object            | Auto-selection rules (see below)                                    |
 | `depends_on` | list of strings   | Commands that must finish first, by id or unique name               |
 | `scrollback` | integer           | PTY scrollback buffer size (number of lines)                        |
+| `timeout`    | integer / string  | Time limit in `fnug check` and MCP runs (see below)                 |
+
+`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM` (its whole process group, when output is captured), then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
 
 #### Group fields
 
@@ -391,6 +396,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `cwd`      | string            | Working directory (inherited by children)                             |
 | `env`      | map               | Environment variables (inherited by children, `$VAR` expanded)        |
 | `auto`     | object            | Default auto rules (inherited by children)                            |
+| `timeout`  | integer / string  | Default command `timeout` (inherited by children)                     |
 | `commands` | list              | Commands in this group                                                |
 | `children` | list              | Nested child groups                                                   |
 
