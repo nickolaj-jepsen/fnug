@@ -189,6 +189,43 @@ commands:
 }
 
 #[test]
+fn timeout_flag_stops_hung_command() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+auto:
+  always: true
+commands:
+  - name: hang
+    cmd: 'exec sleep 30'
+  - name: slow
+    cmd: 'sleep 0.5'
+    timeout: 0
+",
+    );
+    for args in [
+        &["--timeout", "300ms"][..],
+        &["--timeout=300ms", "--mute-success"],
+    ] {
+        let mut child = fnug_command(dir.path(), args)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let status = wait(&mut child);
+        let stderr = stderr(&child.wait_with_output().unwrap());
+        assert_eq!(status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("hang TIMEOUT after 0.3s"), "{stderr}");
+        assert!(stderr.contains("slow PASS"), "{stderr}");
+    }
+
+    let output = check(dir.path(), &["--timeout", "soon"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("invalid duration"), "{output:?}");
+}
+
+#[test]
 fn sigterm_kills_children_exits_143() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(

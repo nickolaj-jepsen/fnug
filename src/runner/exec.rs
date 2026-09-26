@@ -50,7 +50,8 @@ pub struct ExecOptions {
     /// After the first failure, start nothing new and kill running commands.
     pub fail_fast: bool,
     pub output: OutputMode,
-    /// Kill a command that runs longer than this.
+    /// Kill a command that runs longer than this, unless it has its own
+    /// [`timeout`](crate::commands::command::Command::timeout).
     pub default_timeout: Option<Duration>,
     /// Cancelling it kills running commands and starts nothing new.
     pub cancel: CancellationToken,
@@ -295,9 +296,14 @@ async fn run_command<H: ExecHook>(
 ) -> Ended {
     let token = hook.before(cmd);
     let invocation = shell_invocation(&cmd.command, cwd);
+    let timeout = cmd
+        .command
+        .timeout
+        .or(opts.default_timeout)
+        .filter(|t| !t.is_zero());
     let started = Instant::now();
     let (mut outcome, output) = match Spawned::spawn(&invocation, opts.output) {
-        Ok(spawned) => spawned.run(opts, stop).await,
+        Ok(spawned) => spawned.run(timeout, opts.kill_grace, stop).await,
         Err(e) => (Outcome::Failed(Failure::Spawn(e.to_string())), None),
     };
     let duration = started.elapsed();
@@ -380,14 +386,15 @@ impl Spawned {
         Ok(Self { guard, exit, pipe })
     }
 
-    /// Wait for the command to exit, killing it on timeout or `stop`, then clean up after it.
+    /// Wait for the command to exit, stopping it after `timeout` or on `stop` with `SIGTERM`
+    /// and, `kill_grace` later, `SIGKILL`. Then clean up after it.
     async fn run(
         mut self,
-        opts: &ExecOptions,
+        timeout: Option<Duration>,
+        kill_grace: Duration,
         stop: &CancellationToken,
     ) -> (Outcome, Option<CapturedOutput>) {
         let group = self.pipe.is_some();
-        let timeout = opts.default_timeout;
         let deadline = tokio::time::sleep(timeout.unwrap_or(Duration::MAX));
         tokio::pin!(deadline);
         let mut buf = vec![0; 16 * 1024];
@@ -403,11 +410,11 @@ impl Spawned {
                 waited = &mut self.exit => break waited,
                 () = &mut deadline, if timeout.is_some() && !timed_out && !cancelled => {
                     timed_out = true;
-                    self.stop(opts.kill_grace);
+                    self.stop(kill_grace);
                 }
                 () = stop.cancelled(), if !timed_out && !cancelled => {
                     cancelled = true;
-                    self.stop(opts.kill_grace);
+                    self.stop(kill_grace);
                 }
             }
         };
