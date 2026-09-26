@@ -2,6 +2,7 @@
 
 mod modified;
 mod printer;
+pub mod stash;
 
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -20,15 +21,19 @@ use crate::selectors::SelectOptions;
 
 use modified::ModificationGuard;
 use printer::Printer;
+use stash::StashError;
 
 #[derive(Error, Debug)]
 pub enum CheckError {
     #[error(transparent)]
     Plan(#[from] PlanError),
+    #[error(transparent)]
+    Stash(#[from] StashError),
 }
 
 /// How [`run`] selects and runs commands.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CheckOptions {
     pub selection: Selection,
     /// After the first failure, start nothing new and stop running commands.
@@ -46,6 +51,9 @@ pub struct CheckOptions {
     /// Fail a command that passes but changes tracked files in its git work tree, as a
     /// formatter does when it finds something to fix.
     pub detect_modifications: bool,
+    /// Set unstaged changes to tracked files aside while commands run, so they see what the
+    /// index holds; see [`stash::stash`]. Only in the git work tree containing `cwd`.
+    pub stash: bool,
 }
 
 impl Default for CheckOptions {
@@ -63,6 +71,7 @@ impl Default for CheckOptions {
             timeout: None,
             cancel_cause: CancelCause::default(),
             detect_modifications: true,
+            stash: false,
         }
     }
 }
@@ -82,10 +91,13 @@ pub struct CheckResult {
 /// streams through. Otherwise it is captured and printed after each command ends.
 /// Cancelling `cancel` stops the running commands, and the summary covers what finished.
 ///
+/// With `opts.stash`, unstaged changes are set aside only when something is selected, and put
+/// back once every command has exited.
+///
 /// # Errors
 ///
 /// Returns `CheckError::Plan` if a target names no single command or git selection fails as a
-/// whole.
+/// whole, and `CheckError::Stash` if unstaged changes can't be set aside or put back.
 pub async fn run(
     config: &CommandGroup,
     cwd: &Path,
@@ -104,12 +116,27 @@ pub async fn run(
     };
     let mut printer = Printer::new(&plan, output, opts.jobs.get() == 1, opts.mute_success);
     if plan.is_empty() {
+        if opts.stash
+            && let Some(note) = stash::recover(cwd)?
+        {
+            printer.stash_recovered(&note);
+        }
         printer.nothing_selected(config.all_commands().len());
         return Ok(CheckResult {
             exit_code: 0,
             report: RunReport::default(),
         });
     }
+
+    let stashed = if opts.stash {
+        let guard = stash::stash(cwd)?;
+        if let Some(note) = guard.recovered() {
+            printer.stash_recovered(note);
+        }
+        Some(guard)
+    } else {
+        None
+    };
 
     let exec = ExecOptions {
         jobs: opts.jobs,
@@ -128,6 +155,13 @@ pub async fn run(
         runner::execute(&plan, cwd, &exec, &NoHook, &mut on_event).await
     };
     printer.summary(&report);
+    if let Some(guard) = stashed {
+        if report.cancelled {
+            // Signals only cancel by now, so fnug won't exit before this is done
+            printer.restoring_stash();
+        }
+        printer.stash_restored(&guard.restore()?);
+    }
     Ok(CheckResult {
         exit_code: i32::from(!report.success()),
         report,
