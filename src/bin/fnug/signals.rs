@@ -2,27 +2,26 @@
 
 use std::io;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 
+use fnug::process::StopSignal;
+use fnug::runner::CancelCause;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 /// A cancellation token that the first termination signal cancels.
 pub struct Signals {
     pub cancel: CancellationToken,
-    received: Arc<AtomicI32>,
+    /// The signal that cancelled `cancel`.
+    pub cause: CancelCause,
 }
 
 impl Signals {
     /// 128 plus the number of the first signal received, the shell's code for dying by it.
     pub fn exit_code(&self) -> Option<ExitCode> {
-        match self.received.load(Ordering::SeqCst) {
-            0 => None,
-            signal => Some(ExitCode::from(
-                u8::try_from(128 + signal).unwrap_or(u8::MAX),
-            )),
-        }
+        let signal = self.cause.signal()?;
+        Some(ExitCode::from(
+            u8::try_from(128 + signal.raw()).unwrap_or(u8::MAX),
+        ))
     }
 }
 
@@ -34,28 +33,23 @@ impl Signals {
 /// Returns the error from registering a signal handler.
 pub fn install() -> io::Result<Signals> {
     let cancel = CancellationToken::new();
-    let received = Arc::new(AtomicI32::new(0));
-    for kind in [
-        SignalKind::interrupt(),
-        SignalKind::terminate(),
-        SignalKind::hangup(),
+    let cause = CancelCause::default();
+    for (kind, received) in [
+        (SignalKind::interrupt(), StopSignal::Interrupt),
+        (SignalKind::terminate(), StopSignal::Terminate),
+        (SignalKind::hangup(), StopSignal::Hangup),
     ] {
         let mut stream = signal(kind)?;
         let cancel = cancel.clone();
-        let received = received.clone();
+        let cause = cause.clone();
         tokio::spawn(async move {
             while stream.recv().await.is_some() {
-                let _ = received.compare_exchange(
-                    0,
-                    kind.as_raw_value(),
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
+                cause.set_signal(received);
                 cancel.cancel();
             }
         });
     }
-    Ok(Signals { cancel, received })
+    Ok(Signals { cancel, cause })
 }
 
 /// Let SIGTERM and SIGHUP end fnug again, for the TUI, which handles neither. SIGINT stays

@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -60,6 +60,7 @@ impl Drop for KillOnDrop {
 /// on drop.
 struct PtyCheck {
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    writer: Box<dyn Write + Send>,
     output: Arc<Mutex<Vec<u8>>>,
     _master: Box<dyn MasterPty + Send>,
 }
@@ -89,6 +90,7 @@ impl PtyCheck {
         });
         Some(Self {
             child,
+            writer: pair.master.take_writer().unwrap(),
             output,
             _master: pair.master,
         })
@@ -97,6 +99,12 @@ impl PtyCheck {
     /// What fnug and its commands wrote to the terminal so far.
     fn output(&self) -> String {
         String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+    }
+
+    /// Type `keys` at the terminal.
+    fn type_keys(&mut self, keys: &[u8]) {
+        self.writer.write_all(keys).unwrap();
+        self.writer.flush().unwrap();
     }
 
     /// Wait for fnug to exit and return its exit code, killing it after [`TIMEOUT`].
@@ -430,4 +438,73 @@ commands:
         assert!(output.contains("prompt"), "{args:?}:\n{output}");
         assert!(output.contains("FAIL"), "{args:?}:\n{output}");
     }
+}
+
+#[test]
+fn ctrl_c_lets_commands_clean_up() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: graceful
+    cmd: 'trap ''sleep 0.3; touch cleaned-up; exit 130'' INT; touch started; i=0; while [ $i -lt 600 ]; do i=$((i+1)); sleep 0.05; done'
+    auto:
+      always: true
+",
+    );
+    for args in [&[][..], &["--mute-success"]] {
+        for marker in ["started", "cleaned-up"] {
+            let _ = std::fs::remove_file(dir.path().join(marker));
+        }
+        let Some(mut fnug) = PtyCheck::start(dir.path(), args) else {
+            return;
+        };
+        let started = dir.path().join("started");
+        assert!(common::wait_until(TIMEOUT, || started.exists()), "{args:?}");
+        fnug.type_keys(b"\x03");
+        let code = fnug.wait();
+        let output = fnug.output();
+        assert_eq!(code, 130, "{args:?}:\n{output}");
+        assert!(
+            dir.path().join("cleaned-up").exists(),
+            "{args:?}:\n{output}"
+        );
+        assert!(output.contains("CANCELLED"), "{args:?}:\n{output}");
+    }
+}
+
+#[test]
+fn ctrl_c_sends_sigterm_later_to_streamed_command_that_ignores_it() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: stubborn
+    cmd: 'trap '''' INT; trap ''echo TERM > caught; exit 1'' TERM; sleep 30 & echo $! > pid; wait'
+    auto:
+      always: true
+",
+    );
+    let Some(mut fnug) = PtyCheck::start(dir.path(), &[]) else {
+        return;
+    };
+    // Stays behind, since only the shell gets signals
+    let _sleep = KillOnDrop(common::read_pid(&dir.path().join("pid")));
+    fnug.type_keys(b"\x03");
+    let interrupted = Instant::now();
+    let code = fnug.wait();
+    let output = fnug.output();
+    assert_eq!(code, 130, "{output}");
+    let caught = std::fs::read_to_string(dir.path().join("caught")).unwrap_or_default();
+    assert_eq!(caught.trim(), "TERM", "{output}");
+    // SIGTERM waits for the kill grace
+    assert!(
+        interrupted.elapsed() > Duration::from_secs(2),
+        "{:?}",
+        interrupted.elapsed()
+    );
 }

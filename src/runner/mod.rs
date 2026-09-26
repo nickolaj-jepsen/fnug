@@ -11,7 +11,9 @@ pub mod process;
 pub mod report;
 
 pub use dag::{DagNode, DagState, NodeState};
-pub use exec::{ExecHook, ExecOptions, KILL_GRACE, NoHook, OutputMode, RunEvent, execute};
+pub use exec::{
+    CancelCause, ExecHook, ExecOptions, KILL_GRACE, NoHook, OutputMode, RunEvent, execute,
+};
 pub use output::{CaptureLimits, CapturedOutput};
 pub(crate) use plan::commands_with_group_path;
 pub use plan::{

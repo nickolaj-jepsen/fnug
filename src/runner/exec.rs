@@ -6,6 +6,7 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::{Child, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -21,7 +22,7 @@ use super::output::{CaptureLimits, CapturedOutput};
 use super::plan::{Plan, PlannedCommand};
 use super::process::{GroupGuard, ShellInvocation, new_session, shell_invocation};
 use super::report::{CommandReport, Failure, Outcome, RunReport};
-use crate::process::{ExitInfo, ProcessHandle, StopSignal};
+use crate::process::{ExitInfo, ProcessHandle, SignalScope, StopSignal};
 
 /// How long a command gets to exit after `SIGTERM` before it is killed.
 pub const KILL_GRACE: Duration = Duration::from_secs(3);
@@ -55,7 +56,11 @@ pub struct ExecOptions {
     pub default_timeout: Option<Duration>,
     /// Cancelling it kills running commands and starts nothing new.
     pub cancel: CancellationToken,
-    /// How long a timed-out or cancelled command gets after `SIGTERM` before `SIGKILL`.
+    /// The signal fnug received that cancelled `cancel`, if any, which decides what running
+    /// commands get.
+    pub cancel_cause: CancelCause,
+    /// How long a stopped command gets to exit before `SIGKILL`, and a command that got the
+    /// terminal's Ctrl+C gets before `SIGTERM`.
     pub kill_grace: Duration,
 }
 
@@ -67,8 +72,35 @@ impl Default for ExecOptions {
             output: OutputMode::Inherit,
             default_timeout: None,
             cancel: CancellationToken::new(),
+            cancel_cause: CancelCause::default(),
             kill_grace: KILL_GRACE,
         }
+    }
+}
+
+/// Why [`ExecOptions::cancel`] was cancelled, when a signal to fnug did it. Clones share it.
+///
+/// Record the signal before cancelling the token; [`execute`] reads it when the token fires.
+/// Running commands then get, each followed by `SIGKILL` if they are still running
+/// [`kill_grace`](ExecOptions::kill_grace) later:
+/// - with no signal, as for a fail-fast stop or an MCP client's cancellation: `SIGTERM`;
+/// - for `SIGINT`, a command in fnug's process group, which the terminal's Ctrl+C has already
+///   reached: nothing at first, then `SIGTERM` once `kill_grace` has passed. A command in its
+///   own process group gets `SIGINT`;
+/// - for `SIGTERM` or `SIGHUP`: the same signal.
+#[derive(Debug, Clone, Default)]
+pub struct CancelCause(Arc<OnceLock<StopSignal>>);
+
+impl CancelCause {
+    /// Record that fnug received `signal`. Only the first signal counts.
+    pub fn set_signal(&self, signal: StopSignal) {
+        let _ = self.0.set(signal);
+    }
+
+    /// The signal fnug received, or `None` if none was recorded.
+    #[must_use]
+    pub fn signal(&self) -> Option<StopSignal> {
+        self.0.get().copied()
     }
 }
 
@@ -303,7 +335,7 @@ async fn run_command<H: ExecHook>(
         .filter(|t| !t.is_zero());
     let started = Instant::now();
     let (mut outcome, output) = match Spawned::spawn(&invocation, opts.output) {
-        Ok(spawned) => spawned.run(timeout, opts.kill_grace, stop).await,
+        Ok(spawned) => spawned.run(timeout, opts, stop).await,
         Err(e) => (Outcome::Failed(Failure::Spawn(e.to_string())), None),
     };
     let duration = started.elapsed();
@@ -386,19 +418,24 @@ impl Spawned {
         Ok(Self { guard, exit, pipe })
     }
 
-    /// Wait for the command to exit, stopping it after `timeout` or on `stop` with `SIGTERM`
-    /// and, `kill_grace` later, `SIGKILL`. Then clean up after it.
+    /// Wait for the command to exit, stopping it after `timeout` with `SIGTERM`, or on `stop`
+    /// as [`CancelCause`] describes, and with `SIGKILL` if it outlives `opts.kill_grace`. Then
+    /// clean up after it.
     async fn run(
         mut self,
         timeout: Option<Duration>,
-        kill_grace: Duration,
+        opts: &ExecOptions,
         stop: &CancellationToken,
     ) -> (Outcome, Option<CapturedOutput>) {
-        let group = self.pipe.is_some();
+        let grace = opts.kill_grace;
+        let group = self.guard.handle().scope() == SignalScope::Group;
         let deadline = tokio::time::sleep(timeout.unwrap_or(Duration::MAX));
         tokio::pin!(deadline);
+        let escalation = tokio::time::sleep(Duration::MAX);
+        tokio::pin!(escalation);
+        let mut escalating = false;
         let mut buf = vec![0; 16 * 1024];
-        let mut eof = !group;
+        let mut eof = self.pipe.is_none();
         let mut timed_out = false;
         let mut cancelled = false;
 
@@ -410,11 +447,26 @@ impl Spawned {
                 waited = &mut self.exit => break waited,
                 () = &mut deadline, if timeout.is_some() && !timed_out && !cancelled => {
                     timed_out = true;
-                    self.stop(kill_grace);
+                    self.stop(StopSignal::Terminate, grace);
                 }
                 () = stop.cancelled(), if !timed_out && !cancelled => {
                     cancelled = true;
-                    self.stop(kill_grace);
+                    // A fail-fast stop cancels `stop` alone, and has no cause
+                    let cause = opts.cancel_cause.signal().filter(|_| opts.cancel.is_cancelled());
+                    match cause {
+                        Some(StopSignal::Interrupt) if !group => {
+                            // The terminal sent it Ctrl+C with fnug, and a second SIGINT would
+                            // cut its cleanup short
+                            escalation.as_mut().reset(tokio::time::Instant::now() + grace);
+                            escalating = true;
+                        }
+                        Some(signal) => self.stop(signal, grace),
+                        None => self.stop(StopSignal::Terminate, grace),
+                    }
+                }
+                () = &mut escalation, if escalating => {
+                    escalating = false;
+                    self.stop(StopSignal::Terminate, grace);
                 }
             }
         };
@@ -478,9 +530,9 @@ impl Spawned {
         }
     }
 
-    fn stop(&self, grace: Duration) {
+    fn stop(&self, signal: StopSignal, grace: Duration) {
         let handle = self.guard.handle();
-        if let Err(e) = handle.stop(StopSignal::Terminate, grace) {
+        if let Err(e) = handle.stop(signal, grace) {
             warn!("Failed to stop pid {}: {e}", handle.pid());
         }
     }

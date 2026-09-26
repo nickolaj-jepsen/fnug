@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commands::group::CommandGroup;
 use crate::runner::{
-    self, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions, RunReport,
-    Selection,
+    self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions,
+    RunReport, Selection,
 };
 use crate::selectors::SelectOptions;
 
@@ -38,6 +38,9 @@ pub struct CheckOptions {
     pub jobs: NonZeroUsize,
     /// Kill commands that run longer than this, unless they have their own `timeout`.
     pub timeout: Option<Duration>,
+    /// The signal fnug received that cancels [`run`]'s token, if any, which decides what
+    /// running commands get.
+    pub cancel_cause: CancelCause,
 }
 
 impl Default for CheckOptions {
@@ -52,6 +55,7 @@ impl Default for CheckOptions {
             mute_success: false,
             jobs: NonZeroUsize::MIN,
             timeout: None,
+            cancel_cause: CancelCause::default(),
         }
     }
 }
@@ -106,6 +110,7 @@ pub async fn run(
         output,
         default_timeout: opts.timeout,
         cancel,
+        cancel_cause: opts.cancel_cause.clone(),
         kill_grace: runner::KILL_GRACE,
     };
     let report = runner::execute(&plan, cwd, &exec, &NoHook, &mut |event| {
