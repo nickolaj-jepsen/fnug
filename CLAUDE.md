@@ -60,7 +60,7 @@ The project dogfoods itself — see `.fnug.yaml` for the lint/test config. The f
 - **Dependencies** — `depends_on` resolved via topological sort (Kahn's algorithm) in check mode
 - **PTY** — Each command gets its own PTY with dedicated reader/writer threads feeding a vt100 parser
 - **Async** — Tokio multi-thread runtime for event loop, signals, and process management
-- **Watch channel** — `tokio::sync::watch` broadcasts PTY output changes to trigger UI redraws
+- **Redraws** — PTY output marks its terminal dirty and wakes the event loop through a shared `Arc<Notify>`; the loop redraws when the visible terminal is dirty or an event changed something, at most one frame per 16 ms. Only a mouse button press or release draws right away, and only when something besides the visible terminal's output changed since the last frame
 
 ## Testing
 
