@@ -121,9 +121,6 @@ impl Printer {
                 report,
                 ..
             } => {
-                if report.outcome == Outcome::NotRun {
-                    return;
-                }
                 let status = self.status(report);
                 match self.open.take() {
                     Some(open) if open == seq => eprintln!("{status}"),
