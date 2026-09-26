@@ -103,14 +103,18 @@ pub enum SelectionIssue {
     /// The repo with this work tree could not be scanned, so nothing in it selects.
     ScanFailed { repo: PathBuf, message: String },
     /// The since-base scope's `base` can't be resolved in this repo, or shares no history with
-    /// its `HEAD`, so nothing in it selects.
+    /// its `HEAD`, so nothing in it selects. Fatal in the repo of the working directory, or in
+    /// any repo when that one isn't scanned; elsewhere, such as in another repo of a workspace,
+    /// its commands just aren't selected.
     BaseRefNotFound {
         repo: PathBuf,
         base: String,
         message: String,
+        fatal: bool,
     },
     /// The since-base scope found no `HEAD` commit in this repo, so nothing in it selects.
-    UnbornHead { repo: PathBuf },
+    /// Fatal as for `BaseRefNotFound`.
+    UnbornHead { repo: PathBuf, fatal: bool },
 }
 
 impl SelectionIssue {
@@ -118,9 +122,10 @@ impl SelectionIssue {
     #[must_use]
     pub fn is_fatal(&self) -> bool {
         match self {
-            SelectionIssue::NotInRepo { fatal, .. } => *fatal,
+            SelectionIssue::NotInRepo { fatal, .. }
+            | SelectionIssue::BaseRefNotFound { fatal, .. }
+            | SelectionIssue::UnbornHead { fatal, .. } => *fatal,
             SelectionIssue::ScanFailed { .. } => false,
-            SelectionIssue::BaseRefNotFound { .. } | SelectionIssue::UnbornHead { .. } => true,
         }
     }
 }
@@ -148,18 +153,30 @@ impl fmt::Display for SelectionIssue {
                 repo,
                 base,
                 message,
+                fatal,
             } => write!(
                 f,
                 "can't compare {} with base '{base}': {message} (in CI, fetch the base with \
-                 full history, e.g. actions/checkout with fetch-depth: 0)",
-                repo.display()
+                 full history, e.g. actions/checkout with fetch-depth: 0){}",
+                repo.display(),
+                skipped_suffix(*fatal)
             ),
-            SelectionIssue::UnbornHead { repo } => write!(
+            SelectionIssue::UnbornHead { repo, fatal } => write!(
                 f,
-                "can't compare {} with a base: HEAD has no commits yet",
-                repo.display()
+                "can't compare {} with a base: HEAD has no commits yet{}",
+                repo.display(),
+                skipped_suffix(*fatal)
             ),
         }
+    }
+}
+
+/// What a repo's issue that isn't fatal means for the run.
+fn skipped_suffix(fatal: bool) -> &'static str {
+    if fatal {
+        ""
+    } else {
+        "; nothing in it is selected"
     }
 }
 
