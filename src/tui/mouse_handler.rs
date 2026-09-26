@@ -44,6 +44,26 @@ impl App {
         (prefix_width + guide_width) as u16
     }
 
+    /// The rows of the tree column `tree_area` that list nodes: all but the search bar's.
+    fn tree_rows(&self, tree_area: Rect) -> Rect {
+        let bar = u16::from(self.search.has_query()).min(tree_area.height);
+        Rect {
+            y: tree_area.y + bar,
+            height: tree_area.height - bar,
+            ..tree_area
+        }
+    }
+
+    /// The index in `visible_nodes` of the node on screen row `y`, if that row shows one.
+    fn node_at_row(&self, y: u16, tree_area: Rect) -> Option<usize> {
+        let rows = self.tree_rows(tree_area);
+        if y < rows.y || y >= rows.bottom() {
+            return None;
+        }
+        let index = usize::from(y - rows.y) + self.tree_scroll;
+        (index < self.visible_nodes.len()).then_some(index)
+    }
+
     /// Handle mouse input
     #[expect(
         clippy::too_many_lines,
@@ -129,8 +149,7 @@ impl App {
                 match mouse.column.cmp(&tree_area.width) {
                     std::cmp::Ordering::Less => {
                         self.focus = Focus::Tree;
-                        let row = mouse.row.saturating_sub(tree_area.y) as usize + self.tree_scroll;
-                        if row < self.visible_nodes.len() {
+                        if let Some(row) = self.node_at_row(mouse.row, tree_area) {
                             let node = self.visible_nodes[row].clone();
                             let orb_col = Self::orb_column(&node);
                             let on_orb = mouse.column >= orb_col && mouse.column < orb_col + 2;
@@ -222,16 +241,11 @@ impl App {
                 self.mouse.scrollbar_dragging = false;
             }
             MouseEventKind::Moved => {
-                if mouse.column < tree_area.width {
-                    let row = mouse.row.saturating_sub(tree_area.y) as usize + self.tree_scroll;
-                    if row < self.visible_nodes.len() {
-                        self.mouse.hover_row = Some(row);
-                    } else {
-                        self.mouse.hover_row = None;
-                    }
+                self.mouse.hover_row = if mouse.column < tree_area.width {
+                    self.node_at_row(mouse.row, tree_area)
                 } else {
-                    self.mouse.hover_row = None;
-                }
+                    None
+                };
             }
             MouseEventKind::ScrollUp => {
                 if mouse.column < tree_area.width {
@@ -258,7 +272,7 @@ impl App {
             MouseEventKind::ScrollDown => {
                 if mouse.column < tree_area.width {
                     self.tree_scroll += 5;
-                    self.clamp_tree_scroll(usize::from(tree_area.height));
+                    self.clamp_tree_scroll(usize::from(self.tree_rows(tree_area).height));
                 } else if self.logs_on_screen() {
                     self.log_scroll = self.log_scroll.saturating_sub(5);
                 } else if let Some(ref active_id) = self.active_terminal_id
@@ -283,8 +297,7 @@ impl App {
 
                 if mouse.column < tree_area.width {
                     // Right-click in tree area
-                    let row = mouse.row.saturating_sub(tree_area.y) as usize + self.tree_scroll;
-                    if row < self.visible_nodes.len() {
+                    if let Some(row) = self.node_at_row(mouse.row, tree_area) {
                         self.set_cursor_index(row);
                         self.update_active_terminal();
                         let node = self.visible_nodes[row].clone();
