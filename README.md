@@ -238,7 +238,7 @@ The TUI exits with the same codes: 128+n when a signal stops it, 2 when it fails
 
 ### CI usage
 
-A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects nothing there. In a pull request, compare with the target branch; elsewhere, run everything. `--base` needs the merge base in the clone, so fetch the whole history:
+A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects nothing there. In a pull request, compare with the target branch with `--base`; elsewhere, run everything with `--all`. `--base` needs the merge base in the clone, so fetch the whole history: in a shallow clone, `fnug check --base` exits with 2 and says it found no common history. In GitHub Actions, after installing fnug (see [Installation](#installation)):
 
 ```yaml
 - uses: actions/checkout@v5
@@ -250,7 +250,9 @@ A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects no
   run: fnug check --all
 ```
 
-If the checkout belongs to another user than the one running fnug, as in some containers, see [Trusted configs](#trusted-configs).
+Without a terminal, `fnug check` never offers to open the TUI, and runs each command in a session of its own (see [Commands without a terminal](#commands-without-a-terminal)). Add `--jobs 0` to run independent commands at once, one per CPU, and `--timeout` to stop a command that hangs. Exit code 1 means a check failed, and 2 that fnug couldn't run the checks (see [Exit codes](#exit-codes)).
+
+If the checkout belongs to another user than the one running fnug, as in some containers, fnug refuses the config it finds until you set `FNUG_SAFE_DIRECTORIES` (see [Trusted configs](#trusted-configs)).
 
 ### Commands that change files
 
