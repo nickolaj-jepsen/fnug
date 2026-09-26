@@ -95,7 +95,7 @@ pub async fn run(
     } else {
         OutputMode::Capture(CaptureLimits::DEFAULT)
     };
-    let mut printer = Printer::new(&plan, output, opts.mute_success);
+    let mut printer = Printer::new(&plan, output, opts.jobs.get() == 1, opts.mute_success);
     if plan.is_empty() {
         printer.nothing_selected();
         return Ok(CheckResult {
