@@ -23,7 +23,9 @@ pub enum StopSignal {
 }
 
 impl StopSignal {
-    fn raw(self) -> libc::c_int {
+    /// The signal's number.
+    #[must_use]
+    pub fn raw(self) -> libc::c_int {
         match self {
             StopSignal::Interrupt => libc::SIGINT,
             StopSignal::Terminate => libc::SIGTERM,

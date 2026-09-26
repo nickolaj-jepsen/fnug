@@ -81,6 +81,7 @@ pub async fn run(
         mute_success: args.mute_success,
         jobs: args.jobs(),
         timeout: args.timeout.filter(|t| !t.is_zero()),
+        cancel_cause: signals.cause.clone(),
     };
     let result = fnug::check::run(config, cwd, &opts, signals.cancel.clone()).await?;
     if let Some(code) = signals.exit_code() {
