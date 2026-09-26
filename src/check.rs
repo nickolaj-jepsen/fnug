@@ -1,19 +1,21 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 use std::time::Instant;
 
+use log::warn;
 use thiserror::Error;
 
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
-use crate::selectors::{self, SelectorError};
+use crate::runner::{self, PlanError, PlanOptions, Selection};
+use crate::selectors::SelectOptions;
 
 #[derive(Error, Debug)]
 pub enum CheckError {
-    #[error("selector error: {0}")]
-    Selector(#[from] SelectorError),
+    #[error(transparent)]
+    Plan(#[from] PlanError),
 }
 
 /// Result of executing a single command with captured output.
@@ -23,32 +25,6 @@ pub(crate) struct CommandResult {
     pub stdout: String,
     pub stderr: String,
     pub duration: std::time::Duration,
-}
-
-/// Expand selected commands to include all transitive dependencies.
-pub(crate) fn expand_dependencies<'a>(
-    selected: &[&'a Command],
-    all_commands: &'a [Command],
-) -> Vec<&'a Command> {
-    let cmd_by_id: HashMap<&str, &Command> =
-        all_commands.iter().map(|c| (c.id.as_str(), c)).collect();
-
-    let mut selected_ids: HashSet<String> = selected.iter().map(|c| c.id.clone()).collect();
-    let mut queue: VecDeque<String> = selected_ids.iter().cloned().collect();
-    while let Some(id) = queue.pop_front() {
-        if let Some(cmd) = cmd_by_id.get(id.as_str()) {
-            for dep in &cmd.depends_on {
-                if selected_ids.insert(dep.clone()) {
-                    queue.push_back(dep.clone());
-                }
-            }
-        }
-    }
-
-    all_commands
-        .iter()
-        .filter(|c| selected_ids.contains(&c.id))
-        .collect()
 }
 
 /// Execute a single command, capturing stdout and stderr.
@@ -200,7 +176,7 @@ fn execute_streaming(cmd: &Command, cwd: &Path, sty: &Style) -> bool {
 ///
 /// # Errors
 ///
-/// Returns `CheckError::Selector` if git-based command selection fails.
+/// Returns `CheckError::Plan` if git selection fails as a whole.
 pub fn run(
     config: &CommandGroup,
     cwd: &Path,
@@ -209,14 +185,16 @@ pub fn run(
     all: bool,
 ) -> Result<CheckResult, CheckError> {
     let sty = Style::new();
-    let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
-    let mut selected = selectors::get_selected_commands(all_commands.clone())?;
-
-    if !all {
-        selected.retain(|cmd| cmd.auto.check != Some(false));
+    let selection = Selection::Auto {
+        options: SelectOptions::default(),
+        include_manual: all,
+    };
+    let plan = runner::plan(config, &selection, &PlanOptions::default())?;
+    for warning in &plan.warnings {
+        warn!("{warning}");
     }
 
-    if selected.is_empty() {
+    if plan.is_empty() {
         eprintln!("{}", sty.dim("No commands selected."));
         return Ok(CheckResult {
             exit_code: 0,
@@ -225,11 +203,8 @@ pub fn run(
         });
     }
 
-    // Expand dependencies and topologically sort
-    let selected_refs: Vec<&Command> = selected.iter().collect();
-    let commands_to_run = expand_dependencies(&selected_refs, &all_commands);
-    let selected_ids: HashSet<String> = commands_to_run.iter().map(|c| c.id.clone()).collect();
-    let ordered = topo_sort(&commands_to_run);
+    let selected_ids: HashSet<String> = plan.ids().map(str::to_string).collect();
+    let ordered: Vec<&Command> = plan.commands.iter().map(|c| &c.command).collect();
 
     // Execute sequentially
     let total = ordered.len();
@@ -334,64 +309,4 @@ fn print_summary(
         parts.join(&sty.dim(", ")),
         sty.dim(&format!("({})", format_duration(elapsed)))
     );
-}
-
-/// Topological sort using Kahn's algorithm.
-/// Commands with no dependencies come first.
-pub(crate) fn topo_sort<'a>(commands: &[&'a Command]) -> Vec<&'a Command> {
-    let ids: HashSet<&str> = commands.iter().map(|c| c.id.as_str()).collect();
-
-    // in-degree: count of deps that are in our set
-    let mut in_degree: HashMap<&str, usize> = HashMap::new();
-    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
-
-    for cmd in commands {
-        let deg = cmd
-            .depends_on
-            .iter()
-            .filter(|d| ids.contains(d.as_str()))
-            .count();
-        in_degree.insert(&cmd.id, deg);
-        for dep in &cmd.depends_on {
-            if ids.contains(dep.as_str()) {
-                dependents.entry(dep.as_str()).or_default().push(&cmd.id);
-            }
-        }
-    }
-
-    let cmd_map: HashMap<&str, &Command> = commands.iter().map(|c| (c.id.as_str(), *c)).collect();
-
-    // Seed queue in input order for stable sorting
-    let mut queue: VecDeque<&str> = commands
-        .iter()
-        .filter(|c| in_degree.get(c.id.as_str()) == Some(&0))
-        .map(|c| c.id.as_str())
-        .collect();
-
-    let mut result = Vec::with_capacity(commands.len());
-    while let Some(id) = queue.pop_front() {
-        if let Some(&cmd) = cmd_map.get(id) {
-            result.push(cmd);
-        }
-        if let Some(deps) = dependents.get(id) {
-            for &dep_id in deps {
-                if let Some(deg) = in_degree.get_mut(dep_id) {
-                    *deg -= 1;
-                    if *deg == 0 {
-                        queue.push_back(dep_id);
-                    }
-                }
-            }
-        }
-    }
-
-    debug_assert_eq!(
-        result.len(),
-        commands.len(),
-        "topo_sort: dependency cycle detected — {} of {} commands emitted",
-        result.len(),
-        commands.len()
-    );
-
-    result
 }
