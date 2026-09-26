@@ -278,13 +278,14 @@ impl App {
         }
     }
 
-    /// Clear a command's terminal and error, and drop its queued run or stop its process. The
-    /// commands queued behind it won't run.
+    /// Clear a command's terminal, error and note that its queued run never started, and drop
+    /// its queued run or stop its process. The commands queued behind it won't run.
     pub fn clear_command(&mut self, cmd_id: &str) {
         if let Some(proc) = self.processes.remove(cmd_id) {
             proc.stop_and_abort(cmd_id, StopSignal::Interrupt);
         }
         self.error_messages.remove(cmd_id);
+        self.cancelled_by.remove(cmd_id);
         for (dependent, _) in self.dag.abort(cmd_id) {
             info!("Dropped '{dependent}', which was waiting on '{cmd_id}'");
             self.cancelled_by.insert(dependent, cmd_id.to_string());
@@ -864,6 +865,23 @@ mod tests {
         app.run_command("c", AREA);
         let screen = pane(&mut app, "c");
         assert!(screen.contains("Waiting for dependencies"), "{screen}");
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_a_command_drops_its_didnt_run_note() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = rerun_passed_chain(dir.path());
+        app.stop_command("b");
+
+        for id in ["b", "c"] {
+            app.clear_command(id);
+            let screen = pane(&mut app, id);
+            assert!(screen.contains("Not run yet."), "{id}:\n{screen}");
+        }
         app.shutdown().await;
     }
 
