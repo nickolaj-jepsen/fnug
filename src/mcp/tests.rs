@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use super::FnugMcp;
 use super::params::{FailFastParams, ListLintsParams, RunLintParams};
 use crate::LoadOptions;
+use crate::runner::CancelCause;
 
 fn server(yaml: &str) -> (FnugMcp, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -17,7 +18,7 @@ fn server(yaml: &str) -> (FnugMcp, tempfile::TempDir) {
         no_workspace: true,
         ..LoadOptions::default()
     };
-    (FnugMcp::new(load), dir)
+    (FnugMcp::new(load, CancelCause::default()), dir)
 }
 
 fn json(result: &CallToolResult) -> serde_json::Value {

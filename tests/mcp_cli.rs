@@ -213,6 +213,34 @@ fn sigterm_stops_commands_and_exits_143() {
 }
 
 #[test]
+fn sighup_and_sigint_reach_commands_as_themselves() {
+    for (signal, name, code) in [(libc::SIGHUP, "HUP", 129), (libc::SIGINT, "INT", 130)] {
+        let dir = tempfile::tempdir().unwrap();
+        common::write_config(
+            dir.path(),
+            r#"
+name: root
+commands:
+  - name: traps
+    cmd: 'for s in HUP INT TERM; do trap "echo $s > got; exit 1" $s; done; touch started; while :; do sleep 0.05; done'
+"#,
+        );
+        let mut server = Server::start(dir.path());
+        server.call(2, "run_lint", &json!({"command": "traps"}));
+        assert!(common::wait_until(TIMEOUT, || dir
+            .path()
+            .join("started")
+            .exists()));
+
+        // SAFETY: plain syscall on our own child.
+        unsafe { libc::kill(server.child.id().cast_signed(), signal) };
+        assert_eq!(server.wait().code(), Some(code), "{name}");
+        let got = std::fs::read_to_string(dir.path().join("got")).unwrap();
+        assert_eq!(got.trim(), name);
+    }
+}
+
+#[test]
 fn shutdown_waits_for_commands_to_clean_up() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(
