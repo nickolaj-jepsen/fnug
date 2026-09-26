@@ -825,6 +825,93 @@ fn missing_fnug_local_blocks_shared_skips() {
     assert!(root.join("user-line").exists());
 }
 
+#[test]
+fn hook_linked_into_the_work_tree_is_shared() {
+    let (_tmp, root, hook) = repo();
+    let tracked = root.join("scripts/pre-commit");
+    let original = "#!/bin/sh\n";
+    write_executable(&tracked, original);
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../../scripts/pre-commit", &hook).unwrap();
+
+    let target = hooks::resolve(&root).unwrap();
+    assert_eq!(target.location, HookLocation::Shared);
+    assert_eq!(target.hook_path, hook);
+    assert_eq!(target.resolved.as_deref(), Some(tracked.as_path()));
+    let opts = InstallOptions {
+        fallback_exe: Some("/opt/fnug/bin/fnug".into()),
+        ..options(ForeignPolicy::Refuse)
+    };
+    let (plan, _) = hooks::plan_install(&target, &opts).unwrap();
+    plan.apply().unwrap();
+
+    let written = read(&tracked);
+    assert!(written.contains(BEGIN), "{written}");
+    assert!(
+        !written.contains("/opt/fnug"),
+        "no machine's path in a tracked file: {written}"
+    );
+    assert!(
+        !written.contains("exit 1"),
+        "teammates without fnug can still commit: {written}"
+    );
+    let is_link = || {
+        std::fs::symlink_metadata(&hook)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    };
+    assert!(is_link());
+
+    hooks::remove(&root).unwrap();
+    assert!(is_link(), "the link stays");
+    assert_eq!(read(&tracked), original);
+}
+
+#[test]
+fn hook_linked_out_of_the_repo_is_refused() {
+    let (_tmp, root) = tempdir();
+    let repo_dir = root.join("repo");
+    Repository::init(&repo_dir).unwrap();
+    let outside = root.join("dotfiles/pre-commit");
+    let original = "#!/bin/sh\necho mine\n";
+    write_executable(&outside, original);
+    let hook = repo_dir.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &hook).unwrap();
+
+    let target = hooks::resolve(&repo_dir).unwrap();
+    assert_eq!(target.location, HookLocation::External);
+    let err = hooks::install(&repo_dir, false).unwrap_err();
+    let HookError::LinkedOutside {
+        path,
+        target,
+        snippet,
+    } = &err
+    else {
+        panic!("expected a refusal, got {err}");
+    };
+    assert_eq!((path, target), (&hook, &outside));
+    assert!(
+        snippet.contains("check --fail-fast --mute-success"),
+        "{snippet}"
+    );
+    assert_eq!(read(&outside), original);
+}
+
+#[test]
+fn hook_linked_within_the_git_dir_is_local() {
+    let (_tmp, root, hook) = repo();
+    let real = root.join(".git/my-hooks/pre-commit");
+    write_executable(&real, "#!/bin/sh\n");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../my-hooks/pre-commit", &hook).unwrap();
+
+    let target = hooks::resolve(&root).unwrap();
+    assert_eq!(target.location, HookLocation::Local);
+    assert_eq!(target.resolved.as_deref(), Some(real.as_path()));
+}
+
 // ─── editor MCP configs ───
 
 const JSONC: &str = r#"{

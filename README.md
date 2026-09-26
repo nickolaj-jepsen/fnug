@@ -101,11 +101,11 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 `fnug setup` installs a git pre-commit hook that runs `fnug check`, and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it.
 
-The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead.
+The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead. A `pre-commit` that is a symlink counts as the file it links to: setup edits that file, shows it in the list of changes, and prints the lines instead if it is outside the repository.
 
 fnug's lines sit between `# >>> fnug >>>` and `# <<< fnug <<<`, right after the shebang of any existing hook, and the rest of that hook runs after fnug passes. If fnug needs something your hook sets up first, such as `PATH`, move the block below it; updates leave it where it is. A hook that isn't a shell script, such as a Python one, can be chained instead: it moves to `pre-commit.local` and runs after fnug, and removing fnug's hook puts it back.
 
-The hook runs `fnug` from `PATH`, or else the binary that ran `fnug setup`, from the config's directory, with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given. Run setup again after moving the config or changing those flags, and it offers to update the hook. If fnug isn't installed, the commit fails with a hint; a hook in a committed `core.hooksPath` only warns, so teammates without fnug can still commit.
+The hook runs `fnug` from `PATH`, or else the binary that ran `fnug setup`, from the config's directory, with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given. Run setup again after moving the config or changing those flags, and it offers to update the hook. If fnug isn't installed, the commit fails with a hint; a hook in the work tree, such as one in a committed `core.hooksPath` or a committed script that `.git/hooks/pre-commit` links to, only warns, so teammates without fnug can still commit.
 
 Setup edits the editor configs in place, keeping comments and formatting, and adds or removes only the `fnug` entry. The entry runs `fnug mcp`, so fnug has to be on the editor's `PATH`.
 

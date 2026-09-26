@@ -116,26 +116,26 @@ enum Action {
     RemoveMcp { editor: Editor, cwd: PathBuf },
 }
 
+/// The hook's path, and the file it links to, which is the one that changes.
+fn hook_file(target: &HookTarget) -> String {
+    match &target.resolved {
+        Some(resolved) => format!("{} -> {}", target.hook_path.display(), resolved.display()),
+        None => target.hook_path.display().to_string(),
+    }
+}
+
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InstallHook { hook } if hook.status == HookStatus::Outdated => {
-                write!(
-                    f,
-                    "~ Update pre-commit hook ({})",
-                    hook.target.hook_path.display()
-                )
+                write!(f, "~ Update pre-commit hook ({})", hook_file(&hook.target))
             }
-            Self::InstallHook { hook } => write!(
-                f,
-                "+ Install pre-commit hook ({})",
-                hook.target.hook_path.display()
-            ),
-            Self::RemoveHook { hook } => write!(
-                f,
-                "- Remove pre-commit hook ({})",
-                hook.target.hook_path.display()
-            ),
+            Self::InstallHook { hook } => {
+                write!(f, "+ Install pre-commit hook ({})", hook_file(&hook.target))
+            }
+            Self::RemoveHook { hook } => {
+                write!(f, "- Remove pre-commit hook ({})", hook_file(&hook.target))
+            }
             Self::InstallMcp { editor, cwd } => write!(
                 f,
                 "+ Configure MCP for {editor} ({})",
@@ -494,6 +494,7 @@ mod tests {
             target: HookTarget {
                 hooks_dir: dir.join(".git/hooks"),
                 hook_path: dir.join(".git/hooks/pre-commit"),
+                resolved: None,
                 workdir: dir,
                 location: hooks::HookLocation::Local,
                 config_rel: PathBuf::new(),
@@ -604,6 +605,16 @@ mod tests {
             ]
         );
         assert!(actions[0].to_string().starts_with("~ Update"));
+    }
+
+    #[test]
+    fn linked_hook_shows_the_file_that_changes() {
+        let mut linked = hook("", HookStatus::NotInstalled);
+        linked.target.resolved = Some(PathBuf::from("/repo/scripts/pre-commit"));
+        assert_eq!(
+            Action::InstallHook { hook: linked }.to_string(),
+            "+ Install pre-commit hook (/repo/.git/hooks/pre-commit -> /repo/scripts/pre-commit)"
+        );
     }
 
     #[test]
