@@ -4,6 +4,7 @@
 //! goes right after the shebang, so an `exec` or `exit` later in the hook can't skip it, and it
 //! ends in `|| exit $?`, so it never hides the status of the lines after it.
 
+use std::fmt;
 use std::io;
 use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +14,7 @@ use git2::{Repository, RepositoryOpenFlags};
 use thiserror::Error;
 
 use super::fsutil::write_atomic;
+use crate::config_file::find_config_in_dir;
 
 /// Version of the hook block's format. Bump it when the block changes, so [`status`] reports
 /// older blocks as [`HookStatus::Outdated`] and setup offers to update them.
@@ -113,6 +115,113 @@ pub enum HookStatus {
     Outdated,
     /// No fnug block, in a hook that isn't a shell script; see [`ForeignPolicy`].
     Foreign,
+    /// A block in the current format that loads another config than installing with the given
+    /// options would, and that config still exists, so installing would repoint the hook. Only
+    /// [`status_with`] reports it; [`HookInvocation::installed`] says what the block runs.
+    OtherConfig,
+}
+
+/// How a hook's fnug block loads the config: where it runs fnug, and with which flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookInvocation {
+    /// Where fnug runs, relative to the work tree top; empty at the top.
+    pub dir: PathBuf,
+    pub config_file: Option<PathBuf>,
+    pub root_dir: Option<PathBuf>,
+    pub no_workspace: bool,
+}
+
+impl HookInvocation {
+    /// What installing into `target` with `opts` runs.
+    #[must_use]
+    pub fn new(target: &HookTarget, opts: &InstallOptions) -> Self {
+        Self {
+            dir: target.config_rel.clone(),
+            config_file: opts.config_file.clone(),
+            root_dir: opts.root_dir.clone(),
+            no_workspace: opts.no_workspace,
+        }
+    }
+
+    /// What the fenced block in `target`'s hook runs, or `None` if the hook has no block fnug can
+    /// read.
+    #[must_use]
+    pub fn installed(target: &HookTarget) -> Option<Self> {
+        let content = std::fs::read_to_string(&target.hook_path).ok()?;
+        let lines: Vec<&str> = content.split_inclusive('\n').collect();
+        lines[find_block(&lines)?]
+            .iter()
+            .find_map(|line| Self::parse(line))
+    }
+
+    /// The invocation on a block's line that runs fnug, as [`render_block`] writes it.
+    fn parse(line: &str) -> Option<Self> {
+        let words = sh_words(line);
+        let run = words.iter().position(|w| w == "$fnug_bin")?;
+        let dir = match words.as_slice() {
+            [cd, dashes, dir, ..] if cd == "cd" && dashes == "--" => PathBuf::from(dir),
+            _ => PathBuf::new(),
+        };
+        let mut invocation = Self {
+            dir,
+            config_file: None,
+            root_dir: None,
+            no_workspace: false,
+        };
+        let mut args = words[run + 1..].iter();
+        loop {
+            match args.next()?.as_str() {
+                "check" => return Some(invocation),
+                "-c" => invocation.config_file = Some(args.next()?.into()),
+                "--root" => invocation.root_dir = Some(args.next()?.into()),
+                "--no-workspace" => invocation.no_workspace = true,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether the config this loads, in the work tree `workdir`, still exists. Without `-c`, a
+    /// hook with `--root` finds it like fnug does, in the root or above; one without must find it
+    /// where it runs, or the config moved.
+    fn config_exists(&self, workdir: &Path) -> bool {
+        let dir = workdir.join(&self.dir);
+        match (&self.config_file, &self.root_dir) {
+            (Some(file), _) => dir.join(file).is_file(),
+            (None, Some(root)) => {
+                let root = dir.join(root);
+                root.is_dir()
+                    && normalize(&root)
+                        .ancestors()
+                        .any(|d| find_config_in_dir(d).is_some())
+            }
+            (None, None) => find_config_in_dir(&dir).is_some(),
+        }
+    }
+}
+
+impl fmt::Display for HookInvocation {
+    /// The directory fnug runs from, such as `./` or `app/`, and any flags in parentheses.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.dir.as_os_str().is_empty() {
+            write!(f, "./")?;
+        } else {
+            write!(f, "{}/", self.dir.display())?;
+        }
+        let mut flags = Vec::new();
+        if let Some(file) = &self.config_file {
+            flags.push(format!("-c {}", file.display()));
+        }
+        if let Some(root) = &self.root_dir {
+            flags.push(format!("--root {}", root.display()));
+        }
+        if self.no_workspace {
+            flags.push("--no-workspace".to_string());
+        }
+        if !flags.is_empty() {
+            write!(f, " ({})", flags.join(" "))?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -320,7 +429,9 @@ pub fn status(target: &HookTarget) -> HookStatus {
 }
 
 /// Like [`status`], but a block in the current format that differs from the one installing with
-/// `opts` writes, say because the config moved, is [`HookStatus::Outdated`].
+/// `opts` writes is [`HookStatus::OtherConfig`] if it loads another config that still exists,
+/// and otherwise [`HookStatus::Outdated`], say because the config moved or the fallback binary
+/// changed.
 #[must_use]
 pub fn status_with(target: &HookTarget, opts: &InstallOptions) -> HookStatus {
     let status = status(target);
@@ -333,9 +444,16 @@ pub fn status_with(target: &HookTarget, opts: &InstallOptions) -> HookStatus {
         .map(|range| lines[range].concat())
         .unwrap_or_default();
     if current == block_for(target, opts, current.contains(CHAINED_NAME)) {
-        HookStatus::Installed
-    } else {
-        HookStatus::Outdated
+        return HookStatus::Installed;
+    }
+    match HookInvocation::installed(target) {
+        Some(installed)
+            if installed != HookInvocation::new(target, opts)
+                && installed.config_exists(&target.workdir) =>
+        {
+            HookStatus::OtherConfig
+        }
+        _ => HookStatus::Outdated,
     }
 }
 
@@ -785,6 +903,27 @@ fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// The words of a line of fnug's block: split on whitespace, with quotes and backslashes removed
+/// the way sh does for what [`sh_quote`] and [`render_block`] write. Expansions are left as is.
+fn sh_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' | '"' => {
+                let word = word.get_or_insert_with(String::new);
+                word.extend(chars.by_ref().take_while(|&q| q != c));
+            }
+            '\\' => word.get_or_insert_with(String::new).extend(chars.next()),
+            c if c.is_whitespace() => words.extend(word.take()),
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    words
+}
+
 /// What runs a hook file, going by its shebang.
 #[derive(Debug, PartialEq, Eq)]
 enum Script {
@@ -993,6 +1132,58 @@ mod tests {
     fn sh_quote_escapes_single_quotes() {
         assert_eq!(sh_quote("app"), "'app'");
         assert_eq!(sh_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn sh_words_undoes_sh_quote() {
+        let line = format!(
+            "    cd -- {} && exec \"$fnug_bin\" -c {} check",
+            sh_quote("it's here"),
+            sh_quote("")
+        );
+        assert_eq!(
+            sh_words(&line),
+            [
+                "cd",
+                "--",
+                "it's here",
+                "&&",
+                "exec",
+                "$fnug_bin",
+                "-c",
+                "",
+                "check"
+            ]
+        );
+    }
+
+    #[test]
+    fn invocation_is_read_back_from_the_block() {
+        for (config_rel, opts) in [
+            ("", InstallOptions::default()),
+            (
+                "it's here",
+                InstallOptions {
+                    no_workspace: true,
+                    config_file: Some("my ci.yaml".into()),
+                    root_dir: Some("..".into()),
+                    fallback_exe: Some("/opt/fnug".into()),
+                    ..InstallOptions::default()
+                },
+            ),
+        ] {
+            let target = HookTarget {
+                workdir: PathBuf::from("/repo"),
+                hooks_dir: PathBuf::from("/repo/.git/hooks"),
+                hook_path: PathBuf::from("/repo/.git/hooks/pre-commit"),
+                resolved: None,
+                location: HookLocation::Local,
+                config_rel: config_rel.into(),
+            };
+            let block = block_for(&target, &opts, true);
+            let parsed = block.lines().find_map(HookInvocation::parse);
+            assert_eq!(parsed, Some(HookInvocation::new(&target, &opts)), "{block}");
+        }
     }
 
     #[test]

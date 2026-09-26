@@ -625,6 +625,92 @@ fn block_that_differs_from_the_options_is_outdated() {
 }
 
 #[test]
+fn block_for_another_existing_config_is_other_config() {
+    let (_tmp, root, _) = repo();
+    std::fs::create_dir(root.join("frontend")).unwrap();
+    for dir in [&root, &root.join("frontend")] {
+        std::fs::write(dir.join(".fnug.yaml"), "name: x\ncommands: []\n").unwrap();
+    }
+    let top = hooks::resolve(&root).unwrap();
+    let opts = InstallOptions {
+        fallback_exe: Some("/opt/fnug".into()),
+        ..options(ForeignPolicy::Refuse)
+    };
+    hooks::install_with(&top, &opts).unwrap();
+    let runs_top = hooks::HookInvocation {
+        dir: PathBuf::new(),
+        config_file: None,
+        root_dir: None,
+        no_workspace: false,
+    };
+    assert_eq!(hooks::HookInvocation::installed(&top), Some(runs_top));
+
+    let nested = hooks::resolve(&root.join("frontend")).unwrap();
+    assert_eq!(hooks::status_with(&nested, &opts), HookStatus::OtherConfig);
+    let no_workspace = InstallOptions {
+        no_workspace: true,
+        ..opts.clone()
+    };
+    assert_eq!(
+        hooks::status_with(&top, &no_workspace),
+        HookStatus::OtherConfig
+    );
+    let other_binary = InstallOptions {
+        fallback_exe: Some("/usr/bin/fnug".into()),
+        ..opts.clone()
+    };
+    assert_eq!(
+        hooks::status_with(&top, &other_binary),
+        HookStatus::Outdated,
+        "same config, so the hook just needs updating"
+    );
+    assert!(hooks::is_installed(&root));
+
+    std::fs::remove_file(root.join(".fnug.yaml")).unwrap();
+    assert_eq!(
+        hooks::status_with(&nested, &opts),
+        HookStatus::Outdated,
+        "the config it ran is gone"
+    );
+}
+
+#[test]
+fn root_block_finds_its_config_above_the_root() {
+    let (_tmp, root, _) = repo();
+    for dir in ["app", "frontend"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+    }
+    for dir in [&root, &root.join("frontend")] {
+        std::fs::write(dir.join(".fnug.yaml"), "name: x\ncommands: []\n").unwrap();
+    }
+    // Like `fnug --root app setup`: fnug finds the top's config by searching up from app/
+    let app = hooks::resolve(&root.join("app")).unwrap();
+    let root_opts = InstallOptions {
+        root_dir: Some(".".into()),
+        ..options(ForeignPolicy::Refuse)
+    };
+    hooks::install_with(&app, &root_opts).unwrap();
+
+    let opts = options(ForeignPolicy::Refuse);
+    for dir in [root.join("frontend"), root.clone()] {
+        let target = hooks::resolve(&dir).unwrap();
+        assert_eq!(
+            hooks::status_with(&target, &opts),
+            HookStatus::OtherConfig,
+            "from {}",
+            dir.display()
+        );
+    }
+
+    std::fs::remove_dir(root.join("app")).unwrap();
+    assert_eq!(
+        hooks::status_with(&hooks::resolve(&root).unwrap(), &opts),
+        HookStatus::Outdated,
+        "the root it checked is gone"
+    );
+}
+
+#[test]
 fn legacy_only_hook_is_removed() {
     let (_tmp, root, hook) = repo();
     write_executable(

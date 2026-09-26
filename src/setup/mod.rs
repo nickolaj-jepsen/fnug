@@ -12,7 +12,8 @@ use thiserror::Error;
 use crate::selectors::relative_to;
 use crate::{LoadOptions, LoadedConfig};
 use hooks::{
-    ForeignPolicy, HookError, HookPlan, HookStatus, HookTarget, InstallOptions, InstallOutcome,
+    ForeignPolicy, HookError, HookInvocation, HookPlan, HookStatus, HookTarget, InstallOptions,
+    InstallOutcome,
 };
 use mcp::{Editor, FileChange};
 
@@ -60,11 +61,23 @@ struct RepoHook {
     status: HookStatus,
     /// How to install it; the foreign policy is decided when preparing.
     opts: InstallOptions,
+    /// What the hook runs now, if that is another config ([`HookStatus::OtherConfig`]).
+    runs: Option<HookInvocation>,
 }
 
 impl RepoHook {
     fn is_installed(&self) -> bool {
-        matches!(self.status, HookStatus::Installed | HookStatus::Outdated)
+        matches!(
+            self.status,
+            HookStatus::Installed | HookStatus::Outdated | HookStatus::OtherConfig
+        )
+    }
+
+    /// Where the hook runs fnug from now, as far as fnug can tell.
+    fn runs_from(&self) -> String {
+        self.runs
+            .as_ref()
+            .map_or_else(|| "another config".to_string(), ToString::to_string)
     }
 }
 
@@ -87,6 +100,28 @@ struct Choice {
     editors: Vec<Editor>,
     /// Indices into [`Detected::sub_repo_hooks`].
     sub_repos: Vec<usize>,
+    /// Paths of the [`HookStatus::OtherConfig`] hooks to point at this config.
+    repoint: Vec<PathBuf>,
+}
+
+/// Every hook, and whether `features` and `sub_repos` want it installed.
+fn wanted_hooks<'a>(
+    detected: &'a Detected,
+    features: &[Feature],
+    sub_repos: &'a [usize],
+) -> impl Iterator<Item = (&'a RepoHook, bool)> {
+    let wants_hooks = features.contains(&Feature::GitHooks);
+    detected
+        .root_hook
+        .iter()
+        .map(move |hook| (hook, wants_hooks))
+        .chain(
+            detected
+                .sub_repo_hooks
+                .iter()
+                .enumerate()
+                .map(move |(i, hook)| (hook, wants_hooks && sub_repos.contains(&i))),
+        )
 }
 
 /// Indices into [`FEATURES`] to preselect: whatever is installed, and the hook when nothing is
@@ -130,6 +165,13 @@ impl fmt::Display for Action {
             Self::InstallHook { hook } if hook.status == HookStatus::Outdated => {
                 write!(f, "~ Update pre-commit hook ({})", hook_file(&hook.target))
             }
+            Self::InstallHook { hook } if hook.status == HookStatus::OtherConfig => write!(
+                f,
+                "~ Repoint pre-commit hook ({}) from {} to {}",
+                hook_file(&hook.target),
+                hook.runs_from(),
+                HookInvocation::new(&hook.target, &hook.opts)
+            ),
             Self::InstallHook { hook } => {
                 write!(f, "+ Install pre-commit hook ({})", hook_file(&hook.target))
             }
@@ -151,27 +193,19 @@ impl fmt::Display for Action {
 }
 
 /// The actions that turn what is set up into what the user picked. Deselecting something removes
-/// it.
+/// it, except a hook that runs another config, which changes only if the user repoints it.
 fn plan_actions(detected: &Detected, choice: &Choice) -> Vec<Action> {
-    let wants_hooks = choice.features.contains(&Feature::GitHooks);
     let wants_mcp = choice.features.contains(&Feature::McpServer);
     let mut actions = Vec::new();
 
-    let hooks = detected
-        .root_hook
-        .iter()
-        .map(|hook| (hook, wants_hooks))
-        .chain(
-            detected
-                .sub_repo_hooks
-                .iter()
-                .enumerate()
-                .map(|(i, hook)| (hook, wants_hooks && choice.sub_repos.contains(&i))),
-        );
-    for (hook, wanted) in hooks {
+    for (hook, wanted) in wanted_hooks(detected, &choice.features, &choice.sub_repos) {
         let hook = hook.clone();
         match (hook.status, wanted) {
-            (HookStatus::Installed, true)
+            (HookStatus::OtherConfig, true) if choice.repoint.contains(&hook.target.hook_path) => {
+                actions.push(Action::InstallHook { hook });
+            }
+            (HookStatus::OtherConfig, _)
+            | (HookStatus::Installed, true)
             | (HookStatus::NotInstalled | HookStatus::Foreign, false) => {}
             (_, true) => actions.push(Action::InstallHook { hook }),
             (_, false) => actions.push(Action::RemoveHook { hook }),
@@ -345,11 +379,16 @@ fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Dete
             fallback_exe: fallback_exe.clone(),
             ..opts(&target)
         };
+        let status = hooks::status_with(&target, &opts);
+        let runs = (status == HookStatus::OtherConfig)
+            .then(|| HookInvocation::installed(&target))
+            .flatten();
         Some(RepoHook {
             name,
-            status: hooks::status_with(&target, &opts),
             target,
+            status,
             opts,
+            runs,
         })
     };
     let hook_dir = root_hook_dir(cwd, config, load);
@@ -417,10 +456,37 @@ fn prompt(detected: &Detected) -> Result<Choice, SetupError> {
         Vec::new()
     };
 
+    let mut repoint = Vec::new();
+    for (hook, wanted) in wanted_hooks(detected, &features, &sub_repos) {
+        if hook.status != HookStatus::OtherConfig {
+            continue;
+        }
+        let file = hook_file(&hook.target);
+        if !wanted {
+            println!(
+                "Leaving {file} alone: it runs fnug from {}, for another config.",
+                hook.runs_from()
+            );
+            continue;
+        }
+        println!(
+            "{file} runs fnug from {}, for another config.",
+            hook.runs_from()
+        );
+        let question = format!(
+            "Repoint it to run fnug from {}?",
+            HookInvocation::new(&hook.target, &hook.opts)
+        );
+        if Confirm::new(&question).with_default(false).prompt()? {
+            repoint.push(hook.target.hook_path.clone());
+        }
+    }
+
     Ok(Choice {
         features,
         editors,
         sub_repos,
+        repoint,
     })
 }
 
@@ -523,6 +589,7 @@ mod tests {
                 no_workspace: !name.is_empty(),
                 ..InstallOptions::default()
             },
+            runs: None,
         }
     }
 
@@ -604,6 +671,7 @@ mod tests {
             features: FEATURES.to_vec(),
             editors: vec![Editor::Cursor],
             sub_repos: vec![0, 1],
+            ..Choice::default()
         };
 
         let actions = plan_actions(&detected, &choice);
@@ -787,6 +855,138 @@ mod tests {
                 notes.iter().any(|n| n.contains("absolute path")),
                 config_arg.is_absolute(),
                 "{notes:?}"
+            );
+        }
+    }
+
+    /// Detect from `dir` like `fnug setup` run there with `load`, and plan the default choice.
+    fn detect_from(dir: &Path, load: LoadOptions) -> (Detected, Vec<Action>) {
+        let load = LoadOptions {
+            start_dir: Some(dir.to_path_buf()),
+            ..load
+        };
+        let loaded = crate::load(&load).unwrap();
+        let detected = detect(&loaded.cwd, Some(&loaded), &load);
+        let choice = Choice {
+            features: indices_of(&default_features(&detected)),
+            ..Choice::default()
+        };
+        let actions = plan_actions(&detected, &choice);
+        (detected, actions)
+    }
+
+    fn indices_of(defaults: &[usize]) -> Vec<Feature> {
+        defaults.iter().map(|&i| FEATURES[i]).collect()
+    }
+
+    fn is_hook_action(action: &Action) -> bool {
+        matches!(
+            action,
+            Action::InstallHook { .. } | Action::RemoveHook { .. }
+        )
+    }
+
+    #[test]
+    fn hook_for_another_config_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        init_repo(&root);
+        std::fs::create_dir(root.join("frontend")).unwrap();
+        std::fs::write(root.join(".fnug.yaml"), "name: root\ncommands: []\n").unwrap();
+        std::fs::write(
+            root.join("frontend/.fnug.yaml"),
+            "name: frontend\ncommands: []\n",
+        )
+        .unwrap();
+        let (top, actions) = detect_from(&root, LoadOptions::default());
+        let top = top.root_hook.unwrap();
+        assert_eq!(actions, [Action::InstallHook { hook: top.clone() }]);
+        hooks::install_with(&top.target, &top.opts).unwrap();
+        let installed = std::fs::read_to_string(&top.target.hook_path).unwrap();
+
+        for (load, to) in [
+            (LoadOptions::default(), "frontend/"),
+            (
+                LoadOptions {
+                    no_workspace: true,
+                    ..LoadOptions::default()
+                },
+                "frontend/ (--no-workspace)",
+            ),
+        ] {
+            let (nested, actions) = detect_from(&root.join("frontend"), load);
+            let hook = nested.root_hook.as_ref().unwrap();
+            assert_eq!(hook.status, HookStatus::OtherConfig);
+            assert!(!actions.iter().any(is_hook_action), "{actions:?}");
+            let unticked = plan_actions(&nested, &Choice::default());
+            assert!(!unticked.iter().any(is_hook_action), "{unticked:?}");
+
+            let repoint = Choice {
+                features: vec![Feature::GitHooks],
+                repoint: vec![hook.target.hook_path.clone()],
+                ..Choice::default()
+            };
+            let actions = plan_actions(&nested, &repoint);
+            assert_eq!(
+                actions,
+                [Action::InstallHook { hook: hook.clone() }],
+                "only an explicit choice repoints it"
+            );
+            assert_eq!(
+                actions[0].to_string(),
+                format!(
+                    "~ Repoint pre-commit hook ({}) from ./ to {to}",
+                    hook.target.hook_path.display()
+                )
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&top.target.hook_path).unwrap(),
+            installed,
+            "the hook still runs the top's config"
+        );
+
+        // Once the top's config is gone, the hook is outdated and follows the config
+        std::fs::remove_file(root.join(".fnug.yaml")).unwrap();
+        let (moved, actions) = detect_from(&root.join("frontend"), LoadOptions::default());
+        let hook = moved.root_hook.unwrap();
+        assert_eq!(hook.status, HookStatus::Outdated);
+        assert_eq!(actions, [Action::InstallHook { hook }]);
+        assert!(actions[0].to_string().starts_with("~ Update"));
+    }
+
+    #[test]
+    fn root_hook_for_a_config_above_the_root_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        init_repo(&root);
+        for sub in ["app", "frontend"] {
+            std::fs::create_dir(root.join(sub)).unwrap();
+        }
+        std::fs::write(root.join(".fnug.yaml"), "name: root\ncommands: []\n").unwrap();
+        std::fs::write(
+            root.join("frontend/.fnug.yaml"),
+            "name: frontend\ncommands: []\n",
+        )
+        .unwrap();
+        let (app, _) = detect_from(
+            &root,
+            LoadOptions {
+                root_dir: Some("app".into()),
+                ..LoadOptions::default()
+            },
+        );
+        let app = app.root_hook.unwrap();
+        hooks::install_with(&app.target, &app.opts).unwrap();
+
+        for from in [root.join("frontend"), root.clone()] {
+            let (detected, actions) = detect_from(&from, LoadOptions::default());
+            let hook = detected.root_hook.unwrap();
+            assert_eq!(hook.status, HookStatus::OtherConfig, "{}", from.display());
+            assert!(!actions.iter().any(is_hook_action), "{actions:?}");
+            assert_eq!(
+                hook.runs.map(|runs| runs.to_string()).as_deref(),
+                Some("app/ (--root .)")
             );
         }
     }
