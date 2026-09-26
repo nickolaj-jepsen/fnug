@@ -29,13 +29,18 @@ struct Server {
 impl Server {
     /// Start the server in `dir` and complete the MCP handshake.
     fn start(dir: &Path) -> Self {
+        Self::start_with_stderr(dir, Stdio::null())
+    }
+
+    /// [`Server::start`], with the server's stderr going to `stderr`.
+    fn start_with_stderr(dir: &Path, stderr: impl Into<Stdio>) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_fnug"))
             .current_dir(dir)
             .args(["--no-workspace", "mcp"])
             .env_remove("FNUG_LOG")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -239,6 +244,44 @@ fn bad_base_is_an_error_without_git_commands() {
     let summary: Value =
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(summary["passed"], 1, "{summary}");
+}
+
+#[test]
+fn config_warnings_logged_only_when_they_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let stderr_path = logs.path().join("stderr");
+    let config = |group: &str| {
+        format!(
+            "name: root\ncommands:\n  - name: a\n    cmd: 'true'\nchildren:\n  - name: {group}\n"
+        )
+    };
+    common::write_config(dir.path(), &config("empty"));
+    let stderr = std::fs::File::create(&stderr_path).unwrap();
+    let mut server = Server::start_with_stderr(dir.path(), stderr);
+    for id in 2..5 {
+        server.call(id, "list_lints", &json!({}));
+        assert_eq!(server.response(id)["result"]["isError"], false);
+    }
+    common::write_config(dir.path(), &config("vacant"));
+    for id in 5..7 {
+        server.call(id, "list_lints", &json!({}));
+        assert_eq!(server.response(id)["result"]["isError"], false);
+    }
+    drop(server.stdin.take());
+    assert!(server.wait().success());
+
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap();
+    assert_eq!(
+        stderr.matches("Group 'empty' has no commands").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("Group 'vacant' has no commands").count(),
+        1,
+        "{stderr}"
+    );
 }
 
 #[test]

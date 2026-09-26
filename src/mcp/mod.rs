@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 use crate::check::{self, CheckError};
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
+use crate::config_file::ConfigError;
+use crate::logger::{self, Held};
 use crate::runner::{
     self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions,
     Selection, commands_with_group_path,
@@ -79,6 +81,8 @@ pub struct FnugMcp {
     /// Held by each run from planning to its last command, so overlapping calls take turns;
     /// shutdown takes it to wait for the running one.
     run_lock: Arc<Mutex<()>>,
+    /// The warnings the last load logged, so a load that gives the same ones stays quiet.
+    load_warnings: Arc<std::sync::Mutex<Vec<Held>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -92,7 +96,24 @@ fn tool_error(message: String) -> CallToolResult {
     CallToolResult::error(vec![Content::text(message)])
 }
 
-fn load_error(e: &crate::config_file::ConfigError) -> CallToolResult {
+/// Load the config with `opts`, logging its warnings only when they differ from `last`, the
+/// ones the previous load logged.
+fn load_config(
+    opts: &LoadOptions,
+    last: &std::sync::Mutex<Vec<Held>>,
+) -> Result<LoadedConfig, ConfigError> {
+    let (loaded, warnings) = logger::hold_warnings(|| crate::load(opts));
+    let mut last = last
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *last != warnings {
+        logger::replay(&warnings);
+        *last = warnings;
+    }
+    loaded
+}
+
+fn load_error(e: &ConfigError) -> CallToolResult {
     tool_error(format!(
         "Failed to load the fnug config: {e}\nFix it and call the tool again; every call \
          reloads the config."
@@ -205,6 +226,7 @@ impl FnugMcp {
             load,
             cancel_cause,
             run_lock: Arc::default(),
+            load_warnings: Arc::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -355,9 +377,12 @@ impl FnugMcp {
         f: impl FnOnce(LoadedConfig) -> Result<T, CallToolResult> + Send + 'static,
     ) -> Result<T, CallToolResult> {
         let opts = self.load.clone();
-        tokio::task::spawn_blocking(move || f(crate::load(&opts).map_err(|e| load_error(&e))?))
-            .await
-            .unwrap_or_else(|e| Err(tool_error(format!("fnug failed: {e}"))))
+        let last = self.load_warnings.clone();
+        tokio::task::spawn_blocking(move || {
+            f(load_config(&opts, &last).map_err(|e| load_error(&e))?)
+        })
+        .await
+        .unwrap_or_else(|e| Err(tool_error(format!("fnug failed: {e}"))))
     }
 
     /// Plan and run what `scope` asks for, with captured output, once no other run is in
@@ -473,7 +498,8 @@ impl ServerHandler for FnugMcp {
 /// Serve MCP over stdio until the client closes stdin or `shutdown` is cancelled.
 ///
 /// Every tool call loads the config with `load`, so edits apply without a restart, and a config
-/// that fails to load is the call's error result rather than a reason not to start. On
+/// that fails to load is the call's error result rather than a reason not to start. Its
+/// warnings are logged at startup, and after that only when a load gives different ones. On
 /// shutdown, running tool calls are cancelled, which stops their commands, and the server waits
 /// up to 10 s for them before returning. Running commands get the signal recorded in
 /// `cancel_cause`, as [`CancelCause`] describes, or `SIGTERM` without one.
@@ -486,12 +512,12 @@ pub async fn run(
     shutdown: CancellationToken,
     cancel_cause: CancelCause,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let server = FnugMcp::new(load, cancel_cause);
     // Logs the config's warnings, or why it doesn't load, once at startup
-    let preflight = load.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || crate::load(&preflight)).await? {
+    let (preflight, last) = (server.load.clone(), server.load_warnings.clone());
+    if let Err(e) = tokio::task::spawn_blocking(move || load_config(&preflight, &last)).await? {
         warn!("{e}; every tool call reports this until the config is fixed");
     }
-    let server = FnugMcp::new(load, cancel_cause);
     let run_lock = server.run_lock.clone();
     let service = server.serve(stdio()).await?;
     // Dropping the service, whichever branch wins, cancels every request's token

@@ -2,6 +2,7 @@
 //! optional log file, and stderr until the TUI takes over the terminal. Nothing is written to
 //! stdout, which `fnug mcp` uses for the protocol.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
@@ -173,6 +174,9 @@ impl Log for FnugLogger {
     }
 
     fn log(&self, record: &Record) {
+        if record.level() <= Level::Warn && hold(record) {
+            return;
+        }
         if self.to_stderr(record.level()) {
             self.write_stderr(record);
         }
@@ -211,6 +215,59 @@ impl Log for FnugLogger {
             let _ = file.lock().flush();
         }
         let _ = self.stderr.lock().flush();
+    }
+}
+
+/// A warning or error that [`hold_warnings`] kept from the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub level: Level,
+    pub target: String,
+    pub message: String,
+}
+
+thread_local! {
+    /// What [`hold_warnings`] keeps, while it runs on this thread.
+    static HELD: RefCell<Option<Vec<Held>>> = const { RefCell::new(None) };
+}
+
+/// Keep `record` if [`hold_warnings`] is running on this thread, returning whether it did.
+fn hold(record: &Record) -> bool {
+    HELD.with_borrow_mut(|held| {
+        held.as_mut().map(|held| {
+            held.push(Held {
+                level: record.level(),
+                target: record.target().to_string(),
+                message: record.args().to_string(),
+            });
+        })
+    })
+    .is_some()
+}
+
+/// Run `f`, keeping the warnings and errors it logs on this thread through fnug's logger out of
+/// the log, and return them in order with its result. [`replay`] logs them after all.
+pub fn hold_warnings<T>(f: impl FnOnce() -> T) -> (T, Vec<Held>) {
+    /// Puts back what an enclosing call holds, even if `f` panics.
+    struct Restore(Option<Vec<Held>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let outer = self.0.take();
+            HELD.with_borrow_mut(|held| *held = outer);
+        }
+    }
+    let outer = HELD.with_borrow_mut(|held| held.replace(Vec::new()));
+    let restore = Restore(outer);
+    let result = f();
+    let held = HELD.with_borrow_mut(Option::take).unwrap_or_default();
+    drop(restore);
+    (result, held)
+}
+
+/// Log records that [`hold_warnings`] kept.
+pub fn replay(held: &[Held]) {
+    for record in held {
+        log::log!(target: &record.target, record.level, "{}", record.message);
     }
 }
 
@@ -393,6 +450,26 @@ mod tests {
             logger.buffer.is_empty(),
             "debug is below the buffer's level"
         );
+    }
+
+    #[test]
+    fn held_warnings_skip_the_log() {
+        let (logger, stderr) = logger_with_stderr(LevelFilter::Info, LevelFilter::Warn);
+        let ((), held) = hold_warnings(|| {
+            log_at(&logger, Level::Warn, "careful");
+            log_at(&logger, Level::Info, "fyi");
+        });
+
+        let careful = Held {
+            level: Level::Warn,
+            target: "test_target".into(),
+            message: "careful".into(),
+        };
+        assert_eq!(held, [careful]);
+        assert_eq!(stderr.text(), "");
+        assert_eq!(logger.buffer.entries()[0].message, "fyi");
+        log_at(&logger, Level::Warn, "later");
+        assert_eq!(stderr.text(), "warning: later\n");
     }
 
     #[test]
