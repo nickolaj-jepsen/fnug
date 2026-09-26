@@ -1,6 +1,8 @@
 //! Helpers shared by the integration test files.
 #![allow(dead_code)]
 
+pub mod git;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
