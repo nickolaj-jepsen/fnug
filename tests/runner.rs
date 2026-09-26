@@ -280,6 +280,65 @@ commands:
     assert!(report.get("a").unwrap().output.is_none());
 }
 
+#[test]
+fn exclusive_is_inherited() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, _) = common::load(
+        dir.path(),
+        r"
+name: root
+exclusive: true
+commands:
+  - name: top
+    cmd: 'true'
+children:
+  - name: group
+    exclusive: false
+    commands:
+      - name: plain
+        cmd: 'true'
+      - name: own
+        cmd: 'true'
+        exclusive: true
+",
+    );
+    let exclusive: Vec<&str> = config
+        .all_commands()
+        .into_iter()
+        .filter(|c| c.is_exclusive())
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(exclusive, ["top", "own"]);
+}
+
+#[tokio::test]
+async fn exclusive_command_runs_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    // Run together, `fix` would find `a.running`, and `b` and `c` would miss `fix.done`
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: a
+    cmd: 'touch a.running; sleep 0.3; rm a.running'
+  - name: fix
+    cmd: 'sleep 0.1; test ! -e a.running && touch fix.done'
+    exclusive: true
+  - name: b
+    cmd: 'test -e fix.done'
+  - name: c
+    cmd: 'test -e fix.done'
+",
+    );
+    let opts = ExecOptions {
+        jobs: NonZeroUsize::new(4).unwrap(),
+        ..capture()
+    };
+    let report = run(&config, &cwd, &opts).await;
+    assert!(report.success(), "{report:#?}");
+}
+
 #[tokio::test]
 async fn parallel_respects_deps() {
     let dir = tempfile::tempdir().unwrap();

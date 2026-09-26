@@ -18,9 +18,19 @@ pub struct Command {
     /// How long a headless run lets the command run before killing it. `Some(Duration::ZERO)`
     /// means no limit, even when the run has a default timeout.
     pub timeout: Option<Duration>,
+    /// Whether a headless run keeps other commands from running alongside it; see
+    /// [`is_exclusive`](Self::is_exclusive).
+    pub exclusive: Option<bool>,
 }
 
 impl Command {
+    /// Whether a headless run starts the command only when nothing else runs, and starts
+    /// nothing else until it ends.
+    #[must_use]
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive == Some(true)
+    }
+
     /// Returns the effective working directory for this command,
     /// falling back to the given path when `cwd` is empty.
     #[must_use]

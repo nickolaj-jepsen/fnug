@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, Write};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -37,6 +38,18 @@ pub struct CheckArgs {
     /// config sets `timeout`
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     timeout: Option<Duration>,
+
+    /// Run up to N commands at once, each after its dependencies (0: one per CPU). Above 1,
+    /// output is captured and printed as each command finishes
+    #[arg(short, long, value_name = "N", default_value_t = 1)]
+    jobs: usize,
+}
+
+impl CheckArgs {
+    fn jobs(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.jobs)
+            .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+    }
 }
 
 /// Outcome of the check subcommand.
@@ -66,8 +79,8 @@ pub async fn run(
         },
         fail_fast: args.fail_fast,
         mute_success: args.mute_success,
+        jobs: args.jobs(),
         timeout: args.timeout.filter(|t| !t.is_zero()),
-        ..CheckOptions::default()
     };
     let result = fnug::check::run(config, cwd, &opts, signals.cancel.clone()).await?;
     if let Some(code) = signals.exit_code() {

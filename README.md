@@ -94,11 +94,12 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--mute-success`  | Capture each command's output and print it only if it fails (`check` only) |
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
 | `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
+| `-j`, `--jobs <n>` | Run up to `<n>` commands at once, each after its dependencies; `0` means one per CPU (default `1`, `check` only) |
 | `-V`, `--version` | Print fnug's version                                            |
 
 `-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
 
-`fnug check` prints `PASS`, `FAIL (exit 3)`, `SKIP (build failed)` and so on for each command, then a summary that counts every selected command once: passed, failed, skipped because a dependency failed, and not run after `--fail-fast` stopped the run. Without `--mute-success`, commands share fnug's terminal and their output streams through. With it, each command runs in its own process group with stdout and stderr merged in order. On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands (their whole process group, when output is captured), prints the summary so far, and exits with 128 plus the signal number.
+`fnug check` prints `PASS`, `FAIL (exit 3)`, `SKIP (build failed)` and so on for each command, then a summary that counts every selected command once: passed, failed, skipped because a dependency failed, and not run after `--fail-fast` stopped the run. Without `--mute-success`, commands share fnug's terminal and their output streams through. With it, each command runs in its own process group with stdout and stderr merged in order. `--jobs` above 1 captures output the same way and prints each command's output, unless it passed and `--mute-success` is set, as soon as the command finishes. Commands still start in config order once their dependencies pass, and an `exclusive` one waits until nothing else runs and holds back the rest until it ends. On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands (their whole process group, when output is captured), prints the summary so far, and exits with 128 plus the signal number.
 
 ### Setup
 
@@ -367,6 +368,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `env`          | map               | Environment variables (inherited by children, `$VAR` expanded)    |
 | `auto`         | object            | Default auto rules (inherited by children)                        |
 | `timeout`      | integer / string  | Default command `timeout` (inherited by children)                 |
+| `exclusive`    | bool              | Default command `exclusive` (inherited by children)               |
 | `$schema`      | string            | JSON Schema URL for editors (mainly for `.fnug.json`); ignored    |
 
 `fnug_version` compares only the `major.minor.patch` numbers, so `0.1.0` matches `0.1.0-alpha.13`. fnug warns when the config needs a newer fnug, when it was written for an older release series (a different minor version before 1.0, a different major version after), or when the version can't be parsed.
@@ -384,8 +386,11 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `depends_on` | list of strings   | Commands that must finish first, by id or unique name               |
 | `scrollback` | integer           | PTY scrollback buffer size (number of lines)                        |
 | `timeout`    | integer / string  | Time limit in `fnug check` and MCP runs (see below)                 |
+| `exclusive`  | bool              | Never run alongside another command in `fnug check --jobs` runs     |
 
 `timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM` (its whole process group, when output is captured), then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
+
+`exclusive: true` suits commands that rewrite files, such as formatters, so that nothing reads the files while they change. It matters only when `fnug check --jobs` runs several commands at once; the TUI ignores it.
 
 #### Group fields
 
@@ -397,6 +402,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `env`      | map               | Environment variables (inherited by children, `$VAR` expanded)        |
 | `auto`     | object            | Default auto rules (inherited by children)                            |
 | `timeout`  | integer / string  | Default command `timeout` (inherited by children)                     |
+| `exclusive` | bool             | Default command `exclusive` (inherited by children)                   |
 | `commands` | list              | Commands in this group                                                |
 | `children` | list              | Nested child groups                                                   |
 

@@ -10,7 +10,7 @@ use crate::commands::command::Command;
 use crate::process::StopSignal;
 use crate::pty::terminal::{Terminal, TerminalOptions, TerminalSize};
 use crate::pty::{format_exit_message, format_start_message};
-use crate::runner::{self, NodeState, PlanOptions, Selection};
+use crate::runner::{self, DagNode, NodeState, PlanOptions, Selection};
 
 use super::app::{App, AppEvent, CommandStatus, ProcessInstance, STOP_GRACE};
 use super::tree_state::find_group_in_group;
@@ -127,7 +127,14 @@ impl App {
         for id in plan.ids() {
             self.error_messages.remove(id);
         }
-        for id in self.dag.submit(&plan) {
+        // Not `exclusive`: a long-running command, such as a dev server, would hold back every
+        // exclusive command and everything queued behind it
+        let nodes = plan.commands.iter().map(|c| DagNode {
+            id: c.id(),
+            depends_on: &c.command.depends_on,
+            exclusive: false,
+        });
+        for id in self.dag.submit_nodes(nodes) {
             // No exit event comes for the replaced run, and none is expected
             if let Some(proc) = self.processes.remove(&id) {
                 proc.stop_and_abort(&id, StopSignal::Interrupt);

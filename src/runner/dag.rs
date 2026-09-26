@@ -80,12 +80,13 @@ impl DagState {
         dag
     }
 
-    /// Queue the plan's commands; see [`submit_nodes`](Self::submit_nodes).
+    /// Queue the plan's commands, honouring their `exclusive`; see
+    /// [`submit_nodes`](Self::submit_nodes).
     pub fn submit(&mut self, plan: &Plan) -> Vec<String> {
         self.submit_nodes(plan.commands.iter().map(|c| DagNode {
             id: c.id(),
             depends_on: &c.command.depends_on,
-            exclusive: false,
+            exclusive: c.command.is_exclusive(),
         }))
     }
 
