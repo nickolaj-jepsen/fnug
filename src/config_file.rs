@@ -173,8 +173,9 @@ pub struct ConfigAuto {
     /// don't have to exist. Defaults to the working directory; `[]` resets an inherited value to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<Vec<PathBuf>>,
-    /// Regular expressions matched against changed file paths; a file must match at least one.
-    /// `[]` clears an inherited value, so any file matches.
+    /// Regular expressions matched against the changed file's path relative to the working
+    /// directory, with `/` separators (`src/main.rs`, or `../shared/lib.rs` outside it); a file
+    /// must match at least one. `[]` clears an inherited value, so any file matches.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regex: Option<Vec<String>>,
     /// Always select, regardless of changes.
