@@ -375,11 +375,12 @@ commands:
 }
 
 #[tokio::test]
-async fn parallel_respects_deps() {
-    let dir = tempfile::tempdir().unwrap();
-    let (config, cwd) = common::load(
-        dir.path(),
-        r"
+async fn dependency_listed_later_runs_first() {
+    for jobs in [1, 4] {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, cwd) = common::load(
+            dir.path(),
+            r"
 name: root
 commands:
   - name: test
@@ -390,13 +391,14 @@ commands:
   - name: unrelated
     cmd: 'true'
 ",
-    );
-    let opts = ExecOptions {
-        jobs: NonZeroUsize::new(4).unwrap(),
-        ..capture()
-    };
-    let report = run(&config, &cwd, &opts).await;
-    assert!(report.success(), "{report:#?}");
+        );
+        let opts = ExecOptions {
+            jobs: NonZeroUsize::new(jobs).unwrap(),
+            ..capture()
+        };
+        let report = run(&config, &cwd, &opts).await;
+        assert!(report.success(), "jobs {jobs}: {report:#?}");
+    }
 }
 
 const BACKGROUND_SLEEP: &str = r"
