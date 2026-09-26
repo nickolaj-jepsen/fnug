@@ -212,6 +212,39 @@ commands:
 }
 
 #[test]
+fn captured_serial_run_shows_the_running_command() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+auto:
+  always: true
+commands:
+  - name: slow
+    cmd: 'i=0; until [ -e go ]; do i=$((i+1)); [ $i -gt 500 ] && exit 1; sleep 0.02; done'
+  - name: quick
+    cmd: 'true'
+",
+    );
+    let log = dir.path().join("stderr");
+    let mut child = fnug_command(dir.path(), &["--mute-success"])
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let shown = common::wait_until(TIMEOUT, || {
+        std::fs::read_to_string(&log).is_ok_and(|s| s.contains("[1/2] slow "))
+    });
+    std::fs::write(dir.path().join("go"), "").unwrap();
+    let status = wait(&mut child);
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(shown, "nothing printed while `slow` ran:\n{stderr}");
+    assert!(status.success(), "{stderr}");
+    assert!(stderr.contains("[1/2] slow PASS "), "{stderr}");
+    assert!(stderr.contains("[2/2] quick PASS "), "{stderr}");
+}
+
+#[test]
 fn failure_shows_exit_code_and_merged_output() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(
