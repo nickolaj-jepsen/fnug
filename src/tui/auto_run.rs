@@ -16,20 +16,22 @@ use super::status::StatusLevel;
 pub const QUIET_PERIOD: Duration = Duration::from_secs(1);
 
 impl App {
-    /// Whether any command runs on file changes, which is when the `w` toggle matters
+    /// Whether any command runs on file changes, which takes `auto.run_on_change` and
+    /// `auto.watch` both: only then does the `w` toggle matter
     #[must_use]
     pub fn has_auto_run_commands(&self) -> bool {
         self.config
             .all_commands()
             .iter()
-            .any(|c| c.auto.run_on_change == Some(true))
+            .any(|c| c.auto.run_on_change == Some(true) && c.auto.watch == Some(true))
     }
 
     /// Turn running commands on file changes on or off for this session. Does nothing but say
     /// so when no command opts in.
     pub(super) fn toggle_auto_run(&mut self) {
         if !self.has_auto_run_commands() {
-            self.set_status("No command sets auto.run_on_change", StatusLevel::Info);
+            let text = "No command sets auto.run_on_change together with auto.watch";
+            self.set_status(text, StatusLevel::Info);
             return;
         }
         self.auto_run_enabled = !self.auto_run_enabled;
@@ -138,6 +140,7 @@ mod tests {
     /// `auto` running `cmd` on file changes and `plain` running `true`, both in `dir`
     fn auto_app(dir: &Path, cmd: &str) -> App {
         let mut app = shell_app(dir, &[("auto", cmd), ("plain", "true")]);
+        app.config.commands[0].auto.watch = Some(true);
         app.config.commands[0].auto.run_on_change = Some(true);
         app
     }
@@ -290,12 +293,23 @@ mod tests {
     #[test]
     fn auto_run_toggle_hidden_without_opted_in_commands() {
         let mut app = crate::tui::test_util::two_groups();
+        // Without `watch`, no change ever selects it
+        app.config.commands.push(crate::commands::command::Command {
+            auto: crate::commands::auto::Auto {
+                run_on_change: Some(true),
+                ..Default::default()
+            },
+            ..crate::tui::test_util::command("unwatched")
+        });
         assert!(!app.has_auto_run_commands());
         assert!(!toolbar_text(&app).contains("Auto-run"));
 
         press(&mut app, KeyCode::Char('w'));
         assert!(app.auto_run_enabled, "toggled with nothing to auto-run");
         let status = &app.status.as_ref().unwrap().text;
-        assert_eq!(status, "No command sets auto.run_on_change");
+        assert_eq!(
+            status,
+            "No command sets auto.run_on_change together with auto.watch"
+        );
     }
 }
