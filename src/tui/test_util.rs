@@ -9,6 +9,7 @@ use ratatui::layout::Rect;
 
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
+use crate::selectors::{SelectedBy, SelectedCommand};
 
 use super::app::App;
 use super::log_state::LogBuffer;
@@ -61,6 +62,15 @@ pub(super) fn shell_app(dir: &Path, commands: &[(&str, &str)]) -> App {
         dir.to_path_buf(),
         LogBuffer::new(),
     )
+}
+
+/// Git selection's verdict that changes to `files` select `id`
+pub(super) fn git_selected(id: &str, files: &[&str]) -> SelectedCommand {
+    SelectedCommand {
+        id: id.into(),
+        by: SelectedBy::Git,
+        files: files.iter().map(PathBuf::from).collect(),
+    }
 }
 
 pub(super) fn press(app: &mut App, code: KeyCode) {

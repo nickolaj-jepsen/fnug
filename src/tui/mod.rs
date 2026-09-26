@@ -12,6 +12,7 @@ pub(crate) mod overlay;
 mod process_manager;
 mod render;
 pub mod run_summary;
+pub mod selection;
 pub mod status;
 pub(crate) mod terminal_widget;
 #[cfg(test)]

@@ -925,6 +925,11 @@ mod tests {
 
         app.apply_check_result(&failed_check(&["b", "c"]), AREA);
         assert_eq!(app.current_command_id().as_deref(), Some("b"));
+        let reason = app.selection_reason.get("c");
+        assert_eq!(
+            reason,
+            Some(&crate::tui::selection::SelectionReason::CheckFailed)
+        );
         app.handle_app_event(exited(&app, "b", 0));
         app.handle_app_event(exited(&app, "c", 1));
 

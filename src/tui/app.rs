@@ -14,11 +14,12 @@ use crate::process::{ExitInfo, StopSignal};
 use crate::pty::terminal::Terminal;
 use crate::runner::DagState;
 use crate::selectors::watch::WatchMatch;
-use crate::selectors::{self, SelectOptions};
+use crate::selectors::{self, SelectOptions, SelectedBy, SelectedCommand};
 
 use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
 use super::run_summary::{RunRecord, RunSummary};
+use super::selection::{SelectionReason, watch_status};
 use super::status::{StatusLevel, StatusMessage};
 use super::toolbar;
 use super::tree_state::{TreeContext, find_command_in_group, find_group_in_group, flatten_group};
@@ -86,7 +87,8 @@ pub enum AppEvent {
     },
     WatcherTriggered(Vec<WatchMatch>),
     LogUpdated,
-    GitSelectionComplete(u64, Vec<Command>),
+    /// The commands a git selection of this generation chose
+    GitSelectionComplete(u64, Vec<SelectedCommand>),
     /// Show a message in the toolbar
     Status {
         text: String,
@@ -244,6 +246,8 @@ pub struct App {
     pub(super) user_expansion: HashSet<String>,
     /// Track which commands are selected (by command id)
     pub(super) selected: HashSet<String>,
+    /// What last selected each command; only meaningful while it is selected
+    pub(super) selection_reason: HashMap<String, SelectionReason>,
     /// Mouse interaction state
     pub mouse: MouseState,
     /// Cached toolbar layout
@@ -362,6 +366,7 @@ impl App {
             expanded: HashMap::new(),
             user_expansion: HashSet::new(),
             selected: HashSet::new(),
+            selection_reason: HashMap::new(),
             mouse: MouseState::default(),
             toolbar: ToolbarCache::default(),
             error_messages: HashMap::new(),
@@ -405,6 +410,8 @@ impl App {
         for cmd in &result.report.commands {
             if rerun.contains(&cmd.id) {
                 self.selected.insert(cmd.id.clone());
+                self.selection_reason
+                    .insert(cmd.id.clone(), SelectionReason::CheckFailed);
             } else {
                 self.selected.remove(&cmd.id);
             }
@@ -435,6 +442,8 @@ impl App {
         let (always_cmds, _) = AlwaysSelector::split_active_commands(commands);
         for cmd in &always_cmds {
             self.selected.insert(cmd.id.clone());
+            self.selection_reason
+                .insert(cmd.id.clone(), SelectionReason::Always);
         }
         debug!("Always-selected {} commands", always_cmds.len());
         self.fit_expansion_to_selection(true);
@@ -459,12 +468,8 @@ impl App {
             for issue in &output.issues {
                 warn!("{issue}");
             }
-            let selected = commands
-                .iter()
-                .filter(|c| output.contains(&c.id))
-                .cloned()
-                .collect();
-            let _ = event_tx.blocking_send(AppEvent::GitSelectionComplete(generation, selected));
+            let event = AppEvent::GitSelectionComplete(generation, output.commands);
+            let _ = event_tx.blocking_send(event);
         }));
     }
 
@@ -625,8 +630,18 @@ impl App {
                 self.check_batch_complete();
             }
             AppEvent::WatcherTriggered(matches) => {
+                let names: Vec<String> = matches
+                    .iter()
+                    .map(|m| {
+                        self.find_command(&m.id)
+                            .map_or_else(|| m.id.clone(), |c| c.name)
+                    })
+                    .collect();
+                self.set_status(watch_status(&matches, &names, &self.cwd), StatusLevel::Info);
                 for m in matches {
-                    self.selected.insert(m.id);
+                    self.selected.insert(m.id.clone());
+                    self.selection_reason
+                        .insert(m.id, SelectionReason::Watch(m.files));
                 }
                 // Background events never collapse: the cursor or the user may be in there
                 self.fit_expansion_to_selection(false);
@@ -637,10 +652,15 @@ impl App {
                     return false;
                 }
                 self.git_selection_handle = None;
-                for cmd in &selected {
-                    self.selected.insert(cmd.id.clone());
-                }
                 debug!("Git-selected {} commands", selected.len());
+                for cmd in selected {
+                    let reason = match cmd.by {
+                        SelectedBy::Always => SelectionReason::Always,
+                        SelectedBy::Git => SelectionReason::Git(cmd.files),
+                    };
+                    self.selected.insert(cmd.id.clone());
+                    self.selection_reason.insert(cmd.id, reason);
+                }
                 self.fit_expansion_to_selection(false);
                 self.mark_tree_dirty();
             }
@@ -996,7 +1016,7 @@ impl App {
                         let select = !all_selected;
                         for id in cmd_ids {
                             if select {
-                                self.selected.insert(id);
+                                self.select_by_hand(id);
                             } else {
                                 self.selected.remove(&id);
                             }
@@ -1009,12 +1029,20 @@ impl App {
                     if *selected {
                         self.selected.remove(&node.id);
                     } else {
-                        self.selected.insert(node.id.clone());
+                        self.select_by_hand(node.id.clone());
                     }
                     self.mark_tree_dirty();
                 }
             }
         }
+    }
+
+    /// Select command `id` for the user. One selected already keeps what selected it.
+    pub(super) fn select_by_hand(&mut self, id: String) {
+        if self.selected.insert(id.clone()) {
+            self.selection_reason.insert(id, SelectionReason::Manual);
+        }
+        self.mark_tree_dirty();
     }
 
     /// Return the command id at the current cursor position, if it's a command node.
@@ -1069,10 +1097,11 @@ impl App {
             }
             (ContextMenuTarget::Group { id, .. }, ContextMenuAction::SelectAll) => {
                 if let Some(group) = find_group_in_group(&self.config, id) {
-                    for cmd in group.all_commands() {
-                        self.selected.insert(cmd.id.clone());
+                    let ids: Vec<String> =
+                        group.all_commands().iter().map(|c| c.id.clone()).collect();
+                    for id in ids {
+                        self.select_by_hand(id);
                     }
-                    self.mark_tree_dirty();
                 }
             }
             (ContextMenuTarget::Group { id, .. }, ContextMenuAction::DeselectAll) => {
@@ -1099,8 +1128,7 @@ impl App {
                 }
             }
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Select) => {
-                self.selected.insert(id.clone());
-                self.mark_tree_dirty();
+                self.select_by_hand(id.clone());
             }
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Deselect) => {
                 self.selected.remove(id);
@@ -1407,12 +1435,78 @@ mod tests {
         assert!(!app.handle_app_event(AppEvent::LogUpdated));
     }
 
+    mod selection_reasons {
+        use std::path::PathBuf;
+
+        use crossterm::event::KeyCode;
+
+        use crate::selectors::watch::WatchMatch;
+        use crate::tui::app::{App, AppEvent};
+        use crate::tui::test_util::{cursor_node, draw, git_selected, press, two_groups};
+
+        /// The screen with the cursor on `id`
+        fn screen_at(app: &mut App, id: &str) -> String {
+            draw(app, 100, 24);
+            while cursor_node(app) != Some(id) {
+                press(app, KeyCode::Char('j'));
+            }
+            draw(app, 100, 24).0.join("\n")
+        }
+
+        #[test]
+        fn placeholder_says_why_git_selected() {
+            let mut app = two_groups();
+            app.cwd = PathBuf::from("/repo");
+            let files = ["/repo/src/lib.rs", "/repo/src/main.rs"];
+            let selected = vec![git_selected("b1", &files)];
+            app.handle_app_event(AppEvent::GitSelectionComplete(0, selected));
+
+            let screen = screen_at(&mut app, "b1");
+            assert!(
+                screen.contains("Selected by git: src/lib.rs, +1 more. Press 'r' to run it."),
+                "{screen}"
+            );
+        }
+
+        #[test]
+        fn watcher_event_says_what_changed() {
+            let mut app = two_groups();
+            app.cwd = PathBuf::from("/repo");
+            app.handle_app_event(AppEvent::WatcherTriggered(vec![WatchMatch {
+                id: "a2".into(),
+                files: vec!["/repo/src/x.rs".into()],
+            }]));
+
+            let status = &app.status.as_ref().unwrap().text;
+            assert_eq!(status, "src/x.rs changed: selected a2");
+            let screen = screen_at(&mut app, "a2");
+            assert!(
+                screen.contains("Selected by a change to src/x.rs"),
+                "{screen}"
+            );
+        }
+
+        #[test]
+        fn selected_by_hand_or_not_at_all() {
+            let mut app = two_groups();
+            let screen = screen_at(&mut app, "a1");
+            assert!(
+                screen.contains("Not run yet. Press 'r' to run it."),
+                "{screen}"
+            );
+
+            press(&mut app, KeyCode::Char(' '));
+            let screen = draw(&mut app, 100, 24).0.join("\n");
+            assert!(screen.contains("Selected by you."), "{screen}");
+        }
+    }
+
     mod expansion {
         use crossterm::event::KeyCode;
 
         use crate::selectors::watch::WatchMatch;
         use crate::tui::app::{App, AppEvent};
-        use crate::tui::test_util::{command, cursor_node, draw, press, two_groups};
+        use crate::tui::test_util::{cursor_node, draw, git_selected, press, two_groups};
 
         fn watcher_selects(id: &str) -> AppEvent {
             AppEvent::WatcherTriggered(vec![WatchMatch {
@@ -1447,7 +1541,10 @@ mod tests {
             let mut app = started();
             press_on(&mut app, "alpha", KeyCode::Char('l'));
 
-            app.handle_app_event(AppEvent::GitSelectionComplete(0, vec![command("b1")]));
+            app.handle_app_event(AppEvent::GitSelectionComplete(
+                0,
+                vec![git_selected("b1", &[])],
+            ));
 
             assert!(
                 expanded(&app, "alpha"),
