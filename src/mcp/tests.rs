@@ -533,7 +533,7 @@ commands:
   - name: slow
     cmd: 'echo waiting; exec sleep 30'
   - name: own
-    cmd: 'sleep 0.5'
+    cmd: 'sleep 1.5'
     timeout: 0
 ",
     );
@@ -552,7 +552,7 @@ commands:
     assert_eq!(summary["timed_out"], 1);
     assert_eq!(summary["commands"][0]["status"], "timeout");
     assert_eq!(summary["commands"][0]["detail"], "timed out after 1s");
-    // A command's own `timeout` wins over timeout_secs
+    // A command's own `timeout` wins over timeout_secs: `own` outlasts 1s
     assert_eq!(summary["commands"][1]["status"], "passed");
 }
 
