@@ -15,6 +15,7 @@ use crate::pty::terminal::Terminal;
 use crate::runner::DagState;
 use crate::selectors::watch::WatchMatch;
 use crate::selectors::{self, SelectOptions, SelectedBy, SelectedCommand};
+use crate::{LoadOptions, LoadedConfig};
 
 use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
@@ -24,6 +25,7 @@ use super::status::{StatusLevel, StatusMessage};
 use super::toolbar;
 use super::tree_state::{TreeContext, find_command_in_group, find_group_in_group, flatten_group};
 use super::tree_widget::{NodeKind, VisibleNode};
+use super::watcher::ConfigWatcher;
 
 /// Execution status of a command
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +102,13 @@ pub enum AppEvent {
         lines: usize,
         result: Result<&'static str, String>,
         fallback: Option<String>,
+    },
+    /// A config file changed on disk
+    ConfigFileChanged,
+    /// The config loaded again, or why it didn't
+    ConfigReloaded {
+        generation: u64,
+        result: Result<Box<LoadedConfig>, String>,
     },
 }
 
@@ -302,6 +311,20 @@ pub struct App {
     pub(super) help_scroll: usize,
     /// Written to the terminal after the next draw; see [`take_outbox`](Self::take_outbox)
     pub(super) outbox: Vec<Outbound>,
+    /// How to load the config again, if it came from a file
+    pub(super) reload: Option<LoadOptions>,
+    /// Counts reloads, so only the latest one's result applies
+    pub(super) reload_generation: u64,
+    /// Why the last reload failed; shown until one succeeds
+    pub config_error: Option<String>,
+    /// The config files `config_watcher` watches
+    pub(super) config_sources: Vec<PathBuf>,
+    /// Asks for a reload when a config file changes, while set
+    pub(super) config_watcher: Option<ConfigWatcher>,
+    /// The `auto.watch` file watcher's task
+    pub(super) file_watcher: Option<JoinHandle<()>>,
+    /// The file watcher's last warning, which a restarted watcher doesn't post again
+    pub(super) watcher_warning: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 /// Collect all group IDs in the tree (including root).
@@ -393,6 +416,13 @@ impl App {
             show_help: false,
             help_scroll: 0,
             outbox: Vec::new(),
+            reload: None,
+            reload_generation: 0,
+            config_error: None,
+            config_sources: Vec::new(),
+            config_watcher: None,
+            file_watcher: None,
+            watcher_warning: Arc::default(),
         };
         app.rebuild_visible_nodes();
         app
@@ -629,40 +659,12 @@ impl App {
                 self.mark_tree_dirty();
                 self.check_batch_complete();
             }
-            AppEvent::WatcherTriggered(matches) => {
-                let names: Vec<String> = matches
-                    .iter()
-                    .map(|m| {
-                        self.find_command(&m.id)
-                            .map_or_else(|| m.id.clone(), |c| c.name)
-                    })
-                    .collect();
-                self.set_status(watch_status(&matches, &names, &self.cwd), StatusLevel::Info);
-                for m in matches {
-                    self.selected.insert(m.id.clone());
-                    self.selection_reason
-                        .insert(m.id, SelectionReason::Watch(m.files));
-                }
-                // Background events never collapse: the cursor or the user may be in there
-                self.fit_expansion_to_selection(false);
-                self.mark_tree_dirty();
-            }
+            AppEvent::WatcherTriggered(matches) => self.select_watch_matches(matches),
             AppEvent::GitSelectionComplete(generation, selected) => {
                 if generation != self.git_selection_generation {
                     return false;
                 }
-                self.git_selection_handle = None;
-                debug!("Git-selected {} commands", selected.len());
-                for cmd in selected {
-                    let reason = match cmd.by {
-                        SelectedBy::Always => SelectionReason::Always,
-                        SelectedBy::Git => SelectionReason::Git(cmd.files),
-                    };
-                    self.selected.insert(cmd.id.clone());
-                    self.selection_reason.insert(cmd.id, reason);
-                }
-                self.fit_expansion_to_selection(false);
-                self.mark_tree_dirty();
+                self.select_git_matches(selected);
             }
             AppEvent::LogUpdated => {
                 let unseen = self.unseen_log_issues();
@@ -676,8 +678,51 @@ impl App {
                 result,
                 fallback,
             } => self.finish_copy(lines, result, fallback),
+            AppEvent::ConfigFileChanged => {
+                self.reload_config();
+                return false;
+            }
+            AppEvent::ConfigReloaded { generation, result } => {
+                self.finish_reload(generation, result);
+            }
         }
         true
+    }
+
+    /// Select the commands whose watched files changed, and say which in the toolbar.
+    fn select_watch_matches(&mut self, matches: Vec<WatchMatch>) {
+        let names: Vec<String> = matches
+            .iter()
+            .map(|m| {
+                self.find_command(&m.id)
+                    .map_or_else(|| m.id.clone(), |c| c.name)
+            })
+            .collect();
+        self.set_status(watch_status(&matches, &names, &self.cwd), StatusLevel::Info);
+        for m in matches {
+            self.selected.insert(m.id.clone());
+            self.selection_reason
+                .insert(m.id, SelectionReason::Watch(m.files));
+        }
+        // Background events never collapse: the cursor or the user may be in there
+        self.fit_expansion_to_selection(false);
+        self.mark_tree_dirty();
+    }
+
+    /// Select the commands the latest git selection chose.
+    fn select_git_matches(&mut self, selected: Vec<SelectedCommand>) {
+        self.git_selection_handle = None;
+        debug!("Git-selected {} commands", selected.len());
+        for cmd in selected {
+            let reason = match cmd.by {
+                SelectedBy::Always => SelectionReason::Always,
+                SelectedBy::Git => SelectionReason::Git(cmd.files),
+            };
+            self.selected.insert(cmd.id.clone());
+            self.selection_reason.insert(cmd.id, reason);
+        }
+        self.fit_expansion_to_selection(false);
+        self.mark_tree_dirty();
     }
 
     /// What to write to the terminal fnug runs in, oldest first; call after each draw.
@@ -834,6 +879,10 @@ impl App {
         if let Some(handle) = self.git_selection_handle.take() {
             handle.abort();
         }
+        if let Some(handle) = self.file_watcher.take() {
+            handle.abort();
+        }
+        self.config_watcher = None;
         let processes: Vec<_> = self.processes.drain().collect();
         for (id, proc) in &processes {
             if let Err(e) = proc.terminal.stop(StopSignal::Hangup, QUIT_GRACE) {

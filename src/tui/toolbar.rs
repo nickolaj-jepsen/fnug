@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 
 use super::app::{App, CommandStatus, Focus};
 use super::keymap::badge;
-use super::status::{StatusLevel, StatusMessage};
+use super::status::StatusLevel;
 use super::tree_widget::NodeKind;
 use crate::theme;
 
@@ -289,10 +289,11 @@ impl<'a> LineBuilder<'a> {
 /// The status message in place of the shortcuts, with `? Help` kept at the right edge
 fn status_line(
     app: &App,
-    status: &StatusMessage,
+    text: &str,
+    level: StatusLevel,
     width: u16,
 ) -> (Line<'static>, Vec<ToolbarRegion>) {
-    let color = match status.level {
+    let color = match level {
         StatusLevel::Info => theme::TOOLBAR_DESC,
         StatusLevel::Warn => Color::Yellow,
         StatusLevel::Error => theme::FAILURE,
@@ -300,7 +301,7 @@ fn status_line(
     let help = help_shortcut();
     let mut line = LineBuilder::new(app, width);
     // A leading space, the text, and at least one space before the help
-    let text = truncate(&status.text, line.width.saturating_sub(help.width() + 2));
+    let text = truncate(text, line.width.saturating_sub(help.width() + 2));
     line.push_text(" ".into(), LineBuilder::bg());
     line.push_text(text, Style::default().fg(color).bg(theme::TOOLBAR_BG));
     let fits = line.x < line.width;
@@ -309,11 +310,13 @@ fn status_line(
 
 pub fn build_toolbar_line(app: &App, width: u16) -> (Line<'static>, Vec<ToolbarRegion>) {
     // Fullscreen and terminal focus keep their few shortcuts: they tell how to get back
-    if let Some(status) = &app.status
-        && !app.fullscreen
-        && app.focus == Focus::Tree
-    {
-        return status_line(app, status, width);
+    if !app.fullscreen && app.focus == Focus::Tree {
+        if let Some(status) = &app.status {
+            return status_line(app, &status.text, status.level, width);
+        }
+        if let Some(error) = &app.config_error {
+            return status_line(app, error, StatusLevel::Error, width);
+        }
     }
     // `?` would go to the focused command
     let help = (app.focus == Focus::Tree).then(help_shortcut);

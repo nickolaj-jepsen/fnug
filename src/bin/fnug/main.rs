@@ -145,7 +145,7 @@ async fn run(cli: Cli, logger: LoggerHandle) -> Result<ExitCode, Box<dyn std::er
     };
 
     let check_failed = check_result.is_some();
-    let tui_code = tui::run(loaded.root, loaded.cwd, logger, check_result).await?;
+    let tui_code = tui::run(loaded, load_opts, logger, check_result).await?;
     Ok(handoff_exit_code(check_failed, tui_code))
 }
 

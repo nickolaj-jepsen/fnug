@@ -556,6 +556,7 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 | `s`            | Tree       | Stop command             |
 | `x`            | Tree       | Clear command            |
 | `g`            | Tree       | Select by git changes    |
+| `F5`           | Tree       | Reload the config        |
 | `c`            | Tree       | Copy output              |
 | `Shift+↑/↓`    | Tree       | Scroll output            |
 | `{` / `}`      | Tree       | Output top / bottom      |
@@ -585,3 +586,7 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 ### Copying output
 
 `c` copies the command's whole output, scrollback included, without the lines fnug adds before and after it. fnug uses `pbcopy` on macOS and `wl-copy`, `xclip` or `xsel` on Linux, and falls back to OSC 52, an escape sequence that asks the terminal fnug runs in to set the clipboard. Over SSH, OSC 52 comes first, so the text lands on your machine rather than the server. Inside tmux, OSC 52 needs `set -g set-clipboard on`. Output over 1 MiB is cut to its last 1 MiB. Some terminals limit the size of an OSC 52 copy and silently drop a larger one, and fnug can't tell when that happens.
+
+### Reloading the config
+
+The TUI loads the config again when you save one of its files, or when you press `F5`. Commands and groups keep their output, selection and expansion by id. A command that is no longer in the config is stopped, and one that runs while its `cmd`, `cwd` or `env` changed keeps running as it was until you restart it; the toolbar names it. If the new config doesn't load, the old one stays and the toolbar shows why until a reload succeeds. A new workspace package is only picked up by `F5`, since fnug watches the config files it loaded.
