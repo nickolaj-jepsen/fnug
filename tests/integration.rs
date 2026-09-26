@@ -166,11 +166,12 @@ commands:
     );
     let path = dir.path().join(".fnug.yaml").to_string_lossy().to_string();
     let (config, _) = load_config(Some(&path), false).unwrap();
-    let all_commands: Vec<_> = config.all_commands().into_iter().cloned().collect();
-    let selected = fnug::selectors::get_selected_commands(all_commands).unwrap();
+    let selected = fnug::selectors::select(
+        &config.all_commands(),
+        &fnug::selectors::SelectOptions::default(),
+    );
     // Only the always command should be selected
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].id, "always-cmd");
+    assert_eq!(selected.ids().collect::<Vec<_>>(), ["always-cmd"]);
 }
 
 #[test]
