@@ -211,6 +211,7 @@ impl App {
     }
 
     fn render_log_panel(&mut self, frame: &mut Frame, area: Rect) {
+        self.mark_logs_seen();
         let entries = self.log_buffer.entries();
         let count = entries.len();
 

@@ -13,6 +13,7 @@ use crate::pty::{format_exit_message, format_start_message};
 use crate::runner::{self, DagNode, NodeState, PlanOptions, Selection};
 
 use super::app::{App, AppEvent, CommandStatus, ProcessInstance, STOP_GRACE};
+use super::status::StatusLevel;
 use super::tree_state::find_group_in_group;
 
 /// Copy text to the system clipboard using platform-native commands.
@@ -120,6 +121,7 @@ impl App {
             Ok(plan) => plan,
             Err(e) => {
                 error!("Can't run {ids:?}: {e}");
+                self.set_status(format!("Can't run: {e}"), StatusLevel::Error);
                 return;
             }
         };
