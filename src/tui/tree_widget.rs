@@ -23,6 +23,8 @@ pub enum NodeKind {
         selected: bool,
         status: CommandStatus,
         duration: Option<std::time::Duration>,
+        /// Shown after the status icon, such as a failure's exit code
+        detail: Option<String>,
     },
 }
 
@@ -126,6 +128,7 @@ pub fn render_node_text(node: &VisibleNode) -> String {
             selected,
             status,
             duration,
+            detail,
         } => {
             let indicator = if *selected { "● " } else { "○ " };
             text.push_str(indicator);
@@ -138,6 +141,9 @@ pub fn render_node_text(node: &VisibleNode) -> String {
                 CommandStatus::WaitingForDeps => text.push_str(" ◌"),
                 CommandStatus::Stopped => text.push_str(" ■"),
                 CommandStatus::Pending => {}
+            }
+            if let Some(detail) = detail {
+                let _ = write!(text, " {detail}");
             }
             if let Some(d) = duration {
                 text.push_str(&format_duration(*d));
@@ -256,6 +262,7 @@ impl Widget for TreeWidget<'_> {
                     selected,
                     status,
                     duration,
+                    detail,
                 } => {
                     // Selection indicator
                     let indicator = if *selected { "● " } else { "○ " };
@@ -268,28 +275,24 @@ impl Widget for TreeWidget<'_> {
                     spans.push(Span::styled(name, highlight_style));
 
                     // Status icon
-                    let status_span = match status {
+                    let status_icon = match status {
                         CommandStatus::Pending => None,
-                        CommandStatus::Running => {
-                            Some(Span::styled(" ⧗", Style::default().fg(theme::RUNNING)))
-                        }
-                        CommandStatus::Success => {
-                            Some(Span::styled(" ✔", Style::default().fg(theme::SUCCESS)))
-                        }
-                        CommandStatus::Failure(_) => {
-                            Some(Span::styled(" ✘", Style::default().fg(theme::FAILURE)))
-                        }
-                        CommandStatus::Error(_) => {
-                            Some(Span::styled(" ⚠", Style::default().fg(theme::FAILURE)))
-                        }
-                        CommandStatus::WaitingForDeps => {
-                            Some(Span::styled(" ◌", Style::default().fg(theme::RUNNING)))
-                        }
-                        CommandStatus::Stopped => {
-                            Some(Span::styled(" ■", Style::default().fg(theme::DIM)))
-                        }
+                        CommandStatus::Running => Some((" ⧗", theme::RUNNING)),
+                        CommandStatus::Success => Some((" ✔", theme::SUCCESS)),
+                        CommandStatus::Failure(_) => Some((" ✘", theme::FAILURE)),
+                        CommandStatus::Error(_) => Some((" ⚠", theme::FAILURE)),
+                        CommandStatus::WaitingForDeps => Some((" ◌", theme::RUNNING)),
+                        CommandStatus::Stopped => Some((" ■", theme::DIM)),
                     };
-                    spans.extend(status_span);
+                    if let Some((icon, color)) = status_icon {
+                        spans.push(Span::styled(icon, Style::default().fg(color)));
+                        if let Some(detail) = detail {
+                            spans.push(Span::styled(
+                                format!(" {detail}"),
+                                Style::default().fg(color),
+                            ));
+                        }
+                    }
 
                     // Duration
                     if let Some(d) = duration {
@@ -359,6 +362,7 @@ mod tests {
                 selected,
                 status,
                 duration: None,
+                detail: None,
             },
         }
     }
@@ -403,27 +407,26 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn cmd_node_with_duration(
+    /// A command node directly under the root, with its run's duration and detail
+    fn run_node(
         id: &str,
-        name: &str,
-        depth: usize,
         is_last: bool,
-        ancestors: Vec<bool>,
         selected: bool,
         status: CommandStatus,
         duration: Option<std::time::Duration>,
+        detail: Option<&str>,
     ) -> VisibleNode {
         VisibleNode {
             id: id.to_string(),
-            depth,
+            depth: 1,
             is_last_sibling: is_last,
-            ancestor_is_last: ancestors,
+            ancestor_is_last: vec![],
             kind: NodeKind::Command {
-                name: name.to_string(),
+                name: id.to_string(),
                 selected,
                 status,
                 duration,
+                detail: detail.map(str::to_string),
             },
         }
     }
@@ -441,47 +444,66 @@ mod tests {
 
     #[test]
     fn test_snapshot_status_indicators() {
+        use std::time::Duration;
+
         let nodes = vec![
-            group_node_with_status("root", "ci", 0, true, vec![], true, 1, 1, 1, 3, 6),
-            cmd_node_with_duration(
-                "a",
+            group_node_with_status("root", "ci", 0, true, vec![], true, 1, 1, 2, 3, 7),
+            run_node(
                 "lint",
-                1,
                 false,
-                vec![],
                 true,
                 CommandStatus::Success,
-                Some(std::time::Duration::from_millis(250)),
+                Some(Duration::from_millis(250)),
+                None,
             ),
-            cmd_node("b", "test", 1, false, vec![], true, CommandStatus::Running),
-            cmd_node(
-                "c",
-                "build",
-                1,
+            run_node(
+                "test",
                 false,
-                vec![],
                 true,
-                CommandStatus::Failure(1),
+                CommandStatus::Running,
+                Some(Duration::from_secs(3)),
+                None,
             ),
-            cmd_node(
-                "d",
-                "deploy",
-                1,
+            run_node(
+                "build",
                 false,
-                vec![],
+                true,
+                CommandStatus::Failure(101),
+                Some(Duration::from_millis(40)),
+                Some("101"),
+            ),
+            run_node(
+                "fuzz",
+                false,
+                false,
+                CommandStatus::Failure(139),
+                None,
+                Some("SIGSEGV"),
+            ),
+            run_node(
+                "deploy",
+                false,
                 false,
                 CommandStatus::WaitingForDeps,
+                None,
+                None,
             ),
-            cmd_node(
-                "e",
+            run_node(
                 "notify",
-                1,
                 false,
-                vec![],
                 false,
                 CommandStatus::Error("timeout".into()),
+                None,
+                None,
             ),
-            cmd_node("f", "serve", 1, true, vec![], false, CommandStatus::Stopped),
+            run_node(
+                "serve",
+                true,
+                false,
+                CommandStatus::Stopped,
+                Some(Duration::from_secs(75)),
+                Some("stopped"),
+            ),
         ];
         insta::assert_snapshot!(render_tree_text(&nodes));
     }

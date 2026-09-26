@@ -1,18 +1,20 @@
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
-use crate::runner::{DagState, NodeState};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
-use super::app::{CommandStatus, ProcessInstance};
+use super::app::CommandStatus;
+use super::run_summary::RunSummary;
 use super::tree_widget::{NodeKind, VisibleNode};
 
 /// Shared state passed through recursive tree flattening
 pub(super) struct TreeContext<'a> {
     pub expanded: &'a HashMap<String, bool>,
     pub selected: &'a HashSet<String>,
-    pub processes: &'a HashMap<String, ProcessInstance>,
-    pub error_messages: &'a HashMap<String, String>,
-    pub dag: &'a DagState,
+    /// Latest run of each command; a command without one never ran
+    pub runs: &'a HashMap<String, RunSummary>,
+    /// Running commands show how long they have run at this instant
+    pub now: Instant,
     pub nodes: &'a mut Vec<VisibleNode>,
     pub filter: Option<&'a str>,
 }
@@ -121,18 +123,7 @@ pub(super) fn flatten_group(
 
         for (i, cmd) in visible_commands.iter().enumerate() {
             let is_selected = ctx.selected.contains(&cmd.id);
-            let (status, duration) = if let Some(msg) = ctx.error_messages.get(&cmd.id) {
-                (CommandStatus::Error(msg.clone()), None)
-            } else if is_queued(ctx.dag, &cmd.id) {
-                (CommandStatus::WaitingForDeps, None)
-            } else if let Some(proc) = ctx.processes.get(&cmd.id) {
-                let dur = proc
-                    .finished_at
-                    .map(|end| end.duration_since(proc.started_at));
-                (proc.status.clone(), dur)
-            } else {
-                (CommandStatus::Pending, None)
-            };
+            let run = ctx.runs.get(&cmd.id);
 
             ctx.nodes.push(VisibleNode {
                 id: cmd.id.clone(),
@@ -142,8 +133,9 @@ pub(super) fn flatten_group(
                 kind: NodeKind::Command {
                     name: cmd.name.clone(),
                     selected: is_selected,
-                    status,
-                    duration,
+                    status: run.map_or(CommandStatus::Pending, |r| r.status.clone()),
+                    duration: run.and_then(|r| r.elapsed(ctx.now)),
+                    detail: run.and_then(RunSummary::detail),
                 },
             });
         }
@@ -167,31 +159,17 @@ impl StatusCounts {
     }
 }
 
-/// Whether `id` is queued to run, such as behind its dependencies, but hasn't started.
-fn is_queued(dag: &DagState, id: &str) -> bool {
-    matches!(
-        dag.state(id),
-        Some(NodeState::Waiting(_) | NodeState::Ready)
-    )
-}
-
 fn count_status(group: &CommandGroup, ctx: &TreeContext<'_>) -> StatusCounts {
     let mut counts = StatusCounts::default();
     for cmd in &group.commands {
         if ctx.selected.contains(&cmd.id) {
             counts.selected += 1;
         }
-        if ctx.error_messages.contains_key(&cmd.id) {
-            counts.failure += 1;
-        } else if is_queued(ctx.dag, &cmd.id) {
-            counts.running += 1;
-        } else if let Some(proc) = ctx.processes.get(&cmd.id) {
-            match proc.status {
-                CommandStatus::Success => counts.success += 1,
-                CommandStatus::Running | CommandStatus::WaitingForDeps => counts.running += 1,
-                CommandStatus::Failure(_) | CommandStatus::Error(_) => counts.failure += 1,
-                CommandStatus::Pending | CommandStatus::Stopped => {}
-            }
+        match ctx.runs.get(&cmd.id).map(|r| &r.status) {
+            Some(CommandStatus::Success) => counts.success += 1,
+            Some(CommandStatus::Running | CommandStatus::WaitingForDeps) => counts.running += 1,
+            Some(CommandStatus::Failure(_) | CommandStatus::Error(_)) => counts.failure += 1,
+            Some(CommandStatus::Pending | CommandStatus::Stopped) | None => {}
         }
     }
     for child in &group.children {

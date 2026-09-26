@@ -140,6 +140,10 @@ impl App {
                 proc.stop_and_abort(&id, StopSignal::Interrupt);
             }
         }
+        for id in plan.ids() {
+            self.queued_generation
+                .insert(id.to_string(), self.next_generation);
+        }
         if let Some(id) = focus {
             self.active_terminal_id = Some(id.to_string());
         }
@@ -747,6 +751,90 @@ mod tests {
         app.run_commands(&chain, AREA, None);
         assert_eq!(running_ids(&app), ["a"]);
         assert!(waits(&app, "b") && waits(&app, "c"));
+        app.shutdown().await;
+    }
+
+    /// Exit event for the current run of `id`, after the user stopped it
+    fn stopped(app: &App, id: &str) -> AppEvent {
+        AppEvent::ProcessExited {
+            id: id.into(),
+            generation: app.processes[id].generation,
+            exit: ExitInfo {
+                code: None,
+                signal: Some(libc::SIGINT),
+                stop_requested: true,
+            },
+        }
+    }
+
+    /// [`chain_app`] after the whole chain passed and was queued again: `a` runs, the rest wait.
+    fn rerun_passed_chain(dir: &Path) -> App {
+        let mut app = chain_app(dir);
+        let chain = ids(&["a", "b", "c"]);
+        app.run_commands(&chain, AREA, None);
+        for id in ["a", "b", "c"] {
+            app.handle_app_event(exited(&app, id, 0));
+        }
+        app.run_commands(&chain, AREA, None);
+        app
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopped_dependency_hides_old_pass_of_dependents() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = rerun_passed_chain(dir.path());
+
+        app.stop_command("a");
+        app.handle_app_event(stopped(&app, "a"));
+
+        assert_eq!(node_status(&mut app, "a"), CommandStatus::Stopped);
+        assert_eq!(node_status(&mut app, "b"), CommandStatus::Pending);
+        assert_eq!(node_status(&mut app, "c"), CommandStatus::Pending);
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cleared_dependency_hides_old_pass_of_dependents() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = rerun_passed_chain(dir.path());
+
+        app.clear_command("a");
+
+        assert_eq!(node_status(&mut app, "b"), CommandStatus::Pending);
+        assert_eq!(node_status(&mut app, "c"), CommandStatus::Pending);
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn running_command_shows_elapsed_time() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = single_command_app(dir.path(), "exec sleep 30", dir.path().to_path_buf());
+
+        app.run_command("a", AREA);
+        app.rebuild_visible_nodes();
+
+        let node = app.visible_nodes.iter().find(|n| n.id == "a").unwrap();
+        assert!(
+            matches!(
+                node.kind,
+                NodeKind::Command {
+                    status: CommandStatus::Running,
+                    duration: Some(_),
+                    ..
+                }
+            ),
+            "{:?}",
+            node.kind
+        );
         app.shutdown().await;
     }
 

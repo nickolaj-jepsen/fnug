@@ -18,6 +18,7 @@ use crate::selectors::{self, SelectOptions};
 
 use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
+use super::run_summary::{RunRecord, RunSummary};
 use super::toolbar;
 use super::tree_state::{TreeContext, find_command_in_group, find_group_in_group, flatten_group};
 use super::tree_widget::{NodeKind, VisibleNode};
@@ -238,6 +239,9 @@ pub struct App {
     pub search: SearchState,
     /// Which commands wait on which, and how each command's last run in this session ended
     pub(super) dag: DagState,
+    /// `next_generation` when each command was last queued: a process of a later generation
+    /// belongs to that run, an earlier one is left over from a previous run
+    pub(super) queued_generation: HashMap<String, u64>,
     /// Active context menu (right-click)
     pub context_menu: Option<ContextMenu>,
     /// Last known terminal area, which sizes commands started once their dependencies pass
@@ -324,6 +328,7 @@ impl App {
             log_scroll: 0,
             search: SearchState::Inactive,
             dag: DagState::new(),
+            queued_generation: HashMap::new(),
             context_menu: None,
             last_terminal_area: Rect::default(),
             git_selection_handle: None,
@@ -435,18 +440,47 @@ impl App {
 
     /// Rebuild the flat `visible_nodes` list from the config tree
     pub fn rebuild_visible_nodes(&mut self) {
+        let runs: HashMap<String, RunSummary> = self
+            .config
+            .all_commands()
+            .into_iter()
+            .map(|cmd| (cmd.id.clone(), self.run_summary(&cmd.id)))
+            .collect();
         self.visible_nodes.clear();
         let mut ctx = TreeContext {
             expanded: &self.expanded,
             selected: &self.selected,
-            processes: &self.processes,
-            error_messages: &self.error_messages,
-            dag: &self.dag,
+            runs: &runs,
+            now: Instant::now(),
             nodes: &mut self.visible_nodes,
             filter: self.search.query(),
         };
         flatten_group(&self.config, 0, true, &[], &mut ctx);
         self.tree_dirty = false;
+    }
+
+    /// Where the latest run of command `id` stands
+    #[must_use]
+    pub fn run_summary(&self, id: &str) -> RunSummary {
+        let queued = self.queued_generation.get(id).copied().unwrap_or(0);
+        let run = self.processes.get(id).map(|p| RunRecord {
+            status: &p.status,
+            started_at: p.started_at,
+            finished_at: p.finished_at,
+            exit: p.exit.as_ref(),
+            current: p.generation > queued,
+        });
+        RunSummary::derive(
+            self.dag.state(id),
+            run,
+            self.error_messages.get(id).map(String::as_str),
+        )
+    }
+
+    /// Whether any command is running or queued to run
+    #[must_use]
+    pub fn has_active_runs(&self) -> bool {
+        !self.dag.is_idle()
     }
 
     /// Find a command by id in the config tree
@@ -578,18 +612,9 @@ impl App {
             return;
         }
 
-        // Collect failed IDs
         let failed_ids: Vec<String> = batch_ids
             .iter()
-            .filter(|id| {
-                self.error_messages.contains_key(*id)
-                    || self.processes.get(*id).is_some_and(|p| {
-                        matches!(
-                            p.status,
-                            CommandStatus::Failure(_) | CommandStatus::Error(_)
-                        )
-                    })
-            })
+            .filter(|id| self.run_summary(id).is_failure())
             .cloned()
             .collect();
 

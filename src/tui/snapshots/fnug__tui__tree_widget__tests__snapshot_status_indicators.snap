@@ -2,10 +2,11 @@
 source: src/tui/tree_widget.rs
 expression: render_tree_text(&nodes)
 ---
-▼ ci (3/6)
+▼ ci (3/7)
 ├─● lint ✔ (250ms)
-├─● test ⧗
-├─● build ✘
+├─● test ⧗ (3.0s)
+├─● build ✘ 101 (40ms)
+├─○ fuzz ✘ SIGSEGV
 ├─○ deploy ◌
 ├─○ notify ⚠
-└─○ serve ■
+└─○ serve ■ stopped (1m 15s)

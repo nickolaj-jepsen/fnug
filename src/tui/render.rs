@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget};
 
-use super::app::App;
+use super::app::{App, CommandStatus};
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: usize) {
     let mut state = ScrollbarState::new(total).position(position);
@@ -147,16 +147,14 @@ impl App {
 
     fn render_terminal(&self, frame: &mut Frame, area: Rect) {
         if let Some(ref active_id) = self.active_terminal_id {
-            // Check for error messages first
-            if let Some(error_msg) = self.error_messages.get(active_id) {
-                let error =
-                    Paragraph::new(error_msg.clone()).style(Style::default().fg(theme::FAILURE));
+            let run = self.run_summary(active_id);
+            if let CommandStatus::Error(message) = run.status {
+                let error = Paragraph::new(message).style(Style::default().fg(theme::FAILURE));
                 frame.render_widget(error, area);
                 return;
             }
 
-            let dep_ids = self.dag.waiting_on(active_id);
-            if !dep_ids.is_empty() {
+            if !run.waiting_on.is_empty() {
                 let mut lines: Vec<Line> = vec![
                     Line::from(""),
                     Line::from(Span::styled(
@@ -167,7 +165,7 @@ impl App {
                     )),
                     Line::from(""),
                 ];
-                for dep_id in dep_ids {
+                for dep_id in &run.waiting_on {
                     // Only dependencies still to run or finish are waited on
                     let (label, color) = match self.dag.state(dep_id) {
                         Some(NodeState::Running) => ("running", theme::RUNNING),

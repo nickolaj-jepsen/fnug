@@ -7,6 +7,7 @@ mod mouse_handler;
 pub(crate) mod overlay;
 mod process_manager;
 mod render;
+pub mod run_summary;
 pub(crate) mod terminal_widget;
 mod toolbar;
 mod tree_state;

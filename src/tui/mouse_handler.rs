@@ -340,8 +340,10 @@ impl App {
                         let screen = parser.screen();
                         (screen.scrollback_len() > 0, screen.scrollback() > 0)
                     });
-                    let status = proc_ref.map(|p| &p.status);
-                    let items = build_terminal_menu(has_scrollback, is_scrolled, status);
+                    let status = proc_ref
+                        .and(self.active_terminal_id.as_deref())
+                        .map(|id| self.run_summary(id).status);
+                    let items = build_terminal_menu(has_scrollback, is_scrolled, status.as_ref());
                     let screen = Rect::new(
                         0,
                         0,
