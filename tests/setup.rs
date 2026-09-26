@@ -1,16 +1,19 @@
 //! Tests for `fnug setup`: git hooks, which are run with `sh` and a shim `fnug` on `PATH` that
 //! records its arguments, and editor MCP configs.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Once, OnceLock};
 
+use common::{commit_all, init_gitlink_repo, read, write_executable};
 use fnug::setup::hooks::{
     self, ForeignPolicy, HookError, HookLocation, HookStatus, InstallOptions, InstallOutcome,
 };
 use fnug::setup::mcp::{Editor, FileChange, McpError, McpStatus};
-use git2::{IndexAddOption, Repository, RepositoryInitOptions, Signature};
+use git2::Repository;
 
 /// Keep the developer's global and system git config (a global `core.hooksPath`, say) out of the
 /// repositories these tests open.
@@ -38,18 +41,6 @@ fn tempdir() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     (tmp, root)
-}
-
-fn commit_all(repo: &Repository) {
-    let mut index = repo.index().unwrap();
-    index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
-    index.write().unwrap();
-    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-    let sig = Signature::now("fnug", "fnug@example.com").unwrap();
-    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-    let parents: Vec<_> = parent.iter().collect();
-    repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &parents)
-        .unwrap();
 }
 
 fn set_hooks_path(repo: &Repository, value: &str) {
@@ -85,13 +76,7 @@ fn gitlink_submodule_is_installed_true() {
     Repository::init(&outer).unwrap();
     let sub = outer.join("sub");
     let gitdir = outer.join(".git/modules/sub");
-    Repository::init_opts(
-        &gitdir,
-        RepositoryInitOptions::new()
-            .no_dotgit_dir(true)
-            .workdir_path(&sub),
-    )
-    .unwrap();
+    init_gitlink_repo(&gitdir, &sub);
 
     assert!(!hooks::is_installed(&sub));
     hooks::install(&sub, true).unwrap();
@@ -191,16 +176,6 @@ fn subdir_config_is_installed() {
     assert_eq!(hooks::resolve(&app).unwrap().config_rel, Path::new("app"));
 }
 
-fn init_gitlink_repo(gitdir: &Path, workdir: &Path) -> Repository {
-    Repository::init_opts(
-        gitdir,
-        RepositoryInitOptions::new()
-            .no_dotgit_dir(true)
-            .workdir_path(workdir),
-    )
-    .unwrap()
-}
-
 #[test]
 fn sub_repos_are_packages_in_other_repos() {
     let (_tmp, root) = tempdir();
@@ -292,16 +267,6 @@ fn repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
     Repository::init(&root).unwrap();
     let hook = root.join(".git/hooks/pre-commit");
     (tmp, root, hook)
-}
-
-fn write_executable(path: &Path, content: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap()
 }
 
 /// A directory holding a `fnug` that logs its working directory, git variables and arguments,

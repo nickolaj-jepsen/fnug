@@ -1,15 +1,18 @@
 //! Tests for auto-selection: git scopes, path and regex matching, selection issues, and file
 //! watching.
 
+mod common;
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use common::{commit_all, init_gitlink_repo, write_config};
 use fnug::load_config;
 use fnug::selectors::watch::{WatchError, watch_commands};
 use fnug::selectors::{
     GitScope, IndexOverride, SelectOptions, SelectedBy, SelectionIssue, SelectorOutput, select,
 };
-use git2::{IndexAddOption, Repository, RepositoryInitOptions, RepositoryOpenFlags, Signature};
+use git2::{Repository, RepositoryOpenFlags, Signature};
 
 const GIT_CONFIG: &str = r"
 fnug_version: 0.1.0
@@ -20,37 +23,6 @@ commands:
     auto:
       git: true
 ";
-
-fn commit_all(repo: &Repository) {
-    let mut index = repo.index().unwrap();
-    index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
-    index.update_all(["*"], None).unwrap();
-    index.write().unwrap();
-    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-    let sig = Signature::now("fnug", "fnug@example.com").unwrap();
-    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-    let parents: Vec<_> = parent.iter().collect();
-    repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &parents)
-        .unwrap();
-}
-
-/// A repo whose gitdir lives outside its work tree, linked by a `.git` file.
-fn init_gitlink_repo(gitdir: &Path, workdir: &Path) -> Repository {
-    Repository::init_opts(
-        gitdir,
-        RepositoryInitOptions::new()
-            .no_dotgit_dir(true)
-            .workdir_path(workdir),
-    )
-    .unwrap()
-}
-
-/// Write `yaml` as the config in `dir`, returning its path.
-fn write_config(dir: &Path, yaml: &str) -> PathBuf {
-    let path = dir.join(".fnug.yaml");
-    std::fs::write(&path, yaml).unwrap();
-    path
-}
 
 /// Run selection with `opts` on the config at `config_path`.
 fn select_with(config_path: &Path, opts: &SelectOptions) -> SelectorOutput {
@@ -699,11 +671,7 @@ fn deleted_auto_path_dir_selects() {
 #[test]
 fn check_runs_command_whose_auto_path_was_deleted() {
     let (tmp, _config) = repo_with_deleted_legacy_dir(true);
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(tmp.path())
-        .args(["--no-workspace", "check", "--no-tui"])
-        .output()
-        .unwrap();
+    let output = common::check_command(tmp.path(), &[]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

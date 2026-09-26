@@ -2,138 +2,26 @@
 
 mod common;
 
-use std::io::{Read, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::PtySize;
 
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-fn fnug_command(dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_fnug"));
-    common::git::isolate(&mut command)
-        .current_dir(dir)
-        .args(["--no-workspace", "check", "--no-tui"])
-        .args(args)
-        .env_remove("FNUG_LOG")
-        .stdin(Stdio::null());
-    command
-}
+use common::pty::Pty;
+use common::{KillOnDrop, TIMEOUT, stderr, wait_exit};
 
 fn check(dir: &Path, args: &[&str]) -> Output {
-    fnug_command(dir, args).output().unwrap()
+    common::check_command(dir, args).output().unwrap()
 }
 
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-/// Wait for `child` to exit, killing it after [`TIMEOUT`].
-fn wait(child: &mut Child) -> ExitStatus {
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            return status;
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            panic!("fnug did not exit within {TIMEOUT:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Kills a process when dropped, so a failed assertion doesn't leave it running.
-struct KillOnDrop(i32);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        // SAFETY: plain syscall; the pid is one of the test's own grandchildren.
-        unsafe { libc::kill(self.0, libc::SIGKILL) };
-    }
-}
-
-/// `fnug check` with a pty as its controlling terminal, as when started from a shell. Killed
-/// on drop.
-struct PtyCheck {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    writer: Box<dyn Write + Send>,
-    output: Arc<Mutex<Vec<u8>>>,
-    _master: Box<dyn MasterPty + Send>,
-}
-
-impl PtyCheck {
-    /// Start `fnug check` in `dir`, or return `None` when no pty can be opened here.
-    fn start(dir: &Path, args: &[&str]) -> Option<Self> {
-        let Ok(pair) = native_pty_system().openpty(PtySize::default()) else {
-            eprintln!("skipping: no PTY available");
-            return None;
-        };
-        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_fnug"));
-        command.cwd(dir);
-        command.args(["--no-workspace", "check", "--no-tui"]);
-        command.args(args);
-        command.env_remove("FNUG_LOG");
-        // As `common::git::isolate` does
-        for var in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX"] {
-            command.env_remove(var);
-        }
-        command.env("GIT_CONFIG_GLOBAL", "/dev/null");
-        command.env("GIT_CONFIG_NOSYSTEM", "1");
-        let child = pair.slave.spawn_command(command).unwrap();
-
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let sink = output.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0; 4096];
-            while let Ok(n @ 1..) = reader.read(&mut buf) {
-                sink.lock().unwrap().extend_from_slice(&buf[..n]);
-            }
-        });
-        Some(Self {
-            child,
-            writer: pair.master.take_writer().unwrap(),
-            output,
-            _master: pair.master,
-        })
-    }
-
-    /// What fnug and its commands wrote to the terminal so far.
-    fn output(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
-    }
-
-    /// Type `keys` at the terminal.
-    fn type_keys(&mut self, keys: &[u8]) {
-        self.writer.write_all(keys).unwrap();
-        self.writer.flush().unwrap();
-    }
-
-    /// Wait for fnug to exit and return its exit code, killing it after [`TIMEOUT`].
-    fn wait(&mut self) -> u32 {
-        let mut status = None;
-        let exited = common::wait_until(TIMEOUT, || {
-            status = self.child.try_wait().unwrap();
-            status.is_some()
-        });
-        assert!(
-            exited,
-            "fnug did not exit within {TIMEOUT:?}:\n{}",
-            self.output()
-        );
-        status.unwrap().exit_code()
-    }
-}
-
-impl Drop for PtyCheck {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-    }
+/// `fnug check` in `dir` with a pty as its controlling terminal, as when started from a shell,
+/// or `None` when no pty can be opened here.
+fn pty_check(dir: &Path, args: &[&str]) -> Option<Pty> {
+    let mut command = common::pty::fnug(dir, &["--no-workspace", "check", "--no-tui"]);
+    command.args(args);
+    Pty::spawn(command, PtySize::default())
 }
 
 #[test]
@@ -215,12 +103,13 @@ commands:
     cmd: 'true'
 ",
     );
-    let mut child = fnug_command(dir.path(), &["-j", "2", "--fail-fast", "--mute-success"])
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child =
+        common::check_command(dir.path(), &["-j", "2", "--fail-fast", "--mute-success"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
     let slow = KillOnDrop(common::read_pid(&dir.path().join("pid")));
-    let status = wait(&mut child);
+    let status = wait_exit(&mut child);
     let stderr = stderr(&child.wait_with_output().unwrap());
     assert_eq!(status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("[1/3] fail FAIL (exit 4) "), "{stderr}");
@@ -273,7 +162,7 @@ commands:
 ",
     );
     let log = dir.path().join("stderr");
-    let mut child = fnug_command(dir.path(), &["--mute-success"])
+    let mut child = common::check_command(dir.path(), &["--mute-success"])
         .stderr(std::fs::File::create(&log).unwrap())
         .spawn()
         .unwrap();
@@ -281,7 +170,7 @@ commands:
         std::fs::read_to_string(&log).is_ok_and(|s| s.contains("[1/2] slow "))
     });
     std::fs::write(dir.path().join("go"), "").unwrap();
-    let status = wait(&mut child);
+    let status = wait_exit(&mut child);
     let stderr = std::fs::read_to_string(&log).unwrap();
     assert!(shown, "nothing printed while `slow` ran:\n{stderr}");
     assert!(status.success(), "{stderr}");
@@ -333,7 +222,7 @@ commands:
 ",
     );
     for args in [&[][..], &["--mute-success"]] {
-        let output = fnug_command(dir.path(), args)
+        let output = common::check_command(dir.path(), args)
             .env("PATH", "/nonexistent")
             .output()
             .unwrap();
@@ -364,11 +253,11 @@ commands:
         &["--timeout", "300ms"][..],
         &["--timeout=300ms", "--mute-success"],
     ] {
-        let mut child = fnug_command(dir.path(), args)
+        let mut child = common::check_command(dir.path(), args)
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let status = wait(&mut child);
+        let status = wait_exit(&mut child);
         let stderr = stderr(&child.wait_with_output().unwrap());
         assert_eq!(status.code(), Some(1), "{stderr}");
         assert!(stderr.contains("hang TIMEOUT after 0.3s\n"), "{stderr}");
@@ -402,11 +291,11 @@ commands:
     env: {MARK: c}
 ",
     );
-    let mut child = fnug_command(dir.path(), &["-j", "3"])
+    let mut child = common::check_command(dir.path(), &["-j", "3"])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let status = wait(&mut child);
+    let status = wait_exit(&mut child);
     let stderr = stderr(&child.wait_with_output().unwrap());
     assert!(status.success(), "{stderr}");
     assert!(stderr.contains("3 commands: 3 passed ("), "{stderr}");
@@ -458,15 +347,14 @@ commands:
       always: true
 ",
     );
-    let mut child = fnug_command(dir.path(), &["--mute-success"])
+    let mut child = common::check_command(dir.path(), &["--mute-success"])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let sleep = KillOnDrop(common::read_pid(&dir.path().join("pid")));
 
-    // SAFETY: plain syscall on our own child.
-    unsafe { libc::kill(child.id().cast_signed(), libc::SIGTERM) };
-    let status = wait(&mut child);
+    common::signal(child.id(), libc::SIGTERM);
+    let status = wait_exit(&mut child);
     let output = child.wait_with_output().unwrap();
     assert_eq!(status.code(), Some(143), "{}", stderr(&output));
     assert!(common::wait_until(TIMEOUT, || !common::process_alive(
@@ -491,12 +379,11 @@ commands:
       always: true
 ",
     );
-    let mut child = fnug_command(dir.path(), &[]).spawn().unwrap();
+    let mut child = common::check_command(dir.path(), &[]).spawn().unwrap();
     let sleep = KillOnDrop(common::read_pid(&dir.path().join("pid")));
 
-    // SAFETY: plain syscall on our own child.
-    unsafe { libc::kill(child.id().cast_signed(), libc::SIGTERM) };
-    assert_eq!(wait(&mut child).code(), Some(143));
+    common::signal(child.id(), libc::SIGTERM);
+    assert_eq!(wait_exit(&mut child).code(), Some(143));
     assert!(common::wait_until(TIMEOUT, || !common::process_alive(
         sleep.0
     )));
@@ -517,13 +404,13 @@ commands:
 ",
     );
     let log = dir.path().join("stderr");
-    let mut child = fnug_command(dir.path(), &["--timeout", "300ms"])
+    let mut child = common::check_command(dir.path(), &["--timeout", "300ms"])
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log).unwrap())
         .spawn()
         .unwrap();
     let sleep = KillOnDrop(common::read_pid(&dir.path().join("pid")));
-    let status = wait(&mut child);
+    let status = wait_exit(&mut child);
     let stderr = std::fs::read_to_string(&log).unwrap();
     assert_eq!(status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("[1/1] hang\n"), "{stderr}");
@@ -549,10 +436,10 @@ commands:
 ",
     );
     for args in [&["--mute-success"][..], &["-j", "2"]] {
-        let Some(mut fnug) = PtyCheck::start(dir.path(), args) else {
+        let Some(mut fnug) = pty_check(dir.path(), args) else {
             return;
         };
-        let code = fnug.wait();
+        let code = fnug.wait_exit().exit_code();
         let output = fnug.output();
         assert_eq!(code, 1, "{args:?}:\n{output}");
         assert!(output.contains("prompt"), "{args:?}:\n{output}");
@@ -584,10 +471,15 @@ commands:
         (&[][..], "ON-THE-TERMINAL"),
         (&["--staged", "--stash"], "CAPTURED"),
     ] {
-        let Some(mut fnug) = PtyCheck::start(dir.path(), args) else {
+        let Some(mut fnug) = pty_check(dir.path(), args) else {
             return;
         };
-        assert_eq!(fnug.wait(), 0, "{args:?}:\n{}", fnug.output());
+        assert_eq!(
+            fnug.wait_exit().exit_code(),
+            0,
+            "{args:?}:\n{}",
+            fnug.output()
+        );
         assert!(
             common::wait_until(TIMEOUT, || fnug.output().contains(expected)),
             "{args:?}:\n{}",
@@ -614,13 +506,13 @@ commands:
         for marker in ["started", "cleaned-up"] {
             let _ = std::fs::remove_file(dir.path().join(marker));
         }
-        let Some(mut fnug) = PtyCheck::start(dir.path(), args) else {
+        let Some(mut fnug) = pty_check(dir.path(), args) else {
             return;
         };
         let started = dir.path().join("started");
         assert!(common::wait_until(TIMEOUT, || started.exists()), "{args:?}");
-        fnug.type_keys(b"\x03");
-        let code = fnug.wait();
+        fnug.send(b"\x03");
+        let code = fnug.wait_exit().exit_code();
         let output = fnug.output();
         assert_eq!(code, 130, "{args:?}:\n{output}");
         assert!(
@@ -645,14 +537,14 @@ commands:
       always: true
 ",
     );
-    let Some(mut fnug) = PtyCheck::start(dir.path(), &[]) else {
+    let Some(mut fnug) = pty_check(dir.path(), &[]) else {
         return;
     };
     // Stays behind, since only the shell gets signals
     let _sleep = KillOnDrop(common::read_pid(&dir.path().join("pid")));
-    fnug.type_keys(b"\x03");
+    fnug.send(b"\x03");
     let interrupted = Instant::now();
-    let code = fnug.wait();
+    let code = fnug.wait_exit().exit_code();
     let output = fnug.output();
     assert_eq!(code, 130, "{output}");
     let caught = std::fs::read_to_string(dir.path().join("caught")).unwrap_or_default();
@@ -677,12 +569,7 @@ fn config_error_exits_2() {
     assert!(stderr(&output).contains("Config file not found"));
 
     // The TUI fails the same way, before it starts
-    let output = Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(dir.path())
-        .args(["-c", "missing.yaml"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let output = common::fnug(dir.path(), &["-c", "missing.yaml"]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }
 
@@ -959,13 +846,8 @@ fn base_in_multi_repo_workspace_from_a_non_git_root() {
     std::fs::write(pkg.join("a.txt"), "two\n").unwrap();
     common::git::git(&pkg, &["commit", "-qam", "two"]);
     let check = |args: &[&str]| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fnug"));
-        common::git::isolate(&mut command)
-            .current_dir(root)
-            .args(["check", "--no-tui"])
+        common::fnug_command(root, &["check", "--no-tui"])
             .args(args)
-            .env_remove("FNUG_LOG")
-            .stdin(Stdio::null())
             .output()
             .unwrap()
     };
@@ -1178,17 +1060,13 @@ fn repo_with_staged_hook(dir: &Path) {
     write_staged_project(dir);
     common::git::git(dir, &["add", "-A"]);
     common::git::git(dir, &["commit", "-qm", "init"]);
-    let hook = dir.join(".git/hooks/pre-commit");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(
-        &hook,
-        format!(
+    common::write_executable(
+        &dir.join(".git/hooks/pre-commit"),
+        &format!(
             "#!/bin/sh\nexec '{}' --no-workspace check --no-tui --staged --mute-success\n",
             env!("CARGO_BIN_EXE_fnug")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    );
 }
 
 /// Run `git commit` with `args` in `dir`; returns whether it succeeded, and its stderr.
@@ -1446,7 +1324,7 @@ fn files_fallback_to_auto_path() {
     let root = files_repo(dir.path());
 
     // Every command, none selected by its files; a FNUG_FILES fnug got isn't passed on
-    let output = fnug_command(&root, &["--all"])
+    let output = common::check_command(&root, &["--all"])
         .env("FNUG_FILES", "stale")
         .output()
         .unwrap();
@@ -1489,15 +1367,14 @@ commands:
     cmd: 'true'
 ",
     );
-    let mut child = fnug_command(dir.path(), &[])
+    let mut child = common::check_command(dir.path(), &[])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let shell = KillOnDrop(common::read_pid(&dir.path().join("pid")));
 
-    // SAFETY: plain syscall on our own child.
-    unsafe { libc::kill(child.id().cast_signed(), libc::SIGTERM) };
-    let status = wait(&mut child);
+    common::signal(child.id(), libc::SIGTERM);
+    let status = wait_exit(&mut child);
     let stderr = stderr(&child.wait_with_output().unwrap());
     assert_eq!(status.code(), Some(143), "{stderr}");
     let at = |text: &str| {

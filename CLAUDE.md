@@ -100,14 +100,14 @@ The project dogfoods itself — see `.fnug.yaml` for the lint/test config. It se
 | `tui.rs` | The binary's TUI in a pseudo-terminal |
 | `integration.rs` | Older end-to-end tests of loading and check |
 
-Shared helpers live in `tests/common/` (`mod common;`): writing and loading a config in a `tempfile::tempdir()`, `wait_until`, process helpers, and `common::git`, which runs the git CLI isolated from the user's git config and from the `GIT_DIR` a hook exports. Pattern:
+Shared helpers live in `tests/common/` (`mod common;`): writing and loading a config in a `tempfile::tempdir()`, running the binary (`fnug_command`, `check_command`), process helpers (`wait_until`, `wait_exit`, `read_pid`, `KillOnDrop`), libgit2 repo builders (`commit_all`, `init_gitlink_repo`), `common::git`, which runs the git CLI isolated from the user's git config and from the `GIT_DIR` a hook exports, and `common::pty`, which runs a process on a pseudo-terminal. Pattern:
 
 ```rust
 let dir = tempfile::tempdir().unwrap();
 let (config, cwd) = common::load(dir.path(), "fnug_version: 0.1.0\nname: t\ncommands: [...]");
 ```
 
-Tests that start the binary use `env!("CARGO_BIN_EXE_fnug")`. Process and PTY tests synchronise through files the commands write and poll with a timeout instead of sleeping, and PTY tests skip themselves when no PTY can be opened. Review changed snapshots with `cargo insta review`, or accept them with `INSTA_UPDATE=always cargo test`.
+Tests that start the binary go through `common::fnug_command` or `common::pty::fnug`, which isolate it from the user's git config and unset `FNUG_LOG`. Process and PTY tests synchronise through files the commands write and poll with a timeout instead of sleeping, and PTY tests skip themselves when no PTY can be opened. Review changed snapshots with `cargo insta review`, or accept them with `INSTA_UPDATE=always cargo test`.
 
 The Python tests (`python/tests`) run the wrapper against a fake binary that records its arguments; `test_integration.py` needs the real one (`maturin develop`, or `FNUG_TEST_BINARY`) and skips without it; it also checks that `check()` and `start()` take exactly the options `--help` lists. `test_config.py` checks `Config.to_dict()` against `fnug schema`, or the committed schema without a binary.
 
