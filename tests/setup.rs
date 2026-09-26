@@ -1167,6 +1167,39 @@ fn new_config_is_plain_json() {
 }
 
 #[test]
+fn remove_deletes_files_that_only_held_fnug() {
+    let dir = tempfile::tempdir().unwrap();
+    Editor::ClaudeCode.install(dir.path()).unwrap();
+    Editor::ClaudeCode.remove(dir.path()).unwrap();
+    assert!(!dir.path().join(".mcp.json").exists());
+
+    // With the empty `inputs` VS Code adds, and the directory the file was in
+    write_config(
+        Editor::VsCode,
+        dir.path(),
+        r#"{"inputs": [], "servers": {"fnug": {"type": "stdio", "command": "fnug", "args": ["mcp"]}}}"#,
+    );
+    assert!(Editor::VsCode.is_installed(dir.path()));
+    Editor::VsCode.remove(dir.path()).unwrap();
+    assert!(!dir.path().join(".vscode").exists());
+
+    // Anything else keeps the file
+    write_config(
+        Editor::ClaudeCode,
+        dir.path(),
+        r#"{"mcpServers": {"other": {"command": "other"}}}"#,
+    );
+    Editor::ClaudeCode.install(dir.path()).unwrap();
+    Editor::ClaudeCode.remove(dir.path()).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&read(&dir.path().join(".mcp.json"))).unwrap();
+    assert_eq!(
+        written,
+        serde_json::json!({"mcpServers": {"other": {"command": "other"}}})
+    );
+}
+
+#[test]
 fn servers_key_of_the_wrong_type_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     write_config(Editor::ClaudeCode, dir.path(), "{\"mcpServers\": []}\n");

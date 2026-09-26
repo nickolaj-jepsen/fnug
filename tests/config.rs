@@ -422,6 +422,18 @@ fn select_working_tree(config: &CommandGroup) -> Vec<String> {
 }
 
 #[test]
+fn invalid_regex_names_the_pattern() {
+    // On a group, whose commands inherit it, and on a command
+    for config in [
+        "name: root\nauto:\n  regex: ['[invalid']\ncommands:\n  - name: lint\n    cmd: 'true'\n",
+        "name: root\ncommands:\n  - name: lint\n    cmd: 'true'\n    auto:\n      regex: ['[invalid']\n",
+    ] {
+        let err = load_err(config);
+        assert!(err.contains("Invalid regex pattern `[invalid`"), "{err}");
+    }
+}
+
+#[test]
 fn regex_empty_list_clears_inherited() {
     let (dir, path) = lockfile_repo();
     let (config, _) = load_config(path.to_str(), true).unwrap();
@@ -903,6 +915,31 @@ fn explicit_empty_id_rejected() {
 }
 
 #[test]
+fn blank_names_rejected_with_their_place() {
+    for (config, place) in [
+        (
+            "name: root\ncommands:\n  - name: '  '\n    cmd: 'true'\n",
+            "A command in 'root' in ",
+        ),
+        (
+            "name: root\nchildren:\n  - name: backend\n    children:\n      - name: ''\n        commands: []\n",
+            "A group in 'root > backend' in ",
+        ),
+        ("name: ' '\ncommands: []\n", "A group at the root in "),
+    ] {
+        let err = load_err(config);
+        assert!(err.contains(place), "{err}");
+        assert!(err.contains(".fnug.yaml has an empty name"), "{err}");
+    }
+}
+
+#[test]
+fn blank_cmd_rejected() {
+    let err = load_err("name: root\ncommands:\n  - name: lint\n    cmd: '  '\n");
+    assert!(err.contains("Command 'lint' has an empty cmd"), "{err}");
+}
+
+#[test]
 fn sibling_duplicate_names_error() {
     let err = load_err(
         r"
@@ -1272,6 +1309,37 @@ commands:
         (b.auto.git, b.auto.watch, b.auto.always, b.auto.check)
     );
     assert_eq!(a.auto.regexes().len(), b.auto.regexes().len());
+}
+
+#[test]
+fn workspace_without_packages_has_no_children() {
+    let off = workspace(
+        "name: root\nworkspace: false\n",
+        &[("pkg", &one_command("pkg"))],
+    );
+    let empty = workspace("name: root\nworkspace: true\n", &[]);
+    for dir in [off, empty] {
+        git2::Repository::init(dir.path()).unwrap();
+        let config = load_workspace(dir.path());
+        assert!(config.children.is_empty(), "{:?}", names(&config));
+    }
+}
+
+#[test]
+fn package_workspace_setting_is_ignored() {
+    // Were `a` a workspace root too, it would take in `inner`, which the root's glob misses
+    let dir = workspace(
+        GLOB_ROOT,
+        &[
+            (
+                "packages/a",
+                &format!("{}workspace: true\n", one_command("a")),
+            ),
+            ("packages/a/inner", &one_command("inner")),
+        ],
+    );
+    let config = load_workspace(dir.path());
+    assert_eq!(names(&config), ["a-cmd"]);
 }
 
 /// Every warning logged by this test binary so far.
