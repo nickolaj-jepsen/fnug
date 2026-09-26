@@ -917,6 +917,25 @@ fn base_outside_repo_exits_2() {
 }
 
 #[test]
+fn stash_requires_staged() {
+    let dir = tempfile::tempdir().unwrap();
+    clean_repo(dir.path(), SELECTION);
+    std::fs::write(dir.path().join("src/a.rs"), "fn a() { }\n").unwrap();
+
+    for args in [
+        &["--stash"][..],
+        &["--stash", "--all"],
+        &["--stash", "--base", "HEAD"],
+        &["--stash", "lint"],
+    ] {
+        let output = check(dir.path(), args);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {err}");
+        assert!(ran(&output).is_empty(), "{args:?}: {err}");
+    }
+}
+
+#[test]
 fn config_outside_repo_checks_the_current_repo() {
     let tmp = tempfile::tempdir().unwrap();
     if !common::git::available() || git2::Repository::discover(tmp.path()).is_ok() {

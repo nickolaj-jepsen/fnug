@@ -42,9 +42,11 @@ pub struct CheckArgs {
     #[arg(long, group = "source")]
     pub(crate) staged: bool,
 
-    /// Set unstaged changes to tracked files aside while commands run, so they check exactly
-    /// what is staged, and put them back afterwards
-    #[arg(long, requires = "staged")]
+    /// With --staged: set unstaged changes to tracked files aside while commands run, so they
+    /// check exactly what is staged, and put them back afterwards
+    // clap drops `requires` when the required arg conflicts with one given, as the other
+    // sources do with --staged, so they are ruled out here too
+    #[arg(long, requires = "staged", conflicts_with_all = ["targets", "all", "base"])]
     pub(crate) stash: bool,
 
     /// Stop on first failure
