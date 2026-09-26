@@ -127,7 +127,7 @@ impl App {
                 info!("Stopping '{id}': it is no longer in the config");
                 proc.stop_and_abort(id, StopSignal::Interrupt);
             }
-            self.dag.stop(id);
+            self.mark_stopped(id);
         }
         let mut changed: Vec<String> = loaded
             .root
@@ -145,6 +145,7 @@ impl App {
         self.selected.retain(|id| new_ids.contains(id));
         self.selection_reason.retain(|id, _| new_ids.contains(id));
         self.error_messages.retain(|id, _| new_ids.contains(id));
+        self.cancelled_by.retain(|id, _| new_ids.contains(id));
         self.queued_generation.retain(|id, _| new_ids.contains(id));
         self.auto_run_pending.retain(|id| new_ids.contains(id));
         self.auto_running.retain(|id| new_ids.contains(id));

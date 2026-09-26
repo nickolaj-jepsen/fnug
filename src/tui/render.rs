@@ -198,7 +198,12 @@ impl App {
                 return;
             }
 
-            if let Some(proc) = self.processes.get(active_id) {
+            // An earlier run's output would pass for that of the run that never started
+            if let Some(proc) = self
+                .processes
+                .get(active_id)
+                .filter(|_| !self.cancelled_by.contains_key(active_id))
+            {
                 let parser = proc.terminal.parser().lock();
                 let screen = parser.screen();
                 let pseudo_term = PseudoTerminal::new(screen);
@@ -219,11 +224,23 @@ impl App {
         frame.render_widget(placeholder, area);
     }
 
-    /// What the pane says for a command without output: why it is selected, if it is.
+    /// What the pane says for a command without output to show: why its latest queued run
+    /// never started, if it was stopped first, or else why it is selected, if it is.
     fn placeholder_text(&self) -> String {
         let Some(id) = self.active_terminal_id.as_deref() else {
             return "No command running. Press 'r' to run a command.".into();
         };
+        if let Some(cause) = self.cancelled_by.get(id) {
+            if cause == id {
+                return "Stopped before it started. Press 'r' to run it.".into();
+            }
+            let name = self
+                .find_command(cause)
+                .map_or_else(|| cause.clone(), |c| c.name);
+            return format!(
+                "Didn't run: '{name}', which it depends on, was stopped. Press 'r' to run it."
+            );
+        }
         if !self.selected.contains(id) {
             return "Not run yet. Press 'r' to run it.".into();
         }

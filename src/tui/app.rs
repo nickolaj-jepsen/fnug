@@ -266,6 +266,9 @@ pub struct App {
     pub toolbar: ToolbarCache,
     /// Error messages for commands that failed to start
     pub(super) error_messages: HashMap<String, String>,
+    /// The stopped command that kept each command's latest queued run from starting: itself,
+    /// or one it depends on
+    pub(super) cancelled_by: HashMap<String, String>,
     /// Whether the `visible_nodes` list needs rebuilding
     pub(super) tree_dirty: bool,
     /// Scroll offset for the tree panel (first visible row index)
@@ -406,6 +409,7 @@ impl App {
             mouse: MouseState::default(),
             toolbar: ToolbarCache::default(),
             error_messages: HashMap::new(),
+            cancelled_by: HashMap::new(),
             tree_dirty: false,
             tree_scroll: 0,
             last_scroll_anchor: None,
@@ -847,6 +851,7 @@ impl App {
     pub(super) fn mark_stopped(&mut self, stopped_id: &str) {
         for cmd_id in self.dag.stop(stopped_id) {
             info!("Cancelled '{cmd_id}', which was waiting on '{stopped_id}'");
+            self.cancelled_by.insert(cmd_id, stopped_id.to_string());
         }
     }
 

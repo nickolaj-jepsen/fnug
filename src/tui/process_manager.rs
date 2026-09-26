@@ -90,6 +90,7 @@ impl App {
 
         for id in plan.ids() {
             self.error_messages.remove(id);
+            self.cancelled_by.remove(id);
         }
         // Not `exclusive`: a long-running command, such as a dev server, would hold back every
         // exclusive command and everything queued behind it
@@ -203,6 +204,8 @@ impl App {
             self.dag.state(cmd_id),
             Some(NodeState::Waiting(_) | NodeState::Ready)
         ) {
+            self.cancelled_by
+                .insert(cmd_id.to_string(), cmd_id.to_string());
             self.mark_stopped(cmd_id);
         }
         // A running command's dependents are cancelled once it exits
@@ -284,6 +287,7 @@ impl App {
         self.error_messages.remove(cmd_id);
         for (dependent, _) in self.dag.abort(cmd_id) {
             info!("Dropped '{dependent}', which was waiting on '{cmd_id}'");
+            self.cancelled_by.insert(dependent, cmd_id.to_string());
         }
         self.mark_tree_dirty();
         self.check_batch_complete();
@@ -823,6 +827,43 @@ mod tests {
         assert_eq!(node_status(&mut app, "a"), CommandStatus::Stopped);
         assert_eq!(node_status(&mut app, "b"), CommandStatus::Pending);
         assert_eq!(node_status(&mut app, "c"), CommandStatus::Pending);
+        app.shutdown().await;
+    }
+
+    /// The terminal pane with `id` in it
+    fn pane(app: &mut App, id: &str) -> String {
+        app.active_terminal_id = Some(id.into());
+        draw(app, 100, 24).0.join("\n")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pane_says_why_a_queued_run_never_started() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = rerun_passed_chain(dir.path());
+
+        app.stop_command("a");
+        app.handle_app_event(stopped(&app, "a"));
+
+        let not_run = "Didn't run: 'a', which it depends on, was stopped.";
+        for id in ["b", "c"] {
+            let screen = pane(&mut app, id);
+            assert!(screen.contains(not_run), "{id}:\n{screen}");
+        }
+
+        let mut app = rerun_passed_chain(dir.path());
+        app.stop_command("b");
+        let screen = pane(&mut app, "b");
+        assert!(screen.contains("Stopped before it started."), "{screen}");
+        let screen = pane(&mut app, "c");
+        assert!(screen.contains("Didn't run: 'b'"), "{screen}");
+
+        // Queued again, it waits as usual
+        app.run_command("c", AREA);
+        let screen = pane(&mut app, "c");
+        assert!(screen.contains("Waiting for dependencies"), "{screen}");
         app.shutdown().await;
     }
 
