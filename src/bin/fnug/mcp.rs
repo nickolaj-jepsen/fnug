@@ -3,7 +3,10 @@ use std::process::ExitCode;
 
 use fnug::commands::group::CommandGroup;
 
-/// Start the MCP server over stdio.
+use crate::signals;
+
+/// Start the MCP server over stdio. A termination signal stops running commands and exits with
+/// 128 plus its number.
 ///
 /// # Errors
 ///
@@ -12,6 +15,7 @@ pub async fn run(
     config: CommandGroup,
     cwd: PathBuf,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    fnug::mcp::run(config, cwd).await?;
-    Ok(ExitCode::SUCCESS)
+    let signals = signals::install()?;
+    fnug::mcp::run(config, cwd, signals.cancel.clone()).await?;
+    Ok(signals.exit_code().unwrap_or(ExitCode::SUCCESS))
 }
