@@ -1,0 +1,5 @@
+---
+source: src/tui/toolbar.rs
+expression: "toolbar_text(&app, 80).trim_end()"
+---
+ ^]  Back   ESC  Back

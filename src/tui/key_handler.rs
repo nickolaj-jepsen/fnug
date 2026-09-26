@@ -54,22 +54,23 @@ impl App {
             return;
         }
 
-        // If terminal is focused, forward keys to PTY (including Ctrl+C, Ctrl+R)
-        if matches!(self.focus, Focus::Terminal) {
-            if key.code == KeyCode::Esc {
+        // A focused terminal gets every key, Ctrl+C and Ctrl+R included, except the way out
+        self.release_stale_focus();
+        if self.focus == Focus::Terminal {
+            let leave = is_leave_terminal_key(&key)
+                || (key.code == KeyCode::Esc && !self.active_command_on_alternate_screen());
+            if leave {
                 self.focus = Focus::Tree;
-                return;
-            }
-            if let Some(ref active_id) = self.active_terminal_id
-                && let Some(proc) = self.processes.get(active_id)
+            } else if let Some(proc) = self
+                .active_terminal_id
+                .as_ref()
+                .and_then(|id| self.processes.get(id))
+                && let Some(bytes) = translate_key_event(&key, proc.terminal.parser())
+                && let Err(e) = proc.terminal.write(bytes)
             {
-                if let Some(bytes) = translate_key_event(&key, proc.terminal.parser())
-                    && let Err(e) = proc.terminal.write(bytes)
-                {
-                    debug!("Failed to write to terminal: {e}");
-                }
-                return;
+                debug!("Failed to write to terminal: {e}");
             }
+            return;
         }
 
         // Global keys (only when terminal is not focused)
@@ -248,19 +249,16 @@ impl App {
                 self.show_logs = !self.show_logs;
                 self.log_scroll = 0;
             }
-            KeyCode::Tab => {
-                // Toggle focus to terminal if there's an active interactive command
-                if self.active_terminal_id.is_some() {
-                    self.focus = match self.focus {
-                        Focus::Tree if self.active_command_is_interactive() => Focus::Terminal,
-                        Focus::Terminal => Focus::Tree,
-                        Focus::Tree => self.focus,
-                    };
-                }
-            }
+            KeyCode::Tab => self.focus_terminal(),
             _ => {}
         }
     }
+}
+
+/// Whether `key` is Ctrl+], which leaves a focused terminal. Terminals without the kitty
+/// keyboard protocol send it as the byte 0x1d, which crossterm reads as Ctrl+5.
+fn is_leave_terminal_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char(']' | '5'))
 }
 
 #[cfg(test)]
@@ -320,5 +318,124 @@ mod tests {
         let mut app = test_app();
         press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(app.should_quit);
+    }
+
+    mod focus {
+        use std::path::Path;
+        use std::time::Duration;
+
+        use crossterm::event::KeyCode;
+
+        use crate::process::ExitInfo;
+        use crate::pty::test_util::{pty_available, wait_until};
+        use crate::tui::app::{App, AppEvent, Focus};
+        use crate::tui::test_util::{AREA, press, press_ctrl, shell_app, type_text};
+
+        /// A command `a` running `cmd` in `dir`, shown in the pane
+        fn started(dir: &Path, cmd: &str) -> App {
+            let mut app = shell_app(dir, &[("a", cmd)]);
+            app.run_command("a", AREA);
+            app
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn tab_focuses_line_mode_command() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = started(dir.path(), r#"read -r ans; echo "got=$ans" > answer"#);
+
+            press(&mut app, KeyCode::Tab);
+            assert_eq!(app.focus, Focus::Terminal);
+            type_text(&mut app, "y");
+            press(&mut app, KeyCode::Enter);
+
+            let answer = dir.path().join("answer");
+            assert!(wait_until(Duration::from_secs(5), || {
+                std::fs::read_to_string(&answer).is_ok_and(|s| s == "got=y\n")
+            }));
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn ctrl_bracket_leaves_focus() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = started(dir.path(), "exec sleep 30");
+
+            // With and without the kitty keyboard protocol
+            for c in [']', '5'] {
+                app.focus = Focus::Terminal;
+                press_ctrl(&mut app, c);
+                assert_eq!(app.focus, Focus::Tree, "Ctrl+{c}");
+            }
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn esc_forwarded_in_alt_screen() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let cmd = r"stty raw -echo; printf '\033[?1049h'; head -c 1 > key";
+            let mut app = started(dir.path(), cmd);
+            let term = std::sync::Arc::clone(&app.processes["a"].terminal);
+            assert!(wait_until(Duration::from_secs(5), || {
+                term.parser().lock().screen().alternate_screen()
+            }));
+
+            app.focus = Focus::Terminal;
+            press(&mut app, KeyCode::Esc);
+
+            assert_eq!(app.focus, Focus::Terminal);
+            let key = dir.path().join("key");
+            assert!(wait_until(Duration::from_secs(5), || {
+                std::fs::read(&key).is_ok_and(|k| k == b"\x1b")
+            }));
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn esc_leaves_line_mode_command() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = started(dir.path(), "exec sleep 30");
+
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Esc);
+
+            assert_eq!(app.focus, Focus::Tree);
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn focus_returns_on_exit() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = started(dir.path(), "exec sleep 30");
+            app.focus = Focus::Terminal;
+
+            let exited = AppEvent::ProcessExited {
+                id: "a".into(),
+                generation: app.processes["a"].generation,
+                exit: ExitInfo {
+                    code: Some(0),
+                    signal: None,
+                    stop_requested: false,
+                },
+            };
+            assert!(app.handle_app_event(exited));
+
+            assert_eq!(app.focus, Focus::Tree);
+            app.shutdown().await;
+        }
     }
 }

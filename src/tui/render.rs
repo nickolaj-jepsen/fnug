@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget};
 
-use super::app::{App, CommandStatus};
+use super::app::{App, CommandStatus, Focus};
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: usize) {
     let mut state = ScrollbarState::new(total).position(position);
@@ -123,12 +123,7 @@ impl App {
         );
         frame.render_widget(tree_widget, actual_tree_area);
 
-        // Render separator
-        let separator_lines: Vec<Line> = (0..separator_area.height)
-            .map(|_| Line::from(Span::styled("│", Style::default().fg(theme::ACCENT))))
-            .collect();
-        let separator = Paragraph::new(separator_lines);
-        frame.render_widget(separator, separator_area);
+        self.render_separator(frame, separator_area);
 
         // Render right pane: log panel or terminal
         if self.show_logs {
@@ -148,6 +143,19 @@ impl App {
         }
 
         (tree_area, terminal_area)
+    }
+
+    /// The line between tree and terminal, coloured like a running command while the terminal
+    /// has the keyboard
+    fn render_separator(&self, frame: &mut Frame, area: Rect) {
+        let color = match self.focus {
+            Focus::Terminal => theme::RUNNING,
+            Focus::Tree => theme::ACCENT,
+        };
+        let lines: Vec<Line> = (0..area.height)
+            .map(|_| Line::from(Span::styled("│", Style::default().fg(color))))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     fn render_terminal(&self, frame: &mut Frame, area: Rect) {
