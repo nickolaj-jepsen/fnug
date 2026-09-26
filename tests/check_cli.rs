@@ -916,6 +916,51 @@ fn base_outside_repo_exits_2() {
     assert!(ran(&output).is_empty(), "{err}");
 }
 
+#[test]
+fn config_outside_repo_checks_the_current_repo() {
+    let tmp = tempfile::tempdir().unwrap();
+    if !common::git::available() || git2::Repository::discover(tmp.path()).is_ok() {
+        return;
+    }
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    common::git::init(&repo);
+    std::fs::write(repo.join("src/a.rs"), "ok\n").unwrap();
+    common::git::git(&repo, &["add", "-A"]);
+    common::git::git(&repo, &["commit", "-qm", "init"]);
+    // As the Python wrapper writes an in-memory config: outside, with its cwd in the repo
+    let config = tmp.path().join("outside/cfg.yaml");
+    std::fs::create_dir(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "name: root\ncwd: '{}'\ncommands:\n  - name: lint\n    cmd: '! grep -rn BAD src/'\n    \
+             auto:\n      git: true\n      path: [src]\n",
+            repo.display()
+        ),
+    )
+    .unwrap();
+    let config = config.to_str().unwrap();
+
+    std::fs::write(repo.join("src/a.rs"), "ok\nfine\n").unwrap();
+    let output = check(&repo, &["-c", config, "--base", "HEAD"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["lint"], "{}", stderr(&output));
+
+    // BAD is staged, and gone from the work tree
+    std::fs::write(repo.join("src/a.rs"), "ok\nBAD\n").unwrap();
+    common::git::git(&repo, &["add", "src/a.rs"]);
+    std::fs::write(repo.join("src/a.rs"), "ok\n").unwrap();
+    let output = check(&repo, &["-c", config, "--staged", "--stash"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("src/a.rs:2:BAD"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("src/a.rs")).unwrap(),
+        "ok\n"
+    );
+}
+
 const STAGED: &str = r"
 name: root
 commands:

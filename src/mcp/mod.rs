@@ -17,6 +17,7 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router, transport
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::check::{self, CheckError};
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::runner::{
@@ -128,6 +129,19 @@ fn select_options(base: Option<&str>) -> SelectOptions {
     }
 }
 
+/// A tool error if `options` compares with a base outside a git work tree, as `fnug check
+/// --base` refuses; see [`check::check_base_repo`].
+fn check_base_repo(options: &SelectOptions, loaded: &LoadedConfig) -> Result<(), CallToolResult> {
+    let dir = check::repo_dir(&loaded.cwd);
+    check::check_base_repo(&options.scope, &dir).map_err(|e| match e {
+        CheckError::BaseOutsideRepo { path, message } => tool_error(format!(
+            "base needs a git repository, but {} is not in one: {message}",
+            path.display()
+        )),
+        e => tool_error(e.to_string()),
+    })
+}
+
 /// The plan selection for what a run tool asked for.
 fn selection(scope: &RunScope) -> Selection {
     match scope {
@@ -198,7 +212,9 @@ impl FnugMcp {
         let result = self.with_config(move |loaded| {
             let flat = commands_with_group_path(&loaded.root);
             let commands: Vec<&Command> = flat.iter().map(|(cmd, _)| *cmd).collect();
-            let selection = selectors::select(&commands, &select_options(params.base.as_deref()));
+            let options = select_options(params.base.as_deref());
+            check_base_repo(&options, &loaded)?;
+            let selection = selectors::select(&commands, &options);
             let (fatal, issues): (Vec<_>, Vec<_>) =
                 selection.issues.iter().partition(|i| i.is_fatal());
             if !fatal.is_empty() {
@@ -352,6 +368,9 @@ impl FnugMcp {
         };
         let selection = selection(&scope);
         let planned = self.with_config(move |loaded| {
+            if let Selection::Auto { options, .. } = &selection {
+                check_base_repo(options, &loaded)?;
+            }
             let plan = runner::plan(&loaded.root, &selection, &PlanOptions::default())
                 .map_err(|e| plan_error(&e, &loaded.root))?;
             let selectable = commands_with_group_path(&loaded.root)

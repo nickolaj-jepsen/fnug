@@ -55,7 +55,7 @@ pub struct CheckOptions {
     /// formatter does when it finds something to fix.
     pub detect_modifications: bool,
     /// Set unstaged changes to tracked files aside while commands run, so they see what the
-    /// index holds; see [`stash::stash`]. Only in the git work tree containing `cwd`. Output is
+    /// index holds; see [`stash::stash`]. Only in the git work tree of [`repo_dir`]. Output is
     /// then captured, so each command runs in a process group of its own that is stopped as a
     /// whole.
     pub stash: bool,
@@ -103,15 +103,19 @@ pub struct CheckResult {
 /// # Errors
 ///
 /// Returns `CheckError::Plan` if a target names no single command or git selection fails as a
-/// whole, `CheckError::BaseOutsideRepo` if it selects by changes since a base and `cwd` isn't in
-/// a git work tree, and `CheckError::Stash` if unstaged changes can't be set aside or put back.
+/// whole, `CheckError::BaseOutsideRepo` if it selects by changes since a base and
+/// [`repo_dir`] isn't in a git work tree, and `CheckError::Stash` if unstaged changes can't be
+/// set aside or put back.
 pub async fn run(
     config: &CommandGroup,
     cwd: &Path,
     opts: &CheckOptions,
     cancel: CancellationToken,
 ) -> Result<CheckResult, CheckError> {
-    check_base_repo(&opts.selection, cwd)?;
+    let repo = repo_dir(cwd);
+    if let Selection::Auto { options, .. } = &opts.selection {
+        check_base_repo(&options.scope, &repo)?;
+    }
     let Some(plan) = plan_unless_cancelled(config, &opts.selection, &cancel).await? else {
         printer::interrupted();
         return Ok(CheckResult {
@@ -135,13 +139,13 @@ pub async fn run(
     };
     let mut printer = Printer::new(&plan, output, opts.jobs.get() == 1, opts.mute_success);
     if !opts.stash
-        && let Some(lock) = stash::pending(cwd)
+        && let Some(lock) = stash::pending(&repo)
     {
         printer.stash_pending(&lock);
     }
     if plan.is_empty() {
         if opts.stash
-            && let Some(note) = stash::recover(cwd)?
+            && let Some(note) = stash::recover(&repo)?
         {
             printer.stash_recovered(&note);
         }
@@ -153,7 +157,7 @@ pub async fn run(
     }
 
     let stashed = if opts.stash {
-        let guard = stash::stash(cwd)?;
+        let guard = stash::stash(&repo)?;
         if let Some(note) = guard.recovered() {
             printer.stash_recovered(note);
         }
@@ -192,22 +196,31 @@ pub async fn run(
     })
 }
 
-/// Under the since-base scope, fail unless `cwd` is in a git work tree. Selection alone only
+/// The directory whose git work tree `--stash` and the `--base` guard use: the process's working
+/// directory, as for `--staged`, since git runs hooks at the top of the work tree it commits
+/// in. `fallback`, such as the config's directory, if that is unknown.
+#[must_use]
+pub fn repo_dir(fallback: &Path) -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| fallback.to_path_buf())
+}
+
+/// Under the since-base scope, fail unless `dir` is in a git work tree. Selection alone only
 /// warns about paths outside one, and would run just the `always` commands.
-fn check_base_repo(selection: &Selection, cwd: &Path) -> Result<(), CheckError> {
-    let Selection::Auto { options, .. } = selection else {
-        return Ok(());
-    };
-    if !matches!(options.scope, GitScope::Since(_)) {
+///
+/// # Errors
+///
+/// Returns `CheckError::BaseOutsideRepo` if `dir` isn't in a git work tree.
+pub fn check_base_repo(scope: &GitScope, dir: &Path) -> Result<(), CheckError> {
+    if !matches!(scope, GitScope::Since(_)) {
         return Ok(());
     }
-    let message = match Repository::open_ext(cwd, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]) {
+    let message = match Repository::open_ext(dir, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]) {
         Ok(repo) if repo.workdir().is_some() => return Ok(()),
         Ok(_) => "it is in a bare repository".to_string(),
         Err(e) => e.message().to_string(),
     };
     Err(CheckError::BaseOutsideRepo {
-        path: cwd.to_path_buf(),
+        path: dir.to_path_buf(),
         message,
     })
 }

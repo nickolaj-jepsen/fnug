@@ -188,6 +188,33 @@ fn starts_with_broken_config_and_reports_it_per_call() {
 }
 
 #[test]
+fn base_outside_repo_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    if git2::Repository::discover(dir.path()).is_ok() {
+        eprintln!("skipping: the temp dir is inside a git repo");
+        return;
+    }
+    // As `fnug check --base` does: passing with only `always` commands run would be false
+    common::write_config(
+        dir.path(),
+        "name: root\ncommands:\n  - name: build\n    cmd: 'true'\n    auto:\n      always: true\n",
+    );
+    let mut server = Server::start(dir.path());
+    for (id, tool) in [(2, "run_lints"), (3, "list_lints")] {
+        server.call(id, tool, &json!({"base": "main"}));
+        let result = &server.response(id)["result"];
+        assert_eq!(result["isError"], true, "{tool}: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("base needs a git repository"),
+            "{tool}: {text}"
+        );
+    }
+    server.call(4, "run_lints", &json!({}));
+    assert_eq!(server.response(4)["result"]["isError"], false);
+}
+
+#[test]
 fn closing_stdin_stops_commands_and_server() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(dir.path(), HANG_CONFIG);
