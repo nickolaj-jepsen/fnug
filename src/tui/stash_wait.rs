@@ -39,8 +39,19 @@ impl App {
     /// It checks the index out over the work tree and puts the unstaged changes back
     /// afterwards, and neither is an edit of the user's: running commands on the index's
     /// content could fail the check, and reloading it could stop commands.
-    pub(super) fn stash_running(&self) -> bool {
-        stash::active(&self.cwd)
+    pub(super) fn stash_running(&mut self) -> bool {
+        // Locating runs git, which is too slow for every event and tick
+        if self
+            .stash_lock
+            .as_ref()
+            .is_none_or(|(cwd, _)| *cwd != self.cwd)
+        {
+            self.stash_lock = Some((self.cwd.clone(), stash::lock_path(&self.cwd)));
+        }
+        self.stash_lock
+            .as_ref()
+            .and_then(|(_, lock)| lock.as_deref())
+            .is_some_and(stash::held)
     }
 
     /// Hold back a config reload, if `reload`, and `changes` from the file watcher until the
@@ -230,6 +241,21 @@ mod tests {
         app.tick(Instant::now());
         handle_until_reloaded(&mut app).await;
         assert!(app.processes["server"].terminal.is_running());
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stash_lock_is_located_once() {
+        let Some(dir) = repo() else { return };
+        let mut app = shell_app(dir.path(), &[("a", "true")]);
+        assert!(!app.stash_running());
+
+        // git no longer finds a repo there, yet the lock where it was still counts
+        std::fs::remove_file(dir.path().join(".git/HEAD")).unwrap();
+        let check = StashRun::start(dir.path());
+        assert!(app.stash_running());
+        check.end();
+        assert!(!app.stash_running());
         app.shutdown().await;
     }
 

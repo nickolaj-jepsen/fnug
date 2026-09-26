@@ -341,6 +341,8 @@ pub struct App {
     pub(super) quiet_until: HashMap<String, Instant>,
     /// What file changes set off while a `fnug check --stash` ran, until it ends
     pub(super) held_back: Option<HeldBack>,
+    /// The `cwd` the `--stash` lock was last located for, and where it is
+    pub(super) stash_lock: Option<(PathBuf, Option<PathBuf>)>,
 }
 
 /// Collect all group IDs in the tree (including root).
@@ -445,6 +447,7 @@ impl App {
             auto_running: HashSet::new(),
             quiet_until: HashMap::new(),
             held_back: None,
+            stash_lock: None,
         };
         app.rebuild_visible_nodes();
         app
