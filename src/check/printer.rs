@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
+use super::stash::RestoreNote;
 use crate::process::ExitInfo;
 use crate::runner::{CommandReport, Failure, Outcome, OutputMode, Plan, RunEvent, RunReport};
 
@@ -103,6 +104,42 @@ impl Printer {
                  commands)"
             ))
         );
+    }
+
+    pub(super) fn stash_recovered(&self, note: &RestoreNote) {
+        eprintln!(
+            "{}",
+            self.sty.yellow(
+                "Put back unstaged changes that a stopped `fnug check --stash` had set aside."
+            )
+        );
+        self.stash_restored(note);
+    }
+
+    pub(super) fn restoring_stash(&self) {
+        eprintln!("{}", self.sty.dim("Restoring unstaged changes…"));
+    }
+
+    pub(super) fn stash_restored(&self, note: &RestoreNote) {
+        if note.discarded_fixes {
+            eprintln!(
+                "{}",
+                self.sty.yellow(
+                    "Commands changed files that also have unstaged changes, so their changes \
+                     to those files were discarded to put yours back."
+                )
+            );
+        }
+        if let Some(patch) = &note.kept_patch {
+            eprintln!(
+                "{}",
+                self.sty.yellow(&format!(
+                    "Unstaged changes are back, but differ from the copy fnug saved, so it kept \
+                     {}; compare them before you delete it.",
+                    patch.display()
+                ))
+            );
+        }
     }
 
     pub(super) fn event(&mut self, event: &RunEvent) {

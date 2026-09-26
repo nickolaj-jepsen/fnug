@@ -42,6 +42,11 @@ pub struct CheckArgs {
     #[arg(long, group = "source")]
     staged: bool,
 
+    /// Set unstaged changes to tracked files aside while commands run, so they check exactly
+    /// what is staged, and put them back afterwards
+    #[arg(long, requires = "staged")]
+    stash: bool,
+
     /// Stop on first failure
     #[arg(long)]
     fail_fast: bool,
@@ -128,6 +133,7 @@ pub async fn run(
         timeout: args.timeout.filter(|t| !t.is_zero()),
         cancel_cause: signals.cause.clone(),
         detect_modifications: !args.allow_modifications,
+        stash: args.stash,
     };
     let result = fnug::check::run(config, cwd, &opts, signals.cancel.clone()).await?;
     if let Some(code) = signals.exit_code() {
