@@ -41,27 +41,37 @@ The project dogfoods itself — see `.fnug.yaml` for the lint/test config. The f
 
 | Directory/File | Purpose |
 |---|---|
-| `bin/fnug/` | Binary entry point: CLI (clap), dispatches to TUI, check, setup, or MCP |
-| `lib.rs` | `load_config()` — find/parse config, validate (duplicate IDs, cycles, empty names), apply inheritance |
-| `config_file.rs` | Config file discovery and serde parsing (`.fnug.yaml`/`.yml`/`.json`) |
-| `workspace.rs` | Workspace discovery: filesystem walk or glob expansion, merges sub-configs |
-| `check.rs` | Headless runner: dependency resolution (topological sort), sequential execution, exit codes |
-| `mcp.rs` | MCP server (rmcp): exposes `list_lints`, `run_all`, `run_lint` tools over stdio |
-| `setup/` | Interactive wizard: git hook install/remove, MCP editor config (Claude Code, VS Code, Cursor) |
-| `commands/` | Data model: `Command`, `CommandGroup`, `Auto` rules, `Inheritable` trait |
-| `selectors/` | Auto-selection logic: `git.rs` (git2 diff matching), `watch.rs` (notify), `always.rs` |
-| `pty/` | PTY management: spawns commands via portable-pty, reader/writer threads, vt100 parser |
-| `tui/` | ratatui UI: app state/event loop, rendering, input handling, tree widget, process manager |
-| `logger.rs` | Custom `log` impl: ring buffer for TUI log panel + optional file output |
+| `bin/fnug/` | Binary: clap CLI and global options (`main.rs`), one module per subcommand (`tui.rs`, `check.rs`, `setup.rs`, `init.rs`, `mcp.rs`), `signals.rs` (SIGINT/SIGTERM/SIGHUP as cancellation) |
+| `lib.rs` | `load(&LoadOptions)` → `LoadedConfig`: find the config (or a parent workspace root), check `fnug_version`, merge workspace packages, assign ids, validate, apply inheritance. `load_config()` wraps it |
+| `config_file.rs` | Config discovery (`.fnug.yaml`/`.yml`/`.json`), serde types with `deny_unknown_fields` and typo hints, `ConfigError` |
+| `schema.rs` | JSON Schema generated from the config types (schemars), printed by `fnug schema` |
+| `trust.rs` | `TrustPolicy`: refuse configs fnug found itself that another user owns, unless `FNUG_SAFE_DIRECTORIES` lists them |
+| `workspace.rs` | Workspace discovery (walk skipping hidden and gitignored dirs, or globs) and merging packages as child groups |
+| `commands/` | Data model: `Command`, `CommandGroup`, `Auto`. `inherit.rs` (`Inheritable`), `ids.rs` (default ids, uniqueness, `depends_on` resolution, `resolve_command` by id or unique name), `env.rs` (`$VAR` expansion in `env`) |
+| `selectors/` | `select()` → `SelectorOutput`, which never fails: `git.rs` (git2 changes per repo for a `GitScope`), `always.rs`, `watch.rs` (notify watcher → `WatchMatch`), `matching.rs` (`auto.path`/`auto.regex` matching for git and watch), `ignore.rs` (git's ignore rules for the watcher) |
+| `runner/` | Engine behind check, MCP and the TUI: `plan.rs` (what runs, in dependency order), `dag.rs` (`DagState`), `exec.rs` (headless executor: jobs, timeouts, cancellation → `RunReport`), `process.rs` (`sh -c` invocation, `{files}`/`FNUG_FILES`, sessions), `output.rs` (bounded head/tail capture), `report.rs` (outcomes and counts) |
+| `process.rs` | `ProcessHandle`: sees a child's exit without reaping it, signals its process group (or only its pid), escalates to SIGKILL |
+| `check/` | `fnug check`: `mod.rs` (`run` → `CheckResult`), `printer.rs` (stderr lines and summary), `stash.rs` (`--stash`: set unstaged changes aside and put them back), `modified.rs` (fail commands that change tracked files) |
+| `mcp/` | MCP server (rmcp, stdio) with `list_lints`, `run_lints`, `run_lint`, `run_all`: `mod.rs` (tools, config reload per call), `params.rs`, `response.rs` (JSON summary and capped output blocks), `text.rs` (escape stripping) |
+| `init/` | `fnug init`: `detect.rs` (tooling from marker files, monorepo packages), `render.rs` (write the config) |
+| `setup/` | `fnug setup` wizard: `hooks.rs` (pre-commit hook block), `mcp.rs` (editor MCP configs for Claude Code, VS Code and Cursor, edited in place as JSONC), `workspace.rs` (packages in other repos), `fsutil.rs` (atomic writes, `PATH` lookup) |
+| `pty/` | One PTY per TUI command (portable-pty): `terminal.rs` (reader/writer threads feeding a vt100 parser), `command.rs` (`CommandBuilder` from a shell invocation), `messages.rs` (fnug's start and exit banners) |
+| `tui/` | ratatui UI: `app.rs` (state, events, `run_commands` over `DagState`), `process_manager.rs`, `key_handler.rs`, `mouse_handler.rs`, `keymap.rs` (every keybinding), `render.rs`, `help.rs`, `toolbar.rs`, `tree_*.rs`, `watcher.rs` (`auto.watch` and config-file watchers), `reload.rs` (hot reload keyed by id), `clipboard.rs` (system clipboard or OSC 52), `auto_run.rs`, `stash_wait.rs`, `run_summary.rs`, `status.rs` |
+| `logger.rs` | Global `log` impl: ring buffer for the TUI log panel, optional log file, and a stderr sink that is on until the TUI takes the terminal (`LoggerHandle::set_stderr`). Never stdout, which `fnug mcp` uses |
 | `theme.rs` | Color constants |
 
 ### Key patterns
 
-- **Inheritance** — Settings (cwd, auto rules) cascade parent→child via `Inheritable` trait
-- **Dependencies** — `depends_on` resolved via topological sort (Kahn's algorithm) in check mode
-- **PTY** — Each command gets its own PTY with dedicated reader/writer threads feeding a vt100 parser
-- **Async** — Tokio multi-thread runtime for event loop, signals, and process management
+- **Loading** — Everything that needs a config goes through `fnug::load(&LoadOptions)`; `-c`, `--root` and `--no-workspace` map onto `LoadOptions`
+- **Inheritance** — `cwd`, `auto` (each field on its own), `env`, `timeout` and `exclusive` cascade parent→child via the `Inheritable` trait. Workspace packages start fresh
+- **Ids** — Default ids come from names, qualified with the group path when they clash and prefixed with the package id in a workspace. `commands::ids::resolve_command` (exact id, then a unique case-insensitive name) is the one lookup for CLI targets, the runner and MCP
+- **Selection** — `selectors::select` reports problems as `SelectionIssue`s instead of failing; only fatal ones (a `--base` that doesn't resolve or has no commits to compare, `--staged` outside a repo) become a `PlanError`
+- **Dependencies** — `runner::plan` picks the commands and adds their `depends_on` in order; `DagState` starts each command once its dependencies pass. The headless executor (`runner::execute`, used by check and MCP) and the TUI's `App::run_commands` both drive a `DagState`
+- **Processes** — Headless commands run `sh -c` through `std::process::Command`, captured ones in a session of their own; `ProcessHandle` sees their exit without reaping them, so a signal never hits a reused pid. Each TUI command gets its own PTY with dedicated reader/writer threads feeding a vt100 parser
+- **Async** — Tokio multi-thread runtime, built in `main.rs` with a short `shutdown_timeout`; signals become a `CancellationToken`
 - **Redraws** — PTY output marks its terminal dirty and wakes the event loop through a shared `Arc<Notify>`; the loop redraws when the visible terminal is dirty or an event changed something, at most one frame per 16 ms. Only a mouse button press or release draws right away, and only when something besides the visible terminal's output changed since the last frame
+- **Keymap** — `tui/keymap.rs` is the only list of keybindings: the help overlay and toolbar render from it, `key_handler` tests check each entry is handled, and `keymap_matches_readme` fails with the README table to paste when they differ
+- **Schema** — Config structs are `deny_unknown_fields`; a new key means regenerating `schema/fnug.schema.json` (`cargo run --bin fnug -- schema > schema/fnug.schema.json`, enforced by a test) and adding it to `python/fnug/config.py`
 
 ## Testing
 
