@@ -232,15 +232,34 @@ fn detect_go_gofmt_exit_code() {
 
     // `gofmt -l` exits 0 even when it lists unformatted files; the command must not
     let gofmt = cmds(&go)[0].1;
+    for file in [
+        "main.go",
+        "pkg/lib.go",
+        "vendor/dep/dep.go",
+        "testdata/bad.go",
+    ] {
+        write(dir.path(), file, "package main\n");
+    }
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
+    let find = fnug::setup::fsutil::find_on_path("find").expect("find on PATH");
+    std::os::unix::fs::symlink(find, bin.join("find")).unwrap();
     let missing = run_sh(dir.path(), &bin, gofmt);
     assert!(!missing.status.success(), "{missing:?}");
 
-    write_script(&bin.join("gofmt"), "#!/bin/sh\necho main.go\n");
+    // Every file it's given is unformatted; `go vet ./...` skips vendor/ and testdata/ too
+    write_script(
+        &bin.join("gofmt"),
+        "#!/bin/sh\nshift\nprintf '%s\\n' \"$@\"\n",
+    );
     let unformatted = run_sh(dir.path(), &bin, gofmt);
     assert!(!unformatted.status.success(), "{unformatted:?}");
-    assert_eq!(String::from_utf8_lossy(&unformatted.stdout), "main.go\n");
+    let mut listed: Vec<_> = String::from_utf8_lossy(&unformatted.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ["./main.go", "./pkg/lib.go"]);
 
     write_script(
         &bin.join("gofmt"),
