@@ -18,6 +18,8 @@ use common::{process_alive, read_pid, wait_until, write_config};
 /// Leaves the alternate screen, which restoring the terminal writes
 const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
+/// Written with every frame the TUI draws
+const HIDE_CURSOR: &str = "\x1b[?25l";
 
 /// fnug running in a PTY, and everything it wrote so far
 struct Tui {
@@ -276,5 +278,85 @@ fn tui_stops_commands_when_its_terminal_hangs_up() {
     assert!(
         wait_until(Duration::from_secs(5), || !process_alive(pid)),
         "command still running"
+    );
+}
+
+/// An SGR mouse report for the 0-based cell `(x, y)`: `button` 0 is the left button, 35 a
+/// move with no button down
+fn mouse(button: u8, x: u16, y: u16, release: bool) -> String {
+    let end = if release { 'm' } else { 'M' };
+    format!("\x1b[<{button};{};{}{end}", x + 1, y + 1)
+}
+
+/// The frames drawn in `output`
+fn frames(output: &str) -> usize {
+    output.matches(HIDE_CURSOR).count()
+}
+
+#[test]
+fn click_after_key_hits_the_new_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        "name: root\nchildren:\n  - name: grp\n    commands:\n      - name: one\n        cmd: touch ran-one\ncommands:\n  - name: two\n    cmd: touch ran-two\n",
+    );
+    let Some(mut tui) = Tui::spawn(dir.path(), &[]) else {
+        return;
+    };
+    tui.wait_started(0, "two");
+
+    // `l` expands the collapsed `grp`, so `one` takes the row `two` was drawn on, and a
+    // double-click there runs it
+    let click = [false, true, false, true].map(|release| mouse(0, 10, 2, release));
+    tui.send(format!("jl{}", click.concat()).as_bytes());
+
+    let ran = wait_until(Duration::from_secs(10), || {
+        dir.path().join("ran-one").exists()
+    });
+    assert!(ran, "one never ran:\n{:?}", tui.output());
+    assert!(
+        !dir.path().join("ran-two").exists(),
+        "clicked the old layout"
+    );
+}
+
+#[test]
+fn mouse_moves_keep_redraws_within_the_frame_cap() {
+    /// Time between two moves, faster than frames
+    const MOVE_EVERY: Duration = Duration::from_millis(3);
+    const MOVES: u32 = 300;
+
+    let dir = tempfile::tempdir().unwrap();
+    // New output about every millisecond, so each move finds the pane changed
+    write_config(
+        dir.path(),
+        "name: root\ncommands:\n  - name: stream\n    cmd: \"while :; do echo x; sleep 0.001; done\"\n    auto:\n      always: true\n",
+    );
+    let Some(mut tui) = Tui::spawn(dir.path(), &[]) else {
+        return;
+    };
+    tui.wait_started(0, "stream");
+    let running = tui.output().len();
+    tui.send(b"\r");
+    let streaming = wait_until(Duration::from_secs(10), || {
+        frames(&tui.output()[running..]) > 10
+    });
+    assert!(streaming, "output never redrawn:\n{:?}", tui.output());
+
+    let from = tui.output().len();
+    let start = std::time::Instant::now();
+    for i in 0..MOVES {
+        let x = 60 + u16::try_from(i % 10).unwrap();
+        tui.send(mouse(35, x, 5, false).as_bytes());
+        std::thread::sleep(MOVE_EVERY);
+    }
+    let drawn = frames(&tui.output()[from..]);
+    let elapsed = start.elapsed();
+
+    // One frame per 16 ms, plus the frames under way when counting started and stopped
+    let cap = usize::try_from(elapsed.as_millis() / 16).unwrap() + 10;
+    assert!(
+        drawn <= cap,
+        "{drawn} frames for {MOVES} moves in {elapsed:?}, more than {cap}"
     );
 }
