@@ -4,38 +4,20 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Output, Stdio};
 
 use common::git::git;
-
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// `fnug check` in `dir` with `args`, isolated from the user's git config.
-fn fnug(dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_fnug"));
-    common::git::isolate(&mut command)
-        .current_dir(dir)
-        .args(["--no-workspace", "check", "--no-tui"])
-        .args(args)
-        .env_remove("FNUG_LOG")
-        .stdin(Stdio::null());
-    command
-}
+use common::{check_command, read, stderr, wait_exit, write};
 
 /// `fnug check --staged --stash` with `args`.
 fn stash_command(dir: &Path, args: &[&str]) -> Command {
-    let mut command = fnug(dir, &["--staged", "--stash"]);
+    let mut command = check_command(dir, &["--staged", "--stash"]);
     command.args(args);
     command
 }
 
 fn check(dir: &Path, args: &[&str]) -> Output {
     stash_command(dir, args).output().unwrap()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// Everything fnug and its commands printed.
@@ -45,35 +27,6 @@ fn printed(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         stderr(output)
     )
-}
-
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap()
-}
-
-fn write(dir: &Path, path: &str, content: impl AsRef<[u8]>) {
-    let path = dir.join(path);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
-}
-
-/// Wait for `child` to exit, killing it after [`TIMEOUT`].
-fn wait(child: &mut Child) -> ExitStatus {
-    let mut status = None;
-    let exited = common::wait_until(TIMEOUT, || {
-        status = child.try_wait().unwrap();
-        status.is_some()
-    });
-    if !exited {
-        let _ = child.kill();
-        panic!("fnug did not exit within {TIMEOUT:?}");
-    }
-    status.unwrap()
-}
-
-fn kill(pid: u32, signal: i32) {
-    // SAFETY: plain syscall on one of the test's own descendants.
-    unsafe { libc::kill(i32::try_from(pid).unwrap(), signal) };
 }
 
 /// A repo in `dir` with `config` and `files` committed. Returns false when git isn't available,
@@ -134,7 +87,7 @@ fn stash_runs_on_index_content() {
     write(dir, "src/a.py", "ok\n");
 
     // Selection alone checks the work tree, so BAD gets through
-    let output = fnug(dir, &["--staged"]).output().unwrap();
+    let output = check_command(dir, &["--staged"]).output().unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
 
     let output = check(dir, &[]);
@@ -435,8 +388,8 @@ fn stash_sigterm_restores() {
         .unwrap();
     common::read_pid(&dir.join(".git/pid"));
     assert_eq!(read(&dir.join("a.txt")), "staged\n", "not set aside");
-    kill(child.id(), libc::SIGTERM);
-    let status = wait(&mut child);
+    common::signal(child.id(), libc::SIGTERM);
+    let status = wait_exit(&mut child);
     let err = stderr(&child.wait_with_output().unwrap());
     assert_eq!(status.code(), Some(143), "{err}");
     assert!(err.contains("Restoring unstaged changes"), "{err}");
@@ -474,10 +427,10 @@ fn kill_while_running(dir: &Path) {
         .spawn()
         .unwrap();
     let sleep = common::read_pid(&dir.join(".git/pid"));
-    kill(child.id(), libc::SIGKILL);
-    wait(&mut child);
+    common::signal(child.id(), libc::SIGKILL);
+    wait_exit(&mut child);
     // In a session of its own, so it outlives fnug
-    kill(u32::try_from(sleep).unwrap(), libc::SIGKILL);
+    common::signal(u32::try_from(sleep).unwrap(), libc::SIGKILL);
     assert!(dir.join(".git/fnug-stash.lock").exists());
 }
 
@@ -505,10 +458,15 @@ fn concurrent_runs_recover_a_stale_stash_once() {
     .unwrap();
     let args = ["-c", config.to_str().unwrap(), "--staged", "--stash"];
     let runs: Vec<Child> = (0..8)
-        .map(|_| fnug(dir, &args).stderr(Stdio::piped()).spawn().unwrap())
+        .map(|_| {
+            check_command(dir, &args)
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
         .collect();
     for mut run in runs {
-        let status = wait(&mut run);
+        let status = wait_exit(&mut run);
         let err = stderr(&run.wait_with_output().unwrap());
         assert!(status.success(), "{err}");
     }
@@ -567,7 +525,7 @@ fn stash_sigkill_then_edit_is_left_to_the_user() {
     );
 
     // Plain check leaves it alone, but says so
-    let output = fnug(dir, &[]).output().unwrap();
+    let output = check_command(dir, &[]).output().unwrap();
     let err = stderr(&output);
     assert!(err.contains("fnug-stash.lock"), "{err}");
     assert!(dir.join(".git/fnug-stash.lock").exists());
@@ -589,7 +547,7 @@ fn stale_lock_warning_only_when_changes_are_set_aside() {
         return;
     }
     write_dead_lock(dir);
-    let output = fnug(dir, &[]).output().unwrap();
+    let output = check_command(dir, &[]).output().unwrap();
     let err = stderr(&output);
     assert!(output.status.success(), "{err}");
     assert!(!err.contains("set aside"), "{err}");
@@ -597,7 +555,7 @@ fn stale_lock_warning_only_when_changes_are_set_aside() {
     // Killed while its changes were set aside
     std::fs::remove_file(dir.join(".git/fnug-stash.lock")).unwrap();
     kill_while_running(dir);
-    let output = fnug(dir, &[]).output().unwrap();
+    let output = check_command(dir, &[]).output().unwrap();
     let err = stderr(&output);
     assert!(err.contains("left unstaged changes set aside"), "{err}");
 }
@@ -663,16 +621,12 @@ fn stash_in_commit_hook_checks_what_is_committed() {
     if !repo(dir, LINT, &[("src/a.py", "ok\n")]) {
         return;
     }
-    let hook = dir.join(".git/hooks/pre-commit");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
     // With the arguments `fnug setup` installs
     let args = fnug::setup::hooks::hook_args(true).join(" ");
-    std::fs::write(
-        &hook,
-        format!("#!/bin/sh\nexec '{}' {args}\n", env!("CARGO_BIN_EXE_fnug")),
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(
+        &dir.join(".git/hooks/pre-commit"),
+        &format!("#!/bin/sh\nexec '{}' {args}\n", env!("CARGO_BIN_EXE_fnug")),
+    );
     let commit = |args: &[&str]| {
         common::git::command(dir)
             .arg("commit")

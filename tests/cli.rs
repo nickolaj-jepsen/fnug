@@ -1,8 +1,11 @@
 //! Tests for the `fnug` CLI: argument parsing, config loading and setup output.
 
-use std::path::Path;
-use std::process::{Command, Output};
+mod common;
 
+use std::path::Path;
+use std::process::Output;
+
+use common::fnug;
 use fnug::setup::mcp::Editor;
 use serde_json::{Value, json};
 
@@ -17,16 +20,6 @@ commands:
     auto:
       always: true
 "#;
-
-fn fnug(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(dir)
-        .args(args)
-        // It sets the stderr threshold, which some tests rely on being the default
-        .env_remove("FNUG_LOG")
-        .output()
-        .unwrap()
-}
 
 fn git_repo_with_config(file: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -44,7 +37,7 @@ fn assert_success(output: &Output) {
         output.status.success(),
         "exit {:?}, stderr: {}",
         output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
+        common::stderr(output)
     );
 }
 
@@ -240,10 +233,7 @@ fn mcp_stdout_is_pure_jsonrpc() {
     use std::time::Duration;
 
     let dir = repo_with_warning_config();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(dir.path())
-        .args(["--log-level", "debug", "mcp"])
-        .env_remove("FNUG_LOG")
+    let mut child = common::fnug_command(dir.path(), &["--log-level", "debug", "mcp"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

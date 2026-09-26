@@ -4,10 +4,11 @@ mod common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use common::KillOnDrop;
 use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -34,10 +35,7 @@ impl Server {
 
     /// [`Server::start`], with the server's stderr going to `stderr`.
     fn start_with_stderr(dir: &Path, stderr: impl Into<Stdio>) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fnug"))
-            .current_dir(dir)
-            .args(["--no-workspace", "mcp"])
-            .env_remove("FNUG_LOG")
+        let mut child = common::fnug_command(dir, &["--no-workspace", "mcp"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr)
@@ -102,19 +100,8 @@ impl Server {
         }
     }
 
-    /// Wait for the server to exit, killing it after [`TIMEOUT`].
     fn wait(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + TIMEOUT;
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                return status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "fnug mcp did not exit within {TIMEOUT:?}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        common::wait_exit(&mut self.child)
     }
 }
 
@@ -122,16 +109,6 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-    }
-}
-
-/// Kills a process when dropped, so a failed assertion doesn't leave it running.
-struct KillOnDrop(i32);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        // SAFETY: plain syscall; the pid is one of the test's own descendants.
-        unsafe { libc::kill(self.0, libc::SIGKILL) };
     }
 }
 
@@ -334,8 +311,7 @@ fn sigterm_stops_commands_and_exits_143() {
     let mut server = Server::start(dir.path());
     let sleep = start_hang(&mut server, dir.path());
 
-    // SAFETY: plain syscall on our own child.
-    unsafe { libc::kill(server.child.id().cast_signed(), libc::SIGTERM) };
+    common::signal(server.child.id(), libc::SIGTERM);
     assert_eq!(server.wait().code(), Some(143));
     assert_dies(sleep.0);
 }
@@ -360,8 +336,7 @@ commands:
             .join("started")
             .exists()));
 
-        // SAFETY: plain syscall on our own child.
-        unsafe { libc::kill(server.child.id().cast_signed(), signal) };
+        common::signal(server.child.id(), signal);
         assert_eq!(server.wait().code(), Some(code), "{name}");
         let got = std::fs::read_to_string(dir.path().join("got")).unwrap();
         assert_eq!(got.trim(), name);

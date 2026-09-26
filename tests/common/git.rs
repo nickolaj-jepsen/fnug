@@ -8,19 +8,33 @@ use std::process::Command;
 /// a hook, would point git and fnug at its own repository.
 const OUTER_REPO_VARS: &[&str] = &["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX"];
 
+/// Keep git from reading the global and system config, and commit as a fixed identity.
+const ISOLATED_ENV: &[(&str, &str)] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_AUTHOR_NAME", "test"),
+    ("GIT_AUTHOR_EMAIL", "test@example.com"),
+    ("GIT_COMMITTER_NAME", "test"),
+    ("GIT_COMMITTER_EMAIL", "test@example.com"),
+];
+
 /// Make `command`, git or fnug, ignore the global and system git config and any outer repository,
 /// and commit as a fixed identity.
 pub fn isolate(command: &mut Command) -> &mut Command {
     for var in OUTER_REPO_VARS {
         command.env_remove(var);
     }
-    command
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+    command.envs(ISOLATED_ENV.iter().copied())
+}
+
+/// [`isolate`] for a command started on a pseudo-terminal.
+pub fn isolate_pty(command: &mut portable_pty::CommandBuilder) {
+    for var in OUTER_REPO_VARS {
+        command.env_remove(var);
+    }
+    for (key, value) in ISOLATED_ENV {
+        command.env(key, value);
+    }
 }
 
 /// An isolated `git` command in `dir`.

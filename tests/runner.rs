@@ -18,7 +18,7 @@ use fnug::runner::{
 };
 use fnug::selectors::{GitScope, SelectOptions, SelectionIssue};
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+use common::TIMEOUT;
 
 // ─── planning ───
 

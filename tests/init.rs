@@ -1,19 +1,15 @@
 //! Tests for `fnug init`: tooling detection and the config it writes.
 
+mod common;
+
 use std::collections::HashSet;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use common::{fnug, write, write_executable};
 use fnug::commands::group::CommandGroup;
 use fnug::config_file::{Config, ConfigCommand, WorkspaceConfig};
 use fnug::init::{InitError, InitOptions, Proposal, detect};
-
-fn write(dir: &Path, file: &str, content: &str) {
-    let path = dir.join(file);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
-}
 
 fn commands(proposal: &Proposal) -> &[ConfigCommand] {
     proposal.group.commands.as_deref().unwrap_or_default()
@@ -133,14 +129,14 @@ fn detect_node_skips_npm_placeholder_test() {
     write(
         dir.path(),
         "package.json",
-        &format!(r#"{{"scripts": {{"lint": "eslint .", {placeholder}}}}}"#),
+        format!(r#"{{"scripts": {{"lint": "eslint .", {placeholder}}}}}"#),
     );
     assert_eq!(cmds(&only(dir.path())), [("lint", "npm run lint")]);
 
     write(
         dir.path(),
         "package.json",
-        &format!(r#"{{"scripts": {{{placeholder}}}}}"#),
+        format!(r#"{{"scripts": {{{placeholder}}}}}"#),
     );
     assert!(detect(dir.path()).is_empty());
 }
@@ -208,15 +204,6 @@ fn run_sh(dir: &Path, bin: &Path, cmd: &str) -> std::process::Output {
         .unwrap()
 }
 
-fn write_script(path: &Path, body: &str) {
-    write(
-        path.parent().unwrap(),
-        path.file_name().unwrap().to_str().unwrap(),
-        body,
-    );
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
 #[test]
 fn detect_go_gofmt_exit_code() {
     let dir = tempfile::tempdir().unwrap();
@@ -248,7 +235,7 @@ fn detect_go_gofmt_exit_code() {
     assert!(!missing.status.success(), "{missing:?}");
 
     // Every file it's given is unformatted; `go vet ./...` skips vendor/ and testdata/ too
-    write_script(
+    write_executable(
         &bin.join("gofmt"),
         "#!/bin/sh\nshift\nprintf '%s\\n' \"$@\"\n",
     );
@@ -261,14 +248,14 @@ fn detect_go_gofmt_exit_code() {
     listed.sort();
     assert_eq!(listed, ["./main.go", "./pkg/lib.go"]);
 
-    write_script(
+    write_executable(
         &bin.join("gofmt"),
         "#!/bin/sh\necho 'main.go:1:1: expected' >&2\nexit 2\n",
     );
     let broken = run_sh(dir.path(), &bin, gofmt);
     assert!(!broken.status.success(), "{broken:?}");
 
-    write_script(&bin.join("gofmt"), "#!/bin/sh\n");
+    write_executable(&bin.join("gofmt"), "#!/bin/sh\n");
     let formatted = run_sh(dir.path(), &bin, gofmt);
     assert!(formatted.status.success(), "{formatted:?}");
 }
@@ -288,15 +275,6 @@ fn detect_orders_groups_and_ignores_unknown_projects() {
     );
     let keys: Vec<_> = detect(dir.path()).iter().map(|p| p.key).collect();
     assert_eq!(keys, ["rust", "python", "node", "go"]);
-}
-
-fn fnug(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(dir)
-        .args(args)
-        .env_remove("FNUG_LOG")
-        .output()
-        .unwrap()
 }
 
 #[test]
@@ -668,15 +646,12 @@ fn init_cli_proposes_nix_tools_on_path() {
     write(&project, "flake.nix", "{}");
     let bin = dir.path().join("bin");
     for tool in ["alejandra", "deadnix"] {
-        write_script(&bin.join(tool), "#!/bin/sh\n");
+        write_executable(&bin.join(tool), "#!/bin/sh\n");
     }
 
     // Without a terminal, `fnug init` includes everything it found
-    let output = Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(dir.path())
-        .args(["init", "project"])
+    let output = common::fnug_command(dir.path(), &["init", "project"])
         .env("PATH", &bin)
-        .env_remove("FNUG_LOG")
         .output()
         .unwrap();
 

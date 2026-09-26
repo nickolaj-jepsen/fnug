@@ -1,30 +1,27 @@
 //! Tests for config loading: parsing, validation and inheritance.
 
-use std::path::Path;
+mod common;
+
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once};
 
+use common::{commit_all, write_config};
 use fnug::commands::command::Command;
 use fnug::commands::group::CommandGroup;
 use fnug::commands::ids::{ResolveError, resolve_command};
 use fnug::{LoadOptions, load_config};
 
-fn write_config(dir: &Path, content: &str) -> String {
-    let path = dir.join(".fnug.yaml");
-    std::fs::write(&path, content).unwrap();
-    path.to_string_lossy().into_owned()
-}
-
 fn load(content: &str) -> (tempfile::TempDir, CommandGroup) {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), content);
-    let (config, _) = load_config(Some(&path), true).unwrap();
+    let (config, _) = load_config(path.to_str(), true).unwrap();
     (dir, config)
 }
 
 fn load_err(content: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), content);
-    match load_config(Some(&path), true) {
+    match load_config(path.to_str(), true) {
         Ok(_) => panic!("config loaded:\n{content}"),
         Err(e) => e.to_string(),
     }
@@ -97,7 +94,7 @@ children:
       - name: broken
 ",
     );
-    let err = load_config(Some(&path), true).unwrap_err().to_string();
+    let err = load_config(path.to_str(), true).unwrap_err().to_string();
     assert!(err.contains("children[1].commands[0]"), "{err}");
     assert!(err.contains("line"), "{err}");
 }
@@ -247,7 +244,7 @@ fn workspace_bool_and_options_still_parse() {
             dir.path(),
             &format!("fnug_version: 0.1.0\nname: root\nworkspace: {workspace}\n"),
         );
-        load_config(Some(&path), false).unwrap();
+        load_config(path.to_str(), false).unwrap();
     }
 }
 
@@ -319,7 +316,7 @@ fn config_serializes_without_nulls() {
         dir.path(),
         "name: root\ncommands:\n  - name: a\n    cmd: 'true'\n    auto:\n      git: true\n",
     );
-    let config = fnug::config_file::Config::from_file(Path::new(&path)).unwrap();
+    let config = fnug::config_file::Config::from_file(&path).unwrap();
     let yaml = serde_yaml::to_string(&config).unwrap();
     assert!(!yaml.contains("null"), "{yaml}");
     assert!(!yaml.contains('~'), "{yaml}");
@@ -328,11 +325,7 @@ fn config_serializes_without_nulls() {
 #[test]
 fn schema_subcommand_needs_no_config() {
     let dir = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(dir.path())
-        .arg("schema")
-        .output()
-        .unwrap();
+    let output = common::fnug(dir.path(), &["schema"]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
@@ -376,21 +369,8 @@ fn readme_and_dogfood_configs_parse() {
     for block in blocks {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), &block);
-        fnug::config_file::Config::from_file(Path::new(&path))
-            .unwrap_or_else(|e| panic!("{e}\n{block}"));
+        fnug::config_file::Config::from_file(&path).unwrap_or_else(|e| panic!("{e}\n{block}"));
     }
-}
-
-fn commit_all(repo: &git2::Repository) {
-    let mut index = repo.index().unwrap();
-    index
-        .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
-        .unwrap();
-    index.write().unwrap();
-    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-    let sig = git2::Signature::now("fnug", "fnug@example.com").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &[])
-        .unwrap();
 }
 
 const LOCKFILE_CONFIG: &str = r"
@@ -419,7 +399,7 @@ children:
 ";
 
 /// A git repo with `src/sub/lib.rs` and `Cargo.toml` committed, and the lockfile config.
-fn lockfile_repo() -> (tempfile::TempDir, String) {
+fn lockfile_repo() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let repo = git2::Repository::init(dir.path()).unwrap();
     std::fs::create_dir_all(dir.path().join("src/sub")).unwrap();
@@ -444,7 +424,7 @@ fn select_working_tree(config: &CommandGroup) -> Vec<String> {
 #[test]
 fn regex_empty_list_clears_inherited() {
     let (dir, path) = lockfile_repo();
-    let (config, _) = load_config(Some(&path), true).unwrap();
+    let (config, _) = load_config(path.to_str(), true).unwrap();
     assert!(command(&config, "lockfile").auto.regexes().is_empty());
 
     std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
@@ -455,7 +435,7 @@ fn regex_empty_list_clears_inherited() {
 #[test]
 fn path_override_keeps_inherited_regex() {
     let (dir, path) = lockfile_repo();
-    let (config, _) = load_config(Some(&path), true).unwrap();
+    let (config, _) = load_config(path.to_str(), true).unwrap();
     let sub = &command(&config, "sub").auto;
     let root = dir.path().canonicalize().unwrap();
     assert_eq!(sub.paths(), [root.join("src/sub")]);
@@ -481,7 +461,7 @@ children:
         cmd: 'true'
 ",
     );
-    let (config, _) = load_config(Some(&path), true).unwrap();
+    let (config, _) = load_config(path.to_str(), true).unwrap();
     let backend = dir.path().canonicalize().unwrap().join("backend");
     assert_eq!(
         command(&config, "lint").auto.paths(),
@@ -499,7 +479,7 @@ fn missing_auto_path_resolves_symlinked_ancestor() {
         dir.path(),
         "name: root\ncommands:\n  - name: a\n    cmd: 'true'\n    auto:\n      path: [link/missing]\n",
     );
-    let (config, _) = load_config(Some(&path), true).unwrap();
+    let (config, _) = load_config(path.to_str(), true).unwrap();
     assert_eq!(
         command(&config, "a").auto.paths(),
         [real.canonicalize().unwrap().join("missing")]
@@ -599,7 +579,7 @@ fn workspace_sources_list_every_config() {
 #[test]
 fn path_empty_list_resets_to_cwd() {
     let (dir, path) = lockfile_repo();
-    let (config, _) = load_config(Some(&path), true).unwrap();
+    let (config, _) = load_config(path.to_str(), true).unwrap();
     let everything = &command(&config, "everything").auto;
     assert_eq!(everything.paths(), [dir.path().canonicalize().unwrap()]);
     assert_eq!(everything.regexes().len(), 1);
@@ -898,7 +878,7 @@ children:
         cmd: 'true'
 ",
     );
-    let err = load_config(Some(&path), true).unwrap_err();
+    let err = load_config(path.to_str(), true).unwrap_err();
     assert!(
         matches!(&err, fnug::config_file::ConfigError::DuplicateId { id, .. } if id == "check"),
         "{err:?}"
@@ -1652,7 +1632,7 @@ commands:
       always: true
 ",
     );
-    let (config, cwd) = load_config(Some(&path), true).unwrap();
+    let (config, cwd) = load_config(path.to_str(), true).unwrap();
     let opts = fnug::check::CheckOptions {
         mute_success: true,
         ..fnug::check::CheckOptions::default()
@@ -1773,8 +1753,7 @@ fn root_dir_file_is_an_error() {
 fn root_flag_runs_commands_in_root_dir() {
     let (config_dir, root) = rooted();
     let config = config_dir.path().join(".fnug.yaml");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(config_dir.path())
+    let output = common::fnug_command(config_dir.path(), &[])
         .arg("-c")
         .arg(&config)
         .arg("--root")
@@ -1792,11 +1771,7 @@ fn root_flag_runs_commands_in_root_dir() {
 fn empty_config_path_is_a_clear_error() {
     let dir = tempfile::tempdir().unwrap();
     write_config(dir.path(), &one_command("here"));
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fnug"))
-        .current_dir(dir.path())
-        .args(["-c", "", "check", "--no-tui"])
-        .output()
-        .unwrap();
+    let output = common::fnug(dir.path(), &["-c", "", "check", "--no-tui"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("config path is empty"), "{stderr}");
