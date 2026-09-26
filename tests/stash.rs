@@ -482,6 +482,42 @@ fn kill_while_running(dir: &Path) {
 }
 
 #[test]
+fn concurrent_runs_recover_a_stale_stash_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    if !slow_repo(dir) {
+        return;
+    }
+    let before = state(dir);
+    kill_while_running(dir);
+
+    // Selects nothing, so each run only recovers; outside the repo, so it changes nothing there
+    let other = tempfile::tempdir().unwrap();
+    let config = other.path().join("none.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "name: root\ncwd: '{}'\ncommands:\n  - name: none\n    cmd: 'true'\n    auto:\n      \
+             git: true\n      regex: ['\\.nothing$']\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+    let args = ["-c", config.to_str().unwrap(), "--staged", "--stash"];
+    let runs: Vec<Child> = (0..8)
+        .map(|_| fnug(dir, &args).stderr(Stdio::piped()).spawn().unwrap())
+        .collect();
+    for mut run in runs {
+        let status = wait(&mut run);
+        let err = stderr(&run.wait_with_output().unwrap());
+        assert!(status.success(), "{err}");
+    }
+    assert_eq!(read(&dir.join("a.txt")), "staged\nunstaged\n");
+    assert_eq!(state(dir), before);
+    assert_clean_git_dir(dir);
+}
+
+#[test]
 fn stash_sigkill_recovers_on_repeated_context() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
