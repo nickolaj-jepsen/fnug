@@ -841,3 +841,152 @@ fn list_lints_read_only_annotation() {
         assert_eq!(annotations.open_world_hint, Some(false), "{}", tool.name);
     }
 }
+
+/// A JSON-RPC client talking raw JSON lines to a server over an in-memory pipe.
+struct RawClient {
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+}
+
+impl RawClient {
+    async fn send(&mut self, message: serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+        let line = format!("{message}\n");
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+    }
+
+    async fn call(&mut self, id: u64, tool: &str, arguments: serde_json::Value) {
+        self.send(serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments}
+        }))
+        .await;
+    }
+
+    /// The response to request `id`, skipping other messages.
+    async fn response(&mut self, id: u64) -> serde_json::Value {
+        let read = async {
+            loop {
+                let line = self
+                    .lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("server hung up");
+                let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if message["id"] == id {
+                    return message;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(15), read)
+            .await
+            .unwrap_or_else(|_| panic!("no response to request {id}"))
+    }
+}
+
+#[tokio::test]
+async fn stdio_roundtrip_initialize_call_and_cancel() {
+    use rmcp::ServiceExt;
+    use tokio::io::AsyncBufReadExt;
+
+    let (server, dir) = server(
+        r"
+name: root
+commands:
+  - name: fails
+    cmd: 'echo broken; exit 2'
+  - name: hang
+    cmd: 'touch started; exec sleep 30'
+",
+    );
+    let (client, transport) = tokio::io::duplex(64 * 1024);
+    let serving = tokio::spawn(async move {
+        let service = server.serve(transport).await.unwrap();
+        service.waiting().await.unwrap()
+    });
+    let (read, writer) = tokio::io::split(client);
+    let mut client = RawClient {
+        lines: tokio::io::BufReader::new(read).lines(),
+        writer,
+    };
+
+    client
+        .send(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }))
+        .await;
+    let init = client.response(1).await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "fnug", "{init}");
+    assert!(
+        init["result"]["capabilities"]["tools"].is_object(),
+        "{init}"
+    );
+    client
+        .send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .await;
+
+    client
+        .send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+        .await;
+    let tools = client.response(2).await;
+    let tools = tools["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names.len(), 4, "{names:?}");
+    let list_lints = tools.iter().find(|t| t["name"] == "list_lints").unwrap();
+    assert_eq!(list_lints["annotations"]["readOnlyHint"], true);
+
+    client
+        .call(3, "run_lint", serde_json::json!({"command": "fails"}))
+        .await;
+    let ran = client.response(3).await;
+    let content = ran["result"]["content"].as_array().unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        (&summary["ok"], &summary["failed"]),
+        (&false.into(), &1.into())
+    );
+    assert!(content[1]["text"].as_str().unwrap().ends_with("\nbroken\n"));
+
+    client
+        .call(4, "run_lint", serde_json::json!({"command": "nope"}))
+        .await;
+    assert_eq!(client.response(4).await["result"]["isError"], true);
+
+    client
+        .call(5, "list_lints", serde_json::json!({"auto_type": "gti"}))
+        .await;
+    assert_eq!(client.response(5).await["error"]["code"], -32602);
+
+    client
+        .call(6, "run_lint", serde_json::json!({"command": "hang"}))
+        .await;
+    let started = dir.path().join("started");
+    let found = tokio::task::spawn_blocking(move || {
+        crate::pty::test_util::wait_until(Duration::from_secs(10), || started.exists())
+    });
+    assert!(found.await.unwrap());
+    client
+        .send(serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": 6, "reason": "test"}
+        }))
+        .await;
+    let cancelled = client.response(6).await;
+    let text = cancelled["result"]["content"][0]["text"].as_str().unwrap();
+    let summary: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(summary["cancelled"], 1, "{summary}");
+
+    // Closing the client ends the server
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(10), serving)
+        .await
+        .unwrap()
+        .unwrap();
+}
