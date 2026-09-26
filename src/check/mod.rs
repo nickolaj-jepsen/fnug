@@ -4,14 +4,12 @@ mod printer;
 
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::process::Command as ProcessCommand;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use log::warn;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::runner::{
     self, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions, RunReport,
@@ -25,46 +23,6 @@ use printer::Printer;
 pub enum CheckError {
     #[error(transparent)]
     Plan(#[from] PlanError),
-}
-
-/// Result of executing a single command with captured output.
-pub(crate) struct CommandResult {
-    pub success: bool,
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub duration: std::time::Duration,
-}
-
-/// Execute a single command, capturing stdout and stderr.
-pub(crate) fn execute_command(cmd: &Command, cwd: &Path) -> CommandResult {
-    let cmd_cwd = cmd.effective_cwd(cwd);
-
-    let start = Instant::now();
-    let output = ProcessCommand::new("sh")
-        .arg("-c")
-        .arg(&cmd.cmd)
-        .current_dir(cmd_cwd)
-        .envs(&cmd.env)
-        .output();
-    let duration = start.elapsed();
-
-    match output {
-        Ok(o) => CommandResult {
-            success: o.status.success(),
-            exit_code: o.status.code(),
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-            duration,
-        },
-        Err(e) => CommandResult {
-            success: false,
-            exit_code: None,
-            stdout: String::new(),
-            stderr: e.to_string(),
-            duration,
-        },
-    }
 }
 
 /// How [`run`] selects and runs commands.
