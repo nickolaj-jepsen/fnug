@@ -83,6 +83,11 @@ impl App {
         if generation != self.reload_generation {
             return;
         }
+        // It may have read the index's config
+        if self.stash_running() {
+            self.hold_back(true, Vec::new());
+            return;
+        }
         match result {
             Ok(loaded) => self.apply_config(*loaded),
             Err(e) => {

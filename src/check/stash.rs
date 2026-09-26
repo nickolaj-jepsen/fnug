@@ -186,6 +186,32 @@ pub fn pending(cwd: &Path) -> Option<PathBuf> {
     (!pid_alive(state.pid) && left_set_aside(&git, &state)).then_some(lock)
 }
 
+/// Whether a live `fnug check --stash` other than this process holds the lock in the work tree
+/// containing `cwd`. Until it lets go, tracked files may hold the index's content instead of
+/// the user's.
+#[must_use]
+pub fn active(cwd: &Path) -> bool {
+    let Ok(git) = Git::locate(cwd) else {
+        return false;
+    };
+    matches!(
+        read_lock(&git.git_dir.join(LOCK_NAME)),
+        Ok(Some(state)) if state.pid != std::process::id() && pid_alive(state.pid)
+    )
+}
+
+/// Write a lock for `pid` in `git_dir`, as a running `--stash` does. Returns its path.
+#[cfg(test)]
+pub(crate) fn write_test_lock(git_dir: &Path, pid: u32) -> PathBuf {
+    let lock = git_dir.join(LOCK_NAME);
+    let state = LockState {
+        pid,
+        ..LockState::default()
+    };
+    write_lock(&lock, &state).unwrap();
+    lock
+}
+
 /// Whether a stopped run that recorded `state` left something set aside: intent-to-add entries
 /// out of the index, or a patch the files it changes don't hold. When unsure, it did.
 fn left_set_aside(git: &Git, state: &LockState) -> bool {
@@ -897,6 +923,31 @@ mod tests {
             ..LockState::default()
         };
         assert_eq!(decode_lock(&encode_lock(&bare)), Some(bare));
+    }
+
+    #[test]
+    fn active_only_while_another_live_run_holds_the_lock() {
+        // git would look there instead, as in a hook of a linked worktree
+        if std::env::var_os("GIT_DIR").is_some() {
+            eprintln!("skipping: GIT_DIR is set");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let git_dir = dir.path().join(".git");
+        assert!(!active(dir.path()));
+
+        let mut other = Command::new("sleep").arg("60").spawn().unwrap();
+        let lock = write_test_lock(&git_dir, other.id());
+        assert!(active(dir.path()));
+        write_test_lock(&git_dir, std::process::id());
+        assert!(!active(dir.path()), "counted its own lock");
+
+        write_test_lock(&git_dir, other.id());
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert!(!active(dir.path()), "counted a stopped run's lock");
+        remove_file(&lock);
     }
 
     #[test]

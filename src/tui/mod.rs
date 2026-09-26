@@ -15,6 +15,7 @@ mod reload;
 mod render;
 pub mod run_summary;
 pub mod selection;
+mod stash_wait;
 pub mod status;
 pub(crate) mod terminal_widget;
 #[cfg(test)]

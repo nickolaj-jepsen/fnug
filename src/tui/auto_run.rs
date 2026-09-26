@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use log::info;
 
 use crate::runner::NodeState;
+use crate::selectors::watch::WatchMatch;
 
 use super::app::App;
 use super::status::StatusLevel;
@@ -102,6 +103,20 @@ impl App {
             if self.auto_run_pending.remove(&id) && finished && self.auto_run_enabled {
                 rerun.push(id);
             }
+        }
+        if !rerun.is_empty() && self.stash_running() {
+            let changes = rerun
+                .into_iter()
+                .map(|id| {
+                    self.quiet_until.remove(&id);
+                    WatchMatch {
+                        id,
+                        files: Vec::new(),
+                    }
+                })
+                .collect();
+            self.hold_back(false, changes);
+            return;
         }
         self.start_auto_runs(&rerun);
     }
