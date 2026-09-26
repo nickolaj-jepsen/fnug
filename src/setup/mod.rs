@@ -438,7 +438,7 @@ fn hook_binary_note(
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     match (on_path, this) {
         (Some(on_path), Some(this)) if canonical(on_path) != canonical(this) => Some(format!(
-            "the hook runs the fnug on PATH, {}, not this one ({}), so that one must understand the hook's flags",
+            "the hook runs the fnug on PATH, {}, not this one ({}); if that one is older and lacks the hook's --staged and --stash, it fails every commit",
             on_path.display(),
             this.display()
         )),
@@ -968,6 +968,7 @@ mod tests {
             note.contains(&other.display().to_string()) && note.contains("not this one"),
             "{note}"
         );
+        assert!(note.contains("fails every commit"), "{note}");
         assert_eq!(hook_binary_note(Some(&link), Some(&this), true, true), None);
         let note = hook_binary_note(None, Some(&this), true, true).unwrap();
         assert!(note.contains(&this.display().to_string()), "{note}");
