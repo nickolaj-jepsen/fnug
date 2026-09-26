@@ -24,7 +24,8 @@ pub struct CheckArgs {
     #[arg(value_name = "TARGET", group = "source")]
     targets: Vec<String>,
 
-    /// Run every command instead of the ones changes select
+    /// Run every command instead of the ones changes select, except those with
+    /// `auto.check: false` unless --include-manual is given
     #[arg(long, group = "source")]
     all: bool,
 
