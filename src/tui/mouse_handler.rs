@@ -236,7 +236,7 @@ impl App {
             MouseEventKind::ScrollUp => {
                 if mouse.column < tree_area.width {
                     self.tree_scroll = self.tree_scroll.saturating_sub(5);
-                } else if self.show_logs {
+                } else if self.logs_on_screen() {
                     self.log_scroll = self.log_scroll.saturating_add(5);
                 } else if let Some(ref active_id) = self.active_terminal_id
                     && let Some(proc) = self.processes.get(active_id)
@@ -259,7 +259,7 @@ impl App {
                 if mouse.column < tree_area.width {
                     self.tree_scroll += 5;
                     self.clamp_tree_scroll(usize::from(tree_area.height));
-                } else if self.show_logs {
+                } else if self.logs_on_screen() {
                     self.log_scroll = self.log_scroll.saturating_sub(5);
                 } else if let Some(ref active_id) = self.active_terminal_id
                     && let Some(proc) = self.processes.get(active_id)
