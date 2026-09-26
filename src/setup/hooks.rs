@@ -55,6 +55,17 @@ pub enum HookError {
     )]
     GlobalHooksPath { path: PathBuf, snippet: String },
 
+    #[error(
+        "{} links to {}, outside this repository, which other repositories may share, so fnug won't edit it. To run fnug for this repository, add this to it:\n\n{snippet}",
+        path.display(),
+        target.display()
+    )]
+    LinkedOutside {
+        path: PathBuf,
+        target: PathBuf,
+        snippet: String,
+    },
+
     #[error("failed to write hook: {0}")]
     Io(#[from] io::Error),
 }
@@ -66,8 +77,11 @@ pub struct HookTarget {
     pub workdir: PathBuf,
     /// The directory git reads hooks from.
     pub hooks_dir: PathBuf,
-    /// The file fnug edits: `hooks_dir/pre-commit`, or husky's user hook.
+    /// The file git runs: `hooks_dir/pre-commit`, or husky's user hook.
     pub hook_path: PathBuf,
+    /// The file `hook_path` resolves to through symlinks, when that is another file. fnug edits
+    /// that file, and `location` is where it is.
+    pub resolved: Option<PathBuf>,
     pub location: HookLocation,
     /// The config's directory relative to `workdir`; empty when the config is at the top.
     pub config_rel: PathBuf,
@@ -75,13 +89,15 @@ pub struct HookTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookLocation {
-    /// The repository's own hooks directory, inside its git dir.
+    /// Inside the git dir, such as the repository's own hooks directory.
     Local,
-    /// A `core.hooksPath` inside the work tree, usually committed and shared with every clone.
+    /// Inside the work tree, usually committed and shared with every clone: a `core.hooksPath`
+    /// there, or a hook that links to a file there.
     Shared,
     /// A husky-managed `core.hooksPath`; its hooks run `user_hook`.
     Husky { user_hook: PathBuf },
-    /// A `core.hooksPath` outside the work tree, such as a dispatcher set in the global config.
+    /// Outside the work tree: a `core.hooksPath` such as a dispatcher set in the global config,
+    /// or a hook that links to a file there.
     External,
 }
 
@@ -190,31 +206,57 @@ pub fn resolve(config_dir: &Path) -> Result<HookTarget, HookError> {
         Err(e) if e.code() == git2::ErrorCode::NotFound => common_dir.join("hooks"),
         Err(e) => return Err(e.into()),
     };
-    let location = if hooks_dir.starts_with(&common_dir) || hooks_dir.starts_with(&git_dir) {
-        HookLocation::Local
-    } else if let Ok(rel) = hooks_dir.strip_prefix(&workdir) {
+    let place = |path: &Path| {
+        if path.starts_with(&common_dir) || path.starts_with(&git_dir) {
+            HookLocation::Local
+        } else if path.starts_with(&workdir) {
+            HookLocation::Shared
+        } else {
+            HookLocation::External
+        }
+    };
+    let location = match hooks_dir.strip_prefix(&workdir) {
         // husky 9 sets `.husky/_`, husky 5 to 8 `.husky`
-        if rel == Path::new(".husky/_") || rel == Path::new(".husky") {
+        Ok(rel) if rel == Path::new(".husky/_") || rel == Path::new(".husky") => {
             HookLocation::Husky {
                 user_hook: workdir.join(".husky/pre-commit"),
             }
-        } else {
-            HookLocation::Shared
         }
-    } else {
-        HookLocation::External
+        _ => place(&hooks_dir),
     };
-    let hook_path = match &location {
-        HookLocation::Husky { user_hook } => user_hook.clone(),
-        _ => hooks_dir.join("pre-commit"),
+    let (hook_path, resolved, location) = match location {
+        HookLocation::Husky { user_hook } => {
+            (user_hook.clone(), None, HookLocation::Husky { user_hook })
+        }
+        HookLocation::External => (hooks_dir.join("pre-commit"), None, HookLocation::External),
+        location => {
+            let hook_path = hooks_dir.join("pre-commit");
+            // Edits go to the link's target, so that decides whether the hook is shared
+            match follow_links(&hook_path) {
+                resolved if resolved == hook_path => (hook_path, None, location),
+                resolved => {
+                    let location = place(&resolved);
+                    (hook_path, Some(resolved), location)
+                }
+            }
+        }
     };
     Ok(HookTarget {
         workdir,
         hooks_dir,
         hook_path,
+        resolved,
         location,
         config_rel,
     })
+}
+
+/// `path` with every symlink resolved, including a dangling one at the end.
+fn follow_links(path: &Path) -> PathBuf {
+    match (std::fs::read_link(path), path.parent()) {
+        (Ok(link), Some(parent)) => normalize(&normalize(parent).join(link)),
+        _ => normalize(path),
+    }
 }
 
 /// `path` made absolute with `.` and `..` resolved, and its longest existing ancestor
@@ -313,7 +355,8 @@ pub fn is_installed(config_dir: &Path) -> bool {
 /// # Errors
 ///
 /// Returns `HookError::Husky` or `HookError::GlobalHooksPath` if another tool owns the hooks
-/// directory, `HookError::ForeignHook` for a hook that isn't a shell script under
+/// directory, `HookError::LinkedOutside` for a hook that links out of the repository,
+/// `HookError::ForeignHook` for a hook that isn't a shell script under
 /// [`ForeignPolicy::Refuse`], and `HookError::Io` if the hook can't be read or written. Each
 /// refusal carries a snippet to add by hand.
 pub fn install_with(
@@ -491,9 +534,16 @@ fn install_steps(target: &HookTarget, opts: &InstallOptions) -> Result<Planned, 
             });
         }
         HookLocation::External => {
-            return Err(HookError::GlobalHooksPath {
-                path: target.hooks_dir.clone(),
-                snippet: block(false),
+            return Err(match &target.resolved {
+                Some(resolved) => HookError::LinkedOutside {
+                    path: target.hook_path.clone(),
+                    target: resolved.clone(),
+                    snippet: block(false),
+                },
+                None => HookError::GlobalHooksPath {
+                    path: target.hooks_dir.clone(),
+                    snippet: block(false),
+                },
             });
         }
         HookLocation::Local | HookLocation::Shared => {}
@@ -628,7 +678,8 @@ fn remove_steps(target: &HookTarget) -> Result<Vec<Step>, HookError> {
         .rest
         .lines()
         .all(|l| l.trim().is_empty() || l.starts_with("#!"));
-    if !only_shebang {
+    // A linked file isn't fnug's to delete
+    if !only_shebang || target.resolved.is_some() {
         return Ok(vec![Step::Write {
             path: path.clone(),
             content: stripped.rest,
