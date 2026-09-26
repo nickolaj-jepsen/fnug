@@ -223,6 +223,12 @@ impl Action {
                     ));
                 }
                 notes.extend(plan.note().map(str::to_string));
+                if let Some(config) = opts.config_file.as_ref().filter(|c| c.is_absolute()) {
+                    notes.push(format!(
+                        "the config is outside the repository, so the hook loads it by its absolute path, {}, in every clone and linked worktree",
+                        config.display()
+                    ));
+                }
                 Change::Hook(plan)
             }
             Self::RemoveHook { hook } => Change::Hook(hooks::plan_remove(&hook.target)?),
@@ -278,72 +284,87 @@ impl Prepared {
     }
 }
 
-/// How the hook of the config's own repository runs fnug: from the config's directory, loading
-/// the config the way `load` did.
-fn root_hook_options(config: Option<&LoadedConfig>, load: &LoadOptions) -> InstallOptions {
-    let pinned = |flag_given: bool| config.filter(|_| flag_given);
+/// Where the root hook runs fnug from: `--root`, the tree the commands check, or else the config's
+/// directory, where fnug finds the config.
+fn root_hook_dir<'a>(
+    cwd: &'a Path,
+    config: Option<&'a LoadedConfig>,
+    load: &LoadOptions,
+) -> &'a Path {
+    match config {
+        Some(c) if load.root_dir.is_some() => &c.cwd,
+        Some(c) => c.config_path.parent().unwrap_or(&c.cwd),
+        None => cwd,
+    }
+}
+
+/// How the root hook, running fnug from [`root_hook_dir`] in the work tree `workdir`, loads the
+/// config the way `load` did.
+fn root_hook_options(
+    config: Option<&LoadedConfig>,
+    load: &LoadOptions,
+    workdir: &Path,
+) -> InstallOptions {
+    let no_workspace = load.no_workspace;
+    let Some(c) = config else {
+        return InstallOptions {
+            no_workspace,
+            ..InstallOptions::default()
+        };
+    };
+    let config_file = match (&load.config, &load.root_dir) {
+        (None, _) => None,
+        (Some(_), None) => c.config_path.file_name().map(PathBuf::from),
+        // Relative where it can be, since linked worktrees share the hook
+        (Some(_), Some(_)) if c.config_path.starts_with(workdir) => {
+            Some(relative_to(&c.config_path, &c.cwd))
+        }
+        (Some(_), Some(_)) => Some(c.config_path.clone()),
+    };
     InstallOptions {
-        no_workspace: load.no_workspace,
-        config_file: pinned(load.config.is_some())
-            .and_then(|c| c.config_path.file_name())
-            .map(PathBuf::from),
-        root_dir: pinned(load.root_dir.is_some())
-            .and_then(|c| Some(path_arg(&c.cwd, c.config_path.parent()?))),
+        no_workspace,
+        config_file,
+        root_dir: load.root_dir.as_ref().map(|_| PathBuf::from(".")),
         ..InstallOptions::default()
     }
 }
 
-/// `path` relative to `base`, both canonical, as a command-line argument: `.` when they are the
-/// same directory.
-fn path_arg(path: &Path, base: &Path) -> PathBuf {
-    let relative = relative_to(path, base);
-    if relative.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        relative
-    }
-}
-
 /// Find the hooks and editor configs, logging why any of them can't be set up.
-fn detect(
-    cwd: &Path,
-    config_dir: &Path,
-    config: Option<&LoadedConfig>,
-    load: &LoadOptions,
-) -> Detected {
+fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Detected {
     if config.is_none() {
         log::warn!(
             "no fnug config loaded. The pre-commit hook and the MCP server run the commands in one, so add a .fnug.yaml before relying on them."
         );
     }
     let fallback_exe = std::env::current_exe().ok();
-    let repo_hook = |name: String, dir: &Path, opts: InstallOptions| match hooks::resolve(dir) {
-        Ok(target) => Some(RepoHook {
+    let repo_hook = |name: String, dir: &Path, opts: &dyn Fn(&HookTarget) -> InstallOptions| {
+        let target = hooks::resolve(dir)
+            .inspect_err(|e| log::warn!("can't set up a git hook for {}: {e}", dir.display()))
+            .ok()?;
+        let opts = InstallOptions {
+            fallback_exe: fallback_exe.clone(),
+            ..opts(&target)
+        };
+        Some(RepoHook {
             name,
             status: hooks::status_with(&target, &opts),
             target,
             opts,
-        }),
-        Err(e) => {
-            log::warn!("can't set up a git hook for {}: {e}", dir.display());
-            None
-        }
+        })
     };
-    let root_opts = InstallOptions {
-        fallback_exe: fallback_exe.clone(),
-        ..root_hook_options(config, load)
-    };
-    let root_hook = repo_hook(String::new(), config_dir, root_opts);
+    let hook_dir = root_hook_dir(cwd, config, load);
+    let root_hook = repo_hook(String::new(), hook_dir, &|target| {
+        root_hook_options(config, load, &target.workdir)
+    });
     let sub_opts = InstallOptions {
         no_workspace: true,
-        fallback_exe,
         ..InstallOptions::default()
     };
     let sub_repo_hooks = config
-        .map(|c| workspace::find_sub_repos(config_dir, &c.root))
+        .map(|c| workspace::find_sub_repos(hook_dir, &c.root))
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|sub| repo_hook(sub.name, &sub.path, sub_opts.clone()))
+        .filter_map(|sub| repo_hook(sub.name, &sub.path, &|_| sub_opts.clone()))
         .collect();
     let editors = Editor::ALL
         .into_iter()
@@ -454,9 +475,7 @@ pub fn run(
         return Err(SetupError::NotInteractive);
     }
 
-    // The hook runs fnug from the config's directory, so it finds the config there
-    let config_dir = config.and_then(|c| c.config_path.parent()).unwrap_or(cwd);
-    let detected = detect(cwd, config_dir, config, load);
+    let detected = detect(cwd, config, load);
     let choice = prompt(&detected)?;
     let prepared = prepare_all(&plan_actions(&detected, &choice))?;
 
@@ -672,7 +691,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(Editor::ClaudeCode.config_path(dir.path()), "{ not json").unwrap();
 
-        let detected = detect(dir.path(), dir.path(), None, &LoadOptions::default());
+        let detected = detect(dir.path(), None, &LoadOptions::default());
 
         assert!(detected.root_hook.is_none());
         let shown = dir.path().display().to_string();
@@ -694,6 +713,84 @@ mod tests {
         );
     }
 
+    /// A git repository at `dir` whose hooks are in `.git/hooks`, whatever the global config says.
+    fn init_repo(dir: &Path) {
+        let repo = git2::Repository::init(dir).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("core.hooksPath", ".git/hooks")
+            .unwrap();
+    }
+
+    /// What the hook `detect` found loads, run like git runs it: from the top of the work tree.
+    fn hook_loads(hook: &RepoHook) -> LoadedConfig {
+        crate::load(&LoadOptions {
+            start_dir: Some(hook.target.workdir.join(&hook.target.config_rel)),
+            config: hook.opts.config_file.clone(),
+            root_dir: hook.opts.root_dir.clone(),
+            no_workspace: hook.opts.no_workspace,
+            ..LoadOptions::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn root_hook_is_the_roots_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        // The config in its own repository, and one in a directory of the checked repository
+        let (shared, project) = (base.join("shared"), base.join("project"));
+        for repo in [&shared, &project] {
+            init_repo(repo);
+        }
+        std::fs::create_dir_all(project.join("cfg")).unwrap();
+        std::fs::create_dir_all(project.join("app")).unwrap();
+        for config in [shared.join("ci.yaml"), project.join("cfg/ci.yaml")] {
+            std::fs::write(&config, "name: ci\ncommands: []\n").unwrap();
+        }
+
+        for (config, root, config_arg, config_rel) in [
+            (
+                shared.join("ci.yaml"),
+                project.clone(),
+                shared.join("ci.yaml"),
+                "",
+            ),
+            (
+                project.join("cfg/ci.yaml"),
+                project.join("app"),
+                PathBuf::from("../cfg/ci.yaml"),
+                "app",
+            ),
+        ] {
+            let load = LoadOptions {
+                config: Some(config.clone()),
+                root_dir: Some(root.clone()),
+                ..LoadOptions::default()
+            };
+            let loaded = crate::load(&load).unwrap();
+
+            let hook = detect(&loaded.cwd, Some(&loaded), &load).root_hook.unwrap();
+
+            assert_eq!(hook.target.hook_path, project.join(".git/hooks/pre-commit"));
+            assert_eq!(hook.target.config_rel, Path::new(config_rel));
+            assert_eq!(hook.opts.config_file, Some(config_arg.clone()));
+            assert_eq!(hook.opts.root_dir.as_deref(), Some(Path::new(".")));
+            let loads = hook_loads(&hook);
+            assert_eq!((loads.config_path, loads.cwd), (config, root));
+            let notes = Action::InstallHook { hook }
+                .prepare(ForeignPolicy::Refuse)
+                .unwrap()
+                .unwrap()
+                .notes;
+            assert_eq!(
+                notes.iter().any(|n| n.contains("absolute path")),
+                config_arg.is_absolute(),
+                "{notes:?}"
+            );
+        }
+    }
+
     #[test]
     fn root_hook_loads_the_config_like_setup_did() {
         let dir = tempfile::tempdir().unwrap();
@@ -709,10 +806,25 @@ mod tests {
             ..LoadOptions::default()
         };
         let loaded = crate::load(&pinned).unwrap();
-        let opts = root_hook_options(Some(&loaded), &pinned);
-        assert_eq!(opts.config_file.as_deref(), Some(Path::new("ci.yaml")));
-        assert_eq!(opts.root_dir.as_deref(), Some(Path::new("..")));
+        assert_eq!(root_hook_dir(&root, Some(&loaded), &pinned), root);
+        let opts = root_hook_options(Some(&loaded), &pinned, &root);
+        assert_eq!(opts.config_file.as_deref(), Some(Path::new("app/ci.yaml")));
+        assert_eq!(opts.root_dir.as_deref(), Some(Path::new(".")));
         assert!(opts.no_workspace);
+
+        let config_only = LoadOptions {
+            root_dir: None,
+            no_workspace: false,
+            ..pinned
+        };
+        let loaded = crate::load(&config_only).unwrap();
+        assert_eq!(
+            root_hook_dir(&root, Some(&loaded), &config_only),
+            root.join("app")
+        );
+        let opts = root_hook_options(Some(&loaded), &config_only, &root);
+        assert_eq!(opts.config_file.as_deref(), Some(Path::new("ci.yaml")));
+        assert_eq!(opts.root_dir, None);
 
         let found = LoadOptions {
             start_dir: Some(root.join("app")),
@@ -720,18 +832,17 @@ mod tests {
         };
         let loaded = crate::load(&found).unwrap();
         assert_eq!(
-            root_hook_options(Some(&loaded), &found),
+            root_hook_options(Some(&loaded), &found, &root),
             InstallOptions::default()
         );
 
-        let root_is_config_dir = LoadOptions {
+        let root_only = LoadOptions {
             root_dir: Some(root.join("app")),
             ..found
         };
-        let loaded = crate::load(&root_is_config_dir).unwrap();
-        assert_eq!(
-            root_hook_options(Some(&loaded), &root_is_config_dir).root_dir,
-            Some(PathBuf::from("."))
-        );
+        let loaded = crate::load(&root_only).unwrap();
+        let opts = root_hook_options(Some(&loaded), &root_only, &root);
+        assert_eq!(opts.config_file, None);
+        assert_eq!(opts.root_dir.as_deref(), Some(Path::new(".")));
     }
 }
