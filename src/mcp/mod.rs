@@ -11,7 +11,7 @@ use std::time::Duration;
 use log::warn;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router, transport::stdio};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -102,7 +102,8 @@ impl FnugMcp {
         understand what checks are available before running them. Each result includes the \
         command's id, name, shell command, working directory, auto-selection rules, \
         dependencies, group, and whether it is currently selected by git changes. \
-        Use filters to narrow results."
+        Use filters to narrow results.",
+        annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_lints(
         &self,
@@ -152,7 +153,8 @@ impl FnugMcp {
         making edits, before committing, or to validate a fix. Commands are auto-selected \
         based on which files were modified in git. Dependencies between commands are \
         resolved automatically (e.g. build before test). Returns per-command results with \
-        status, exit code, output (stdout and stderr merged), and timing."
+        status, exit code, output (stdout and stderr merged), and timing.",
+        annotations(open_world_hint = false)
     )]
     async fn run_lints(
         &self,
@@ -172,7 +174,8 @@ impl FnugMcp {
         specific failing check after fixing it, or to run a check that wasn't auto-selected. \
         Use list_lints to discover available command names and ids. Dependencies are resolved \
         and run first automatically. Returns per-command results with status, exit code, \
-        output (stdout and stderr merged), and timing."
+        output (stdout and stderr merged), and timing.",
+        annotations(open_world_hint = false)
     )]
     async fn run_lint(
         &self,
@@ -189,7 +192,8 @@ impl FnugMcp {
         this for a full sweep before creating a pull request, after large refactors, or when \
         you want to ensure nothing is broken across the entire project. Dependencies are \
         resolved automatically. Returns per-command results with status, exit code, output \
-        (stdout and stderr merged), and timing."
+        (stdout and stderr merged), and timing.",
+        annotations(open_world_hint = false)
     )]
     async fn run_all(
         &self,
@@ -248,13 +252,20 @@ impl ServerHandler for FnugMcp {
                 everything relevant, (2) if a specific check fails, fix the issue and re-run \
                 just that check with run_lint, (3) use list_lints to explore available checks \
                 or understand what would run, (4) use run_all for a full sweep of all check \
-                commands before creating a PR or after large refactors. Always prefer these tools over running shell \
-                commands directly — they automatically select the right checks for the files \
-                you changed and handle dependency ordering."
+                commands before creating a PR or after large refactors. Always prefer these \
+                tools over running shell commands directly — they automatically select the \
+                right checks for the files you changed and handle dependency ordering."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
+            server_info: Implementation {
+                name: "fnug".into(),
+                title: Some("Fnug".into()),
+                version: env!("CARGO_PKG_VERSION").into(),
+                website_url: Some(env!("CARGO_PKG_HOMEPAGE").into()),
+                ..Implementation::default()
+            },
+            ..ServerInfo::default()
         }
     }
 }

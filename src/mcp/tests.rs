@@ -158,3 +158,30 @@ commands:
     assert_eq!(result["cancelled"], 1);
     assert_eq!(result["commands"][0]["status"], "cancelled");
 }
+
+#[test]
+fn server_info_is_fnug() {
+    use rmcp::ServerHandler;
+
+    let (server, _dir) = server("name: root\n");
+    let info = server.get_info().server_info;
+    assert_eq!(info.name, "fnug");
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.title.as_deref(), Some("Fnug"));
+}
+
+#[test]
+fn list_lints_read_only_annotation() {
+    let annotations = FnugMcp::list_lints_tool_attr().annotations.unwrap();
+    assert_eq!(annotations.read_only_hint, Some(true));
+    assert_eq!(annotations.open_world_hint, Some(false));
+    for tool in [
+        FnugMcp::run_lints_tool_attr(),
+        FnugMcp::run_lint_tool_attr(),
+        FnugMcp::run_all_tool_attr(),
+    ] {
+        let annotations = tool.annotations.unwrap();
+        assert_ne!(annotations.read_only_hint, Some(true), "{}", tool.name);
+        assert_eq!(annotations.open_world_hint, Some(false), "{}", tool.name);
+    }
+}
