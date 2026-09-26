@@ -295,6 +295,13 @@ impl Action {
                     ));
                 }
                 notes.extend(plan.note().map(str::to_string));
+                let local = hook.target.location == hooks::HookLocation::Local;
+                notes.extend(hook_binary_note(
+                    fsutil::find_on_path("fnug").as_deref(),
+                    std::env::current_exe().ok().as_deref(),
+                    local && opts.fallback_exe.is_some(),
+                    local,
+                ));
                 if let Some(config) = opts.config_file.as_ref().filter(|c| c.is_absolute()) {
                     notes.push(format!(
                         "the config is outside the repository, so the hook loads it by its absolute path, {}, in every clone and linked worktree",
@@ -341,6 +348,34 @@ impl Action {
             change,
             notes,
         }))
+    }
+}
+
+/// Which fnug the hook runs, when that may not be `this` one: the hook prefers the `fnug` on
+/// `PATH` (`on_path`), and without one runs `this` if it `falls_back`, or else fails the commit if
+/// it is `required`. Git may see another `PATH`, so this is a hint.
+fn hook_binary_note(
+    on_path: Option<&Path>,
+    this: Option<&Path>,
+    falls_back: bool,
+    required: bool,
+) -> Option<String> {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    match (on_path, this) {
+        (Some(on_path), Some(this)) if canonical(on_path) != canonical(this) => Some(format!(
+            "the hook runs the fnug on PATH, {}, not this one ({}), so that one must understand the hook's flags",
+            on_path.display(),
+            this.display()
+        )),
+        (Some(_), _) => None,
+        (None, Some(this)) if falls_back => Some(format!(
+            "fnug isn't on PATH, so the hook runs this one ({}) instead",
+            this.display()
+        )),
+        (None, _) if required => {
+            Some("fnug isn't on PATH, so the hook blocks commits until it is".into())
+        }
+        (None, _) => Some("fnug isn't on PATH, so the hook skips its checks until it is".into()),
     }
 }
 
@@ -792,6 +827,33 @@ mod tests {
             Action::InstallHook { hook: linked }.to_string(),
             "+ Install pre-commit hook (/repo/.git/hooks/pre-commit -> /repo/scripts/pre-commit)"
         );
+    }
+
+    #[test]
+    fn hook_binary_note_names_the_fnug_the_hook_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (this, other, link) = (
+            dir.path().join("this"),
+            dir.path().join("other"),
+            dir.path().join("link"),
+        );
+        std::fs::write(&this, "").unwrap();
+        std::fs::write(&other, "").unwrap();
+        std::os::unix::fs::symlink(&this, &link).unwrap();
+
+        let note = hook_binary_note(Some(&other), Some(&this), true, true).unwrap();
+        assert!(
+            note.contains(&other.display().to_string()) && note.contains("not this one"),
+            "{note}"
+        );
+        assert_eq!(hook_binary_note(Some(&link), Some(&this), true, true), None);
+        let note = hook_binary_note(None, Some(&this), true, true).unwrap();
+        assert!(note.contains(&this.display().to_string()), "{note}");
+        let note = hook_binary_note(None, Some(&this), false, false).unwrap();
+        assert!(note.contains("skips its checks"), "{note}");
+        // A local hook without a fallback, as when setup can't tell which binary it is
+        let note = hook_binary_note(None, None, false, true).unwrap();
+        assert!(note.contains("blocks commits"), "{note}");
     }
 
     #[test]
