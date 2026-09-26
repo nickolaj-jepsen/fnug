@@ -1,11 +1,16 @@
-use std::io::{IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Args;
+use tokio_util::sync::CancellationToken;
 
-use fnug::check::CheckResult;
+use fnug::check::{CheckOptions, CheckResult};
 use fnug::commands::group::CommandGroup;
+use fnug::runner::Selection;
+use fnug::selectors::SelectOptions;
+
+use crate::signals;
 
 #[derive(Args, Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -35,31 +40,70 @@ pub enum CheckOutcome {
     OpenTui(CheckResult),
 }
 
-/// Run the check subcommand.
+/// Run the check subcommand. A termination signal stops the commands and exits with 128 plus
+/// its number.
 ///
 /// # Errors
 ///
 /// Returns an error if the check runner or IO fails.
-pub fn run(
+pub async fn run(
     args: &CheckArgs,
     config: &CommandGroup,
     cwd: &Path,
 ) -> Result<CheckOutcome, Box<dyn std::error::Error>> {
-    let result = fnug::check::run(config, cwd, args.fail_fast, args.mute_success, args.all)?;
+    let signals = signals::install()?;
+    let opts = CheckOptions {
+        selection: Selection::Auto {
+            options: SelectOptions::default(),
+            include_manual: args.all,
+        },
+        fail_fast: args.fail_fast,
+        mute_success: args.mute_success,
+        ..CheckOptions::default()
+    };
+    let result = fnug::check::run(config, cwd, &opts, signals.cancel.clone()).await?;
+    if let Some(code) = signals.exit_code() {
+        return Ok(CheckOutcome::Done(code));
+    }
     if result.exit_code == 0 {
         return Ok(CheckOutcome::Done(ExitCode::SUCCESS));
     }
 
     // On failure in an interactive terminal, offer to open the TUI
     if !args.no_tui && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        eprint!("Open TUI to investigate? [y/N] ");
-        let _ = std::io::stderr().flush();
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if answer.trim().eq_ignore_ascii_case("y") {
-            return Ok(CheckOutcome::OpenTui(result));
+        match prompt_open_tui(&signals.cancel).await? {
+            Some(true) => {
+                signals::restore_default();
+                return Ok(CheckOutcome::OpenTui(result));
+            }
+            Some(false) => {}
+            None => {
+                let code = signals.exit_code().unwrap_or(ExitCode::FAILURE);
+                return Ok(CheckOutcome::Done(code));
+            }
         }
     }
 
     Ok(CheckOutcome::Done(ExitCode::FAILURE))
+}
+
+/// Ask whether to open the TUI. Returns `None` if a signal cancelled the prompt.
+async fn prompt_open_tui(cancel: &CancellationToken) -> io::Result<Option<bool>> {
+    eprint!("Open TUI to investigate? [y/N] ");
+    let _ = std::io::stderr().flush();
+    // Read on a blocking thread, so a signal can still end the prompt
+    let read = tokio::task::spawn_blocking(|| {
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).map(|_| answer)
+    });
+    tokio::select! {
+        answer = read => {
+            let answer = answer.map_err(io::Error::other)??;
+            Ok(Some(answer.trim().eq_ignore_ascii_case("y")))
+        }
+        () = cancel.cancelled() => {
+            eprintln!();
+            Ok(None)
+        }
+    }
 }

@@ -1,6 +1,7 @@
 mod check;
 mod mcp;
 mod setup;
+mod signals;
 mod tui;
 
 use std::path::PathBuf;
@@ -124,7 +125,7 @@ async fn run(cli: Cli, logger: LoggerHandle) -> Result<ExitCode, Box<dyn std::er
         }
         Some(Commands::Check(ref args)) => {
             let loaded = fnug::load(&load_opts)?;
-            match check::run(args, &loaded.root, &loaded.cwd)? {
+            match check::run(args, &loaded.root, &loaded.cwd).await? {
                 check::CheckOutcome::Done(code) => return Ok(code),
                 check::CheckOutcome::OpenTui(result) => (loaded, Some(result)),
             }
