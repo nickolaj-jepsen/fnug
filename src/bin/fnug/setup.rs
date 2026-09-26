@@ -66,6 +66,45 @@ mod tests {
     }
 
     #[test]
+    fn mcp_entry_args_parse() {
+        use clap::Parser;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("cfg")).unwrap();
+        std::fs::create_dir_all(base.join("proj")).unwrap();
+        std::fs::write(base.join("cfg/ci.yaml"), "name: ci\ncommands: []\n").unwrap();
+        let pinned = LoadOptions {
+            start_dir: Some(base.join("proj")),
+            config: Some("../cfg/ci.yaml".into()),
+            root_dir: Some(".".into()),
+            no_workspace: true,
+            ..LoadOptions::default()
+        };
+        let loaded = fnug::load(&pinned).unwrap();
+
+        let args = fnug::setup::mcp_server_args(Some(&loaded), &pinned, &loaded.cwd);
+        let cli =
+            crate::Cli::try_parse_from(std::iter::once("fnug".to_string()).chain(args)).unwrap();
+        assert!(matches!(cli.command, Some(crate::Commands::Mcp)));
+        assert!(cli.no_workspace);
+
+        // The editor starts it from the directory the entry is in
+        let again = fnug::load(&LoadOptions {
+            start_dir: Some(loaded.cwd.clone()),
+            config: cli.config.map(PathBuf::from),
+            root_dir: cli.root,
+            no_workspace: cli.no_workspace,
+            ..LoadOptions::default()
+        })
+        .unwrap();
+        assert_eq!(
+            (again.config_path, again.cwd),
+            (loaded.config_path, loaded.cwd)
+        );
+    }
+
+    #[test]
     fn missing_root_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let opts = LoadOptions {
