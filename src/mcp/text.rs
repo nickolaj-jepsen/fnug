@@ -6,12 +6,18 @@ use regex::Regex;
 
 use crate::runner::CapturedOutput;
 
-/// CSI, OSC and two-byte escape sequences, then any other control character but `\t`, `\n`
-/// and `\r`.
+/// Escape sequences in their 7-bit and 8-bit forms: CSI; OSC, DCS, SOS, PM and APC with their
+/// payload up to BEL or ST, or else to the end of the line; and two-byte ones. Then any other C0
+/// or C1 control character but `\t`, `\n` and `\r`.
 static NOISE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[ -/]*[0-~])|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]",
-    )
+    Regex::new(concat!(
+        r"\x1b(?:\[[0-?]*[ -/]*[@-~]",
+        r"|[\]PX^_](?:[^\x07\x1b]*(?:\x07|\x1b\\)|[^\x07\x1b\n]*)",
+        r"|[ -/]*[0-~])",
+        r"|\x{9b}[0-?]*[ -/]*[@-~]",
+        r"|[\x{90}\x{98}\x{9d}-\x{9f}](?:[^\x07\x1b\x{9c}]*(?:\x07|\x1b\\|\x{9c})|[^\x07\x1b\x{9c}\n]*)",
+        r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x{9f}]",
+    ))
     .expect("valid regex")
 });
 
@@ -172,6 +178,17 @@ mod tests {
         let text =
             "\x1b[1;31merror\x1b[0m: \x1b]8;;https://x\x07link\x1b]8;;\x1b\\ \x1b(Bok\x07\x1b\n";
         assert_eq!(clean(text), "error: link ok\n");
+    }
+
+    #[test]
+    fn clean_strips_string_sequences_and_c1_controls() {
+        // DCS (a sixel image), APC and PM with their payloads, then the 8-bit CSI, OSC and DCS
+        let text = "a\x1bPq#0;2;0;0;0\n#0~~\x1b\\b\x1b_apc\x1b\\c\x1b^pm\x07d\u{9b}1;31me\u{9b}0mf\
+                    \u{9d}0;title\u{9c}g\u{90}dcs\u{9c}h\u{85}i\n";
+        assert_eq!(clean(text), "abcdefghi\n");
+        // Unterminated, they stop at the end of the line
+        assert_eq!(clean("x\x1b]0;title\nkept\n"), "x\nkept\n");
+        assert_eq!(clean("x\x1bPpayload\nkept\x1b[0m\n"), "x\nkept\n");
     }
 
     #[test]
