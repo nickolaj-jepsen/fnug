@@ -514,13 +514,35 @@ fn root_hook_options(
     }
 }
 
+/// Why the hook and the MCP server won't work, when there's no config and setup doesn't offer
+/// to create one, as over a config that fails to load.
+fn no_config_warning(detected: &Detected) -> Option<&'static str> {
+    (!detected.has_config && detected.config_proposals.is_none()).then_some(
+        "no fnug config loaded. The pre-commit hook and the MCP server run the commands in one, so add a .fnug.yaml before relying on them.",
+    )
+}
+
+/// Note on each hook and MCP entry in `prepared` that it fails until there is a config, when
+/// there is none (`has_config`) and `prepared` doesn't create one.
+fn note_missing_config(prepared: &mut [Prepared], has_config: bool) {
+    let creates = |ready: &Prepared| matches!(ready.action, Action::CreateConfig { .. });
+    if has_config || prepared.iter().any(creates) {
+        return;
+    }
+    for ready in prepared {
+        let note = match ready.action {
+            Action::InstallHook { .. } => "the hook fails every commit",
+            Action::InstallMcp { .. } => "every call to the MCP server fails",
+            _ => continue,
+        };
+        ready.notes.push(format!(
+            "there's no fnug config yet, so {note} until you add one, e.g. with `fnug init`"
+        ));
+    }
+}
+
 /// Find the hooks and editor configs, logging why any of them can't be set up.
 fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Detected {
-    if config.is_none() {
-        log::warn!(
-            "no fnug config loaded. The pre-commit hook and the MCP server run the commands in one, so add a .fnug.yaml before relying on them."
-        );
-    }
     let fallback_exe = std::env::current_exe().ok();
     let repo_hook = |name: String, dir: &Path, opts: &dyn Fn(&HookTarget) -> InstallOptions| {
         let target = hooks::resolve(dir)
@@ -571,7 +593,7 @@ fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Dete
     let config_proposals = (config.is_none()
         && !cwd.ancestors().any(|dir| find_config_in_dir(dir).is_some()))
     .then(|| init::detect(cwd));
-    Detected {
+    let detected = Detected {
         has_config: config.is_some(),
         config_proposals,
         cwd: cwd.to_path_buf(),
@@ -579,7 +601,11 @@ fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Dete
         sub_repo_hooks,
         mcp_args,
         editors,
+    };
+    if let Some(warning) = no_config_warning(&detected) {
+        log::warn!("{warning}");
     }
+    detected
 }
 
 /// What the MCP entry `fnug setup` writes into `dir` passes to `fnug`: the `-c`, `--root` and
@@ -756,7 +782,8 @@ pub fn run(
 
     let detected = detect(cwd, config, load);
     let choice = prompt(&detected)?;
-    let prepared = prepare_all(&plan_actions(&detected, &choice))?;
+    let mut prepared = prepare_all(&plan_actions(&detected, &choice))?;
+    note_missing_config(&mut prepared, detected.has_config);
 
     if prepared.is_empty() {
         println!("Nothing to change.");
@@ -1031,10 +1058,61 @@ mod tests {
     }
 
     #[test]
+    fn missing_config_warned_only_without_an_offer() {
+        let offered = Detected {
+            config_proposals: Some(Vec::new()),
+            ..Detected::default()
+        };
+        assert_eq!(no_config_warning(&offered), None);
+        // A config that doesn't load, so creating one isn't offered
+        assert!(no_config_warning(&Detected::default()).is_some());
+        let loaded = detected(HookStatus::NotInstalled, &[]);
+        assert_eq!(no_config_warning(&loaded), None);
+    }
+
+    #[test]
+    fn hook_and_mcp_note_that_no_config_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        init_repo(&root);
+        let detected = detect(&root, None, &LoadOptions::default());
+        let notes = |features: Vec<Feature>| {
+            let choice = Choice {
+                features,
+                editors: vec![Editor::ClaudeCode],
+                ..Choice::default()
+            };
+            let mut prepared = prepare_all(&plan_actions(&detected, &choice)).unwrap();
+            note_missing_config(&mut prepared, detected.has_config);
+            prepared
+                .into_iter()
+                .map(|ready| (ready.action, ready.notes))
+                .collect::<Vec<_>>()
+        };
+
+        let without = notes(vec![Feature::GitHooks, Feature::McpServer]);
+        assert_eq!(without.len(), 2, "{without:?}");
+        for (action, notes) in &without {
+            assert!(
+                notes.iter().any(|n| n.contains("no fnug config yet")),
+                "{action}: {notes:?}"
+            );
+        }
+        let with = notes(offered_features(&detected));
+        assert!(
+            with.iter()
+                .all(|(_, notes)| !notes.iter().any(|n| n.contains("no fnug config"))),
+            "{with:?}"
+        );
+    }
+
+    #[test]
     fn detect_logs_what_it_cant_set_up() {
         let warnings = logged_warnings();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(Editor::ClaudeCode.config_path(dir.path()), "{ not json").unwrap();
+        // Broken, so setup doesn't offer to create one
+        std::fs::write(dir.path().join(".fnug.yaml"), "name: [").unwrap();
 
         let detected = detect(dir.path(), None, &LoadOptions::default());
 
