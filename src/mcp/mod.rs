@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commands::command::Command;
 use crate::runner::{
-    self, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions, Selection,
-    commands_with_group_path,
+    self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions,
+    Selection, commands_with_group_path,
 };
 use crate::selectors::{self, SelectOptions};
 use crate::{LoadOptions, LoadedConfig};
@@ -37,6 +37,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 pub struct FnugMcp {
     /// How to load the config, which every tool call does afresh.
     load: LoadOptions,
+    /// The signal that shut the server down, which running commands then get too.
+    cancel_cause: CancelCause,
     /// Held for reading by every run; shutdown takes it for writing to wait for them.
     runs: Arc<RwLock<()>>,
     tool_router: ToolRouter<Self>,
@@ -98,9 +100,10 @@ fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParam
 
 #[tool_router]
 impl FnugMcp {
-    fn new(load: LoadOptions) -> Self {
+    fn new(load: LoadOptions, cancel_cause: CancelCause) -> Self {
         Self {
             load,
+            cancel_cause,
             runs: Arc::default(),
             tool_router: Self::tool_router(),
         }
@@ -256,6 +259,7 @@ impl FnugMcp {
             fail_fast,
             output: OutputMode::Capture(CaptureLimits::DEFAULT),
             cancel: ct,
+            cancel_cause: self.cancel_cause.clone(),
             ..ExecOptions::default()
         };
         let report = runner::execute(&plan, &cwd, &opts, &NoHook, &mut |_| {}).await;
@@ -302,7 +306,8 @@ impl ServerHandler for FnugMcp {
 /// Every tool call loads the config with `load`, so edits apply without a restart, and a config
 /// that fails to load is the call's error result rather than a reason not to start. On
 /// shutdown, running tool calls are cancelled, which stops their commands, and the server waits
-/// up to 10 s for them before returning.
+/// up to 10 s for them before returning. Running commands get the signal recorded in
+/// `cancel_cause`, as [`CancelCause`] describes, or `SIGTERM` without one.
 ///
 /// # Errors
 ///
@@ -310,13 +315,14 @@ impl ServerHandler for FnugMcp {
 pub async fn run(
     load: LoadOptions,
     shutdown: CancellationToken,
+    cancel_cause: CancelCause,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Logs the config's warnings, or why it doesn't load, once at startup
     let preflight = load.clone();
     if let Err(e) = tokio::task::spawn_blocking(move || crate::load(&preflight)).await? {
         warn!("{e}; every tool call reports this until the config is fixed");
     }
-    let server = FnugMcp::new(load);
+    let server = FnugMcp::new(load, cancel_cause);
     let runs = server.runs.clone();
     let service = server.serve(stdio()).await?;
     // Dropping the service, whichever branch wins, cancels every request's token
