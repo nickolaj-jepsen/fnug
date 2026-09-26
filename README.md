@@ -91,7 +91,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file, or below one, 
 | `fnug init [DIR]`        | Create a .fnug.yaml with lint and test commands for the project's tooling; see [Init](#init)            |
 | `fnug mcp`               | Start an MCP server over stdio; see [MCP server](#mcp-server)                                           |
 | `fnug schema`            | Print the config file's JSON Schema; see [Editor support](#editor-support)                              |
-| `fnug help [COMMAND]`    | Print this message or the help of the given subcommand(s)                                               |
+| `fnug help [COMMAND]`    | Print fnug's help, or a subcommand's, like `--help`                                                     |
 
 ### Global options
 
@@ -221,7 +221,7 @@ Commands with `auto.check: false` are left out unless you add `--include-manual`
 
 `fnug check` prints a line for each command, such as `PASS`, `FAIL (exit 3)`, `TIMEOUT after 5m`, `SKIP (build failed)`, `CANCELLED` or `NOT RUN`, then a summary that counts every selected command once: passed, failed, timed out, skipped because a dependency failed, cancelled, and not run. When `--fail-fast` stops a run, commands still running are stopped and counted as cancelled, and commands not yet started as not run. Without `--mute-success` or `--stash`, commands share fnug's terminal and their output streams through. With `--mute-success`, fnug prints `[i/N] name` when a command starts and its result when it ends, followed by the command's output, captured with stdout and stderr merged in order, if it didn't pass. `--stash` alone does the same, but prints the output of commands that pass too. `--jobs` above 1 captures output the same way and prints each command's result line and output, unless it passed and `--mute-success` is set, as soon as the command finishes. Commands still start in config order once their dependencies pass, and an `exclusive` one waits until nothing else runs and holds back the rest until it ends.
 
-When a command fails and both stdin and stderr are terminals, `fnug check` asks `Open TUI to investigate? [y/N]`. Answer `y` to open the TUI, which selects the commands that failed, timed out or were skipped and runs them again. `--no-tui` never asks.
+When the run fails and both stdin and stderr are terminals, `fnug check` asks `Open TUI to investigate? [y/N]`. Answer `y` to open the TUI, which selects the commands that failed, timed out or were skipped and runs them again. `--no-tui` never asks.
 
 ### Exit codes
 
@@ -382,9 +382,9 @@ config.write(".fnug.yaml")     # or save it: JSON for a .json path, YAML otherwi
 - Both take the global options `config_path`, `no_workspace` and `log_file`, or a `Config` as their first argument instead of `config_path`. They return the `subprocess.CompletedProcess`, with the output left on the terminal, and don't raise when a check fails.
 - `fnug.run(*args)` runs the binary with any arguments.
 
-They run the `fnug` installed next to the Python interpreter, as the wheel does, or else the first one on `PATH`.
+They run the `fnug` next to the Python interpreter, where the wheel installs it, or else the first one on `PATH`.
 
-`Config`, `CommandGroup`, `Command`, `Auto` and `WorkspaceOptions` are dataclasses with keyword-only fields named after the config keys (see [Configuration reference](#configuration-reference)). `to_dict()`, `to_yaml()`, `to_json()` and `write(path)` leave out the fields you didn't set. A `Config` passed to `check()` or `start()` is written to a temporary JSON file, and fnug gets `--root` set to the working directory, so the config's paths and commands work as they would in a `.fnug.yaml` there. A `Config` with `workspace` set raises `ValueError`; write it with `Config.write()` and pass `config_path` instead.
+`Config`, `CommandGroup`, `Command`, `Auto` and `WorkspaceOptions` are dataclasses with keyword-only fields named after the config keys (see [Configuration reference](#configuration-reference)). `to_dict()`, `to_yaml()`, `to_json()` and `write(path)` leave out the fields that are `None`. A `Config` passed to `check()` or `start()` is written to a temporary JSON file, and fnug gets `--root` set to the working directory, so the config's paths and commands work as they would in a `.fnug.yaml` there. A `Config` with `workspace` set raises `ValueError`; write it with `Config.write()` and pass `config_path` instead.
 
 ## Configuration
 
@@ -404,7 +404,7 @@ commands:
 
 ### Git auto-selection
 
-Select commands based on uncommitted changes. Re-trigger with `g` in the TUI.
+Select commands based on uncommitted changes: in the TUI at startup and when you press `g`, and in `fnug check`, which can look at the staged changes or a branch's changes instead (see [What `fnug check` runs](#what-fnug-check-runs)).
 
 ```yaml
 fnug_version: 0.1.0
@@ -422,7 +422,7 @@ commands:
 
 ### File watching
 
-Monitor the file system and select commands when matching files change. Can be combined with git auto.
+While the TUI runs, monitor the file system and select commands when matching files change. Can be combined with git auto.
 
 ```yaml
 fnug_version: 0.1.0
@@ -559,7 +559,7 @@ In the TUI, a command that git selected gets the files git matched when you run 
 
 ### Ids and dependencies
 
-Every command and group has an id, which `depends_on` and the MCP tools use. It defaults to the name, with `/` replaced by `-`. When several commands or groups would get the same default id, each of them gets its group path instead, such as `backend/test` and `frontend/test`. Set `id` to choose one yourself; explicit ids must be unique and can't contain `/`. If two still end up with the same id (siblings with the same name, or a command and a group with the same name in one group), fnug reports an error naming both; set `id` on one of them.
+Every command and group has an id, which `depends_on`, `fnug check` targets and the MCP tools use, and by which the TUI keeps a command's output across config reloads. It defaults to the name, with `/` replaced by `-`. When several commands or groups would get the same default id, each of them gets its group path instead, such as `backend/test` and `frontend/test`. Set `id` to choose one yourself; explicit ids must be unique and can't contain `/`. If two still end up with the same id (siblings with the same name, or a command and a group with the same name in one group), fnug reports an error naming both; set `id` on one of them.
 
 fnug resolves a `depends_on` entry within the command's config file, using the first of these that matches:
 
