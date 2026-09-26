@@ -731,9 +731,11 @@ impl App {
         self.set_status(watch_status(&matches, &names, &self.cwd), StatusLevel::Info);
         let ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
         for m in matches {
-            // Every change since it last passed goes to its next run
+            // Every change since it last passed, whether git or the watcher found it, goes to its
+            // next run
             if self.selected.contains(&m.id)
-                && let Some(SelectionReason::Watch(files)) = self.selection_reason.get_mut(&m.id)
+                && let Some(SelectionReason::Git(files) | SelectionReason::Watch(files)) =
+                    self.selection_reason.get_mut(&m.id)
             {
                 for file in m.files {
                     if !files.contains(&file) {
