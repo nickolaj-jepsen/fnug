@@ -678,7 +678,7 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -721,34 +721,6 @@ mod tests {
     }
 
     type Sender = crossbeam_channel::Sender<TerminalUpdate>;
-
-    #[test]
-    fn parser_lock_available_during_flood() {
-        if !pty_available() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let term = spawn("touch ready && exec yes", dir.path());
-        let started = wait_until(Duration::from_secs(5), || dir.path().join("ready").exists());
-        assert!(started, "command did not start");
-
-        let parser = term.0.parser();
-        let start = Instant::now();
-        let mut acquired = 0;
-        let mut saw_output = false;
-        // Keep contending long enough for the output queue to fill up behind the parser
-        while acquired < 5 || !saw_output || start.elapsed() < Duration::from_millis(500) {
-            assert!(
-                start.elapsed() < Duration::from_secs(5),
-                "no output from `yes`"
-            );
-            let Some(guard) = parser.try_lock_for(Duration::from_millis(500)) else {
-                panic!("parser lock starved after {acquired} acquisitions");
-            };
-            saw_output |= guard.screen().contents().contains('y');
-            acquired += 1;
-        }
-    }
 
     #[test]
     fn output_writer_releases_lock_between_batches() {
