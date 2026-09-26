@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commands::group::CommandGroup;
 use crate::runner::{
-    self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions,
-    RunEvent, RunReport, Selection,
+    self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, Plan, PlanError,
+    PlanOptions, RunEvent, RunReport, Selection,
 };
 use crate::selectors::SelectOptions;
 
@@ -89,7 +89,8 @@ pub struct CheckResult {
 ///
 /// With one job and `mute_success` off, commands use the terminal directly and their output
 /// streams through. Otherwise it is captured and printed after each command ends.
-/// Cancelling `cancel` stops the running commands, and the summary covers what finished.
+/// Cancelling `cancel` stops the running commands, and the summary covers what finished; while
+/// git selection still runs, it returns at once with nothing run.
 ///
 /// With `opts.stash`, unstaged changes are set aside only when something is selected, and put
 /// back once every command has exited.
@@ -104,7 +105,16 @@ pub async fn run(
     opts: &CheckOptions,
     cancel: CancellationToken,
 ) -> Result<CheckResult, CheckError> {
-    let plan = runner::plan(config, &opts.selection, &PlanOptions::default())?;
+    let Some(plan) = plan_unless_cancelled(config, &opts.selection, &cancel).await? else {
+        printer::interrupted();
+        return Ok(CheckResult {
+            exit_code: 1,
+            report: RunReport {
+                cancelled: true,
+                ..RunReport::default()
+            },
+        });
+    };
     for warning in &plan.warnings {
         warn!("{warning}");
     }
@@ -166,4 +176,28 @@ pub async fn run(
         exit_code: i32::from(!report.success()),
         report,
     })
+}
+
+/// Plan the run on a blocking thread, since git selection can take a while in a big repo.
+/// Returns `None` if `cancel` fires first; the scan then finishes unobserved.
+async fn plan_unless_cancelled(
+    config: &CommandGroup,
+    selection: &Selection,
+    cancel: &CancellationToken,
+) -> Result<Option<Plan>, PlanError> {
+    let config = config.clone();
+    let selection = selection.clone();
+    let scan = tokio::task::spawn_blocking(move || {
+        runner::plan(&config, &selection, &PlanOptions::default())
+    });
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(None),
+        plan = scan => match plan {
+            Ok(plan) => plan.map(Some),
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            // The runtime is shutting down
+            Err(_) => Ok(None),
+        },
+    }
 }

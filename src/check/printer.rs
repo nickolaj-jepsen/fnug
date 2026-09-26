@@ -279,6 +279,11 @@ impl Printer {
 
 type Paint = fn(&Style, &str) -> String;
 
+/// Report a run that a signal stopped before any command started.
+pub(super) fn interrupted() {
+    eprintln!("{}", Style::new().yellow("Interrupted."));
+}
+
 /// `[i/N]`, with `i` padded to the width of `N`.
 fn counter(index: usize, total: usize) -> String {
     let width = total.to_string().len();
