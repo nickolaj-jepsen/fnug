@@ -164,7 +164,11 @@ mod tests {
                 Cli::try_parse_from(std::iter::once("fnug").chain(hooks::hook_args(no_workspace)))
                     .unwrap();
             assert_eq!(cli.no_workspace, no_workspace);
-            assert!(matches!(cli.command, Some(Commands::Check(_))));
+            let Some(Commands::Check(args)) = cli.command else {
+                panic!("the hook doesn't run `fnug check`");
+            };
+            assert!(args.staged && args.stash, "{args:?}");
+            assert!(args.fail_fast && args.mute_success, "{args:?}");
         }
     }
 

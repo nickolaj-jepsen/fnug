@@ -146,7 +146,7 @@ fn husky_refused_with_snippet() {
         };
         assert_eq!(user_hook, &root.join(".husky/pre-commit"));
         assert!(
-            snippet.contains("check --fail-fast --mute-success"),
+            snippet.contains(&hooks::hook_args(false).join(" ")),
             "{snippet}"
         );
         assert!(err.to_string().contains(".husky/pre-commit"), "{err}");
@@ -170,7 +170,7 @@ fn global_hooks_path_refused() {
     };
     assert_eq!(path, &shared);
     assert!(
-        snippet.contains("check --fail-fast --mute-success"),
+        snippet.contains(&hooks::hook_args(false).join(" ")),
         "{snippet}"
     );
     assert!(!shared.join("pre-commit").exists());
@@ -468,7 +468,7 @@ fn python_hook_refused_then_chained() {
     };
     assert_eq!(interpreter, "python3");
     assert!(
-        snippet.contains("check --fail-fast --mute-success"),
+        snippet.contains(&hooks::hook_args(false).join(" ")),
         "{snippet}"
     );
     assert_eq!(read(&hook), original, "refusing leaves the hook alone");
@@ -1014,7 +1014,7 @@ fn hook_linked_out_of_the_repo_is_refused() {
     };
     assert_eq!((path, target), (&hook, &outside));
     assert!(
-        snippet.contains("check --fail-fast --mute-success"),
+        snippet.contains(&hooks::hook_args(false).join(" ")),
         "{snippet}"
     );
     assert_eq!(read(&outside), original);

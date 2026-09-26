@@ -18,7 +18,7 @@ use crate::config_file::find_config_in_dir;
 
 /// Version of the hook block's format. Bump it when the block changes, so [`status`] reports
 /// older blocks as [`HookStatus::Outdated`] and setup offers to update them.
-pub const HOOK_FORMAT_VERSION: u32 = 1;
+pub const HOOK_FORMAT_VERSION: u32 = 2;
 
 const BEGIN: &str = "# >>> fnug >>>";
 const END: &str = "# <<< fnug <<<";
@@ -263,17 +263,26 @@ pub enum InstallOutcome {
     },
 }
 
-/// Arguments the pre-commit hook passes to `fnug`.
+/// Arguments the pre-commit hook passes to `fnug`: check what is being committed, with
+/// unstaged changes set aside and one command per CPU at once.
 ///
 /// Global flags come before the subcommand so the hook also parses with
 /// fnug versions where they weren't global yet.
 #[must_use]
 pub fn hook_args(no_workspace: bool) -> Vec<&'static str> {
-    let mut args = Vec::with_capacity(4);
+    let mut args = Vec::with_capacity(8);
     if no_workspace {
         args.push("--no-workspace");
     }
-    args.extend(["check", "--fail-fast", "--mute-success"]);
+    args.extend([
+        "check",
+        "--staged",
+        "--stash",
+        "--fail-fast",
+        "--mute-success",
+        "--jobs",
+        "0",
+    ]);
     args
 }
 
@@ -1216,7 +1225,7 @@ mod tests {
         assert_eq!(lines.last(), Some(&END));
         assert!(
             shared.contains(
-                "  \"$fnug_bin\" --no-workspace check --fail-fast --mute-success || exit $?\n"
+                "  \"$fnug_bin\" --no-workspace check --staged --stash --fail-fast --mute-success --jobs 0 || exit $?\n"
             ),
             "{shared}"
         );

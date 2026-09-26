@@ -40,16 +40,16 @@ pub struct CheckArgs {
     /// Select by the changes staged for the next commit; unstaged and untracked changes don't
     /// count. In a pre-commit hook, the index git is committing
     #[arg(long, group = "source")]
-    staged: bool,
+    pub(crate) staged: bool,
 
     /// Set unstaged changes to tracked files aside while commands run, so they check exactly
     /// what is staged, and put them back afterwards
     #[arg(long, requires = "staged")]
-    stash: bool,
+    pub(crate) stash: bool,
 
     /// Stop on first failure
     #[arg(long)]
-    fail_fast: bool,
+    pub(crate) fail_fast: bool,
 
     /// Never prompt to open the TUI on failure
     #[arg(long)]
@@ -57,7 +57,7 @@ pub struct CheckArgs {
 
     /// Suppress stdout/stderr for commands that pass
     #[arg(long)]
-    mute_success: bool,
+    pub(crate) mute_success: bool,
 
     /// Kill commands that run longer than DURATION (seconds, or e.g. 90s, 5m), unless their
     /// config sets `timeout`

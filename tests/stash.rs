@@ -594,12 +594,11 @@ fn stash_in_commit_hook_checks_what_is_committed() {
     }
     let hook = dir.join(".git/hooks/pre-commit");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    // With the arguments `fnug setup` installs
+    let args = fnug::setup::hooks::hook_args(true).join(" ");
     std::fs::write(
         &hook,
-        format!(
-            "#!/bin/sh\nexec '{}' --no-workspace check --no-tui --staged --stash --mute-success\n",
-            env!("CARGO_BIN_EXE_fnug")
-        ),
+        format!("#!/bin/sh\nexec '{}' {args}\n", env!("CARGO_BIN_EXE_fnug")),
     )
     .unwrap();
     std::fs::set_permissions(&hook, PermissionsExt::from_mode(0o755)).unwrap();
