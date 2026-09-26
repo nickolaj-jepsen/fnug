@@ -65,6 +65,10 @@ enum Commands {
     Schema,
 }
 
+/// Exit code for a fnug error, such as a bad config or an unknown target, as opposed to a failed
+/// check (1). clap exits with it on usage errors too.
+const ERROR_EXIT: u8 = 2;
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // Before anything else, so config loading's warnings reach stderr and the log file
@@ -76,7 +80,7 @@ fn main() -> ExitCode {
         Ok(logger) => logger,
         Err(e) => {
             eprintln!("Error: {e}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(ERROR_EXIT);
         }
     };
 
@@ -87,7 +91,7 @@ fn main() -> ExitCode {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("Error: failed to start the async runtime: {e}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(ERROR_EXIT);
         }
     };
     let result = runtime.block_on(run(cli, logger));
@@ -97,7 +101,7 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e}");
-            ExitCode::FAILURE
+            ExitCode::from(ERROR_EXIT)
         }
     }
 }
