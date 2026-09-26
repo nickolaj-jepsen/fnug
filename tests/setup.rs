@@ -17,7 +17,8 @@ use git2::{IndexAddOption, Repository, RepositoryInitOptions, Signature};
 fn isolate_git_config() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let empty = tempfile::tempdir().unwrap().keep();
+        // Never created, so libgit2 finds no config files there
+        let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-git-config");
         for level in [
             git2::ConfigLevel::System,
             git2::ConfigLevel::XDG,
