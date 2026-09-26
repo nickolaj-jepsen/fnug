@@ -356,7 +356,8 @@ impl App {
     }
 
     /// Apply results from a headless check run: select the commands that failed or were
-    /// skipped, and start them so the user sees PTY output immediately.
+    /// skipped, and start them in `terminal_area` so the user sees PTY output immediately.
+    /// The cursor goes to the first of them, and to the first that fails again once all end.
     pub fn apply_check_result(
         &mut self,
         result: &crate::check::CheckResult,
@@ -383,6 +384,7 @@ impl App {
         }
 
         let focus = self.current_command_id();
+        self.batch_run_ids = Some(rerun.iter().cloned().collect());
         self.run_commands(&rerun, terminal_area, focus.as_deref());
     }
 
