@@ -84,7 +84,7 @@ pub enum AppEvent {
     },
     WatcherTriggered(Vec<WatchMatch>),
     LogUpdated,
-    GitSelectionComplete(u64, Result<Vec<Command>, String>),
+    GitSelectionComplete(u64, Vec<Command>),
 }
 
 /// Which pane currently has keyboard focus
@@ -405,8 +405,7 @@ impl App {
                 .filter(|c| output.contains(&c.id))
                 .cloned()
                 .collect();
-            let _ =
-                event_tx.blocking_send(AppEvent::GitSelectionComplete(generation, Ok(selected)));
+            let _ = event_tx.blocking_send(AppEvent::GitSelectionComplete(generation, selected));
         }));
     }
 
@@ -514,20 +513,13 @@ impl App {
                 self.collapse_inactive_groups();
                 self.mark_tree_dirty();
             }
-            AppEvent::GitSelectionComplete(generation, result) => {
+            AppEvent::GitSelectionComplete(generation, selected) => {
                 if generation == self.git_selection_generation {
                     self.git_selection_handle = None;
-                    match result {
-                        Ok(selected) => {
-                            for cmd in &selected {
-                                self.selected.insert(cmd.id.clone());
-                            }
-                            debug!("Git-selected {} commands", selected.len());
-                        }
-                        Err(e) => {
-                            error!("Git selection failed: {e}");
-                        }
+                    for cmd in &selected {
+                        self.selected.insert(cmd.id.clone());
                     }
+                    debug!("Git-selected {} commands", selected.len());
                     self.collapse_inactive_groups();
                     self.mark_tree_dirty();
                 }
