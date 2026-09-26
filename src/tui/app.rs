@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -12,8 +12,8 @@ use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::process::{ExitInfo, StopSignal};
 use crate::pty::terminal::Terminal;
-use crate::selectors::get_selected_commands;
 use crate::selectors::watch::WatchMatch;
+use crate::selectors::{self, SelectOptions};
 
 use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
@@ -374,17 +374,11 @@ impl App {
         use crate::selectors::always::AlwaysSelector;
 
         let commands: Vec<Command> = self.config.all_commands().into_iter().cloned().collect();
-        match AlwaysSelector::split_active_commands(commands) {
-            Ok((always_cmds, _)) => {
-                for cmd in &always_cmds {
-                    self.selected.insert(cmd.id.clone());
-                }
-                debug!("Always-selected {} commands", always_cmds.len());
-            }
-            Err(e) => {
-                error!("Always selection failed: {e}");
-            }
+        let (always_cmds, _) = AlwaysSelector::split_active_commands(commands);
+        for cmd in &always_cmds {
+            self.selected.insert(cmd.id.clone());
         }
+        debug!("Always-selected {} commands", always_cmds.len());
         self.collapse_inactive_groups();
         self.rebuild_visible_nodes();
     }
@@ -402,8 +396,18 @@ impl App {
         let event_tx = self.event_tx.clone();
 
         self.git_selection_handle = Some(tokio::task::spawn_blocking(move || {
-            let result = get_selected_commands(commands).map_err(|e| e.to_string());
-            let _ = event_tx.blocking_send(AppEvent::GitSelectionComplete(generation, result));
+            let refs: Vec<&Command> = commands.iter().collect();
+            let output = selectors::select(&refs, &SelectOptions::default());
+            for issue in &output.issues {
+                warn!("{issue}");
+            }
+            let selected = commands
+                .iter()
+                .filter(|c| output.contains(&c.id))
+                .cloned()
+                .collect();
+            let _ =
+                event_tx.blocking_send(AppEvent::GitSelectionComplete(generation, Ok(selected)));
         }));
     }
 
