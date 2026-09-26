@@ -92,6 +92,20 @@ pub enum AppEvent {
         text: String,
         level: StatusLevel,
     },
+    /// A clipboard program finished copying `lines` lines. On failure, `fallback` holds the
+    /// text to copy with OSC 52 instead.
+    ClipboardResult {
+        lines: usize,
+        result: Result<&'static str, String>,
+        fallback: Option<String>,
+    },
+}
+
+/// Output for the terminal fnug runs in, written after the next draw
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outbound {
+    /// Put the text on the clipboard with OSC 52
+    Clipboard(String),
 }
 
 /// Which pane currently has keyboard focus
@@ -280,6 +294,8 @@ pub struct App {
     pub(super) output_notify: Arc<Notify>,
     /// Whether the help overlay is shown
     pub show_help: bool,
+    /// Written to the terminal after the next draw; see [`take_outbox`](Self::take_outbox)
+    pub(super) outbox: Vec<Outbound>,
 }
 
 /// Collect all group IDs in the tree (including root).
@@ -368,6 +384,7 @@ impl App {
             batch_run_ids: None,
             output_notify: Arc::new(Notify::new()),
             show_help: false,
+            outbox: Vec::new(),
         };
         app.rebuild_visible_nodes();
         app
@@ -624,8 +641,18 @@ impl App {
                 return self.logs_on_screen() || badge_changed;
             }
             AppEvent::Status { text, level } => self.set_status(text, level),
+            AppEvent::ClipboardResult {
+                lines,
+                result,
+                fallback,
+            } => self.finish_copy(lines, result, fallback),
         }
         true
+    }
+
+    /// What to write to the terminal fnug runs in, oldest first; call after each draw.
+    pub fn take_outbox(&mut self) -> Vec<Outbound> {
+        std::mem::take(&mut self.outbox)
     }
 
     /// Show `text` in the toolbar for a few seconds, replacing any earlier message.
@@ -1288,6 +1315,41 @@ mod tests {
         };
         assert!(app.handle_app_event(event));
         assert_eq!(app.status.as_ref().unwrap().text, "watch limit");
+    }
+
+    #[test]
+    fn copy_reports_what_happened() {
+        let mut app = App::new(make_test_tree(), PathBuf::new(), LogBuffer::new());
+        app.copy_command_output("fmt");
+        assert!(app.status.as_ref().unwrap().text.contains("hasn't run"));
+
+        app.handle_app_event(AppEvent::ClipboardResult {
+            lines: 1,
+            result: Ok("wl-copy"),
+            fallback: Some("x".into()),
+        });
+        assert_eq!(app.status.as_ref().unwrap().text, "Copied 1 line");
+        assert!(app.take_outbox().is_empty());
+
+        app.handle_app_event(AppEvent::ClipboardResult {
+            lines: 200,
+            result: Err("no clipboard program found".into()),
+            fallback: Some("text".into()),
+        });
+        assert_eq!(
+            app.status.as_ref().unwrap().text,
+            "Copied 200 lines via OSC 52"
+        );
+        assert_eq!(app.take_outbox(), [Outbound::Clipboard("text".into())]);
+
+        app.handle_app_event(AppEvent::ClipboardResult {
+            lines: 2,
+            result: Err("xclip: exited with 1".into()),
+            fallback: None,
+        });
+        let status = app.status.as_ref().unwrap();
+        assert_eq!(status.text, "Copy failed: xclip: exited with 1");
+        assert_eq!(status.level, StatusLevel::Error);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -18,7 +19,7 @@ use fnug::check::CheckResult;
 use fnug::commands::group::CommandGroup;
 use fnug::logger::LoggerHandle;
 use fnug::selectors::watch::{WatchError, WatchReport, watch_commands};
-use fnug::tui::app::{App, AppEvent};
+use fnug::tui::app::{App, AppEvent, Outbound};
 use fnug::tui::status::{StatusLevel, watch_problems};
 
 /// Start a file watcher that forwards watch events to the app event channel.
@@ -208,6 +209,20 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     terminal.show_cursor()
 }
 
+/// Write what the app queued for the terminal, such as an OSC 52 copy.
+fn flush_outbox(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
+    for outbound in app.take_outbox() {
+        match outbound {
+            Outbound::Clipboard(text) => {
+                let copy = CopyToClipboard::to_clipboard_from(text);
+                if let Err(e) = execute!(terminal.backend_mut(), copy) {
+                    warn!("Failed to copy with OSC 52: {e}");
+                }
+            }
+        }
+    }
+}
+
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -242,6 +257,7 @@ async fn run_event_loop(
             next_frame = Instant::now() + FRAME;
             // Whatever changed the pane: a window resize, fullscreen, or the divider
             app.sync_pty_size(terminal_area);
+            flush_outbox(terminal, app);
         }
 
         if app.should_quit {

@@ -570,3 +570,7 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 - **Drag** the separator between tree and terminal to resize
 - **Scroll wheel** in the terminal panel to scroll output
 - **Right-click** a command for a context menu with run/stop/clear options
+
+### Copying output
+
+`c` copies the command's whole output, scrollback included, without the lines fnug adds before and after it. fnug uses `pbcopy` on macOS and `wl-copy`, `xclip` or `xsel` on Linux, and falls back to OSC 52, an escape sequence that asks the terminal fnug runs in to set the clipboard. Over SSH, OSC 52 comes first, so the text lands on your machine rather than the server. Inside tmux, OSC 52 needs `set -g set-clipboard on`. Output over 1 MiB is cut to its last 1 MiB. Some terminals limit the size of an OSC 52 copy and silently drop a larger one, and fnug can't tell when that happens.

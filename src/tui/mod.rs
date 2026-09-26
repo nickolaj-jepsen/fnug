@@ -1,4 +1,5 @@
 pub mod app;
+pub mod clipboard;
 pub(crate) mod context_menu;
 mod cursor;
 pub(crate) mod event;
