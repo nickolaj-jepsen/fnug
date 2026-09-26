@@ -315,13 +315,13 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
-    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
     use crate::logger::LogEntry;
     use crate::tui::app::App;
     use crate::tui::log_state::LogBuffer;
-    use crate::tui::test_util::{command, draw, group, press, type_text};
+    use crate::tui::test_util::{command, cursor_node, draw, group, press, type_text};
 
     /// `root` holding commands `c01` to `c{count}`
     fn long_list(count: usize) -> App {
@@ -367,6 +367,43 @@ mod tests {
         assert_eq!(app.tree_scroll, 41 - height, "scrolled past the last row");
         let (rows, _) = draw(&mut app, 80, 12);
         assert!(rows[height - 1].starts_with("└─○ c40"), "{rows:?}");
+    }
+
+    #[test]
+    fn tree_scroll_clamped_under_search_bar() {
+        let mut app = long_list(40);
+        type_text(&mut app, "/c");
+        let (_, areas) = draw(&mut app, 80, 12);
+
+        for _ in 0..20 {
+            wheel(&mut app, MouseEventKind::ScrollDown, areas.0, areas);
+        }
+        let (rows, _) = draw(&mut app, 80, 12);
+
+        // The search bar takes the first of the tree's rows
+        let last = usize::from(areas.0.height) - 1;
+        assert!(rows[last].starts_with("└─○ c40"), "{rows:?}");
+    }
+
+    #[test]
+    fn click_under_search_bar_hits_the_row_shown() {
+        let mut app = long_list(5);
+        type_text(&mut app, "/c");
+        let (rows, areas) = draw(&mut app, 80, 12);
+        assert!(rows[2].starts_with("├─○ c01"), "{rows:?}");
+
+        let click = |row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(click(2), areas.0, areas.1);
+        assert_eq!(cursor_node(&app), Some("c01"));
+
+        // The search bar itself holds no node
+        app.handle_mouse(click(0), areas.0, areas.1);
+        assert_eq!(cursor_node(&app), Some("c01"));
     }
 
     #[test]
