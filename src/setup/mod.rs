@@ -304,13 +304,18 @@ fn path_arg(path: &Path, base: &Path) -> PathBuf {
     }
 }
 
-/// Find the hooks and editor configs, printing why any of them can't be set up.
+/// Find the hooks and editor configs, logging why any of them can't be set up.
 fn detect(
     cwd: &Path,
     config_dir: &Path,
     config: Option<&LoadedConfig>,
     load: &LoadOptions,
 ) -> Detected {
+    if config.is_none() {
+        log::warn!(
+            "no fnug config loaded. The pre-commit hook and the MCP server run the commands in one, so add a .fnug.yaml before relying on them."
+        );
+    }
     let fallback_exe = std::env::current_exe().ok();
     let repo_hook = |name: String, dir: &Path, opts: InstallOptions| match hooks::resolve(dir) {
         Ok(target) => Some(RepoHook {
@@ -320,10 +325,7 @@ fn detect(
             opts,
         }),
         Err(e) => {
-            println!(
-                "warning: can't set up a git hook for {}: {e}",
-                dir.display()
-            );
+            log::warn!("can't set up a git hook for {}: {e}", dir.display());
             None
         }
     };
@@ -348,7 +350,7 @@ fn detect(
         .filter_map(|editor| match editor.status(cwd) {
             Ok(installed) => Some((editor, installed)),
             Err(e) => {
-                println!("warning: leaving {editor}'s MCP config alone: {e}");
+                log::warn!("leaving {editor}'s MCP config alone: {e}");
                 None
             }
         })
@@ -450,11 +452,6 @@ pub fn run(
 ) -> Result<(), SetupError> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(SetupError::NotInteractive);
-    }
-    if config.is_none() {
-        println!(
-            "warning: no fnug config loaded. The pre-commit hook and the MCP server run the commands in one, so add a .fnug.yaml before relying on them."
-        );
     }
 
     // The hook runs fnug from the config's directory, so it finds the config there
@@ -629,6 +626,61 @@ mod tests {
             Err(SetupError::Mcp(mcp::McpError::Parse { .. }))
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    /// Every warning logged by this test binary so far.
+    fn logged_warnings() -> &'static std::sync::Mutex<Vec<String>> {
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, metadata: &log::Metadata) -> bool {
+                metadata.level() <= log::Level::Warn
+            }
+            fn log(&self, record: &log::Record) {
+                if self.enabled(record.metadata()) {
+                    // A failed assert holding the lock mustn't fail every later test that logs
+                    WARNINGS
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(record.args().to_string());
+                }
+            }
+            fn flush(&self) {}
+        }
+        static WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            log::set_logger(&Capture).unwrap();
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        &WARNINGS
+    }
+
+    #[test]
+    fn detect_logs_what_it_cant_set_up() {
+        let warnings = logged_warnings();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(Editor::ClaudeCode.config_path(dir.path()), "{ not json").unwrap();
+
+        let detected = detect(dir.path(), dir.path(), None, &LoadOptions::default());
+
+        assert!(detected.root_hook.is_none());
+        let shown = dir.path().display().to_string();
+        let warnings = warnings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let logged = |text: &str| warnings.iter().any(|w| w.contains(text));
+        assert!(logged("no fnug config loaded"), "{warnings:?}");
+        assert!(
+            logged(&format!("can't set up a git hook for {shown}")),
+            "{warnings:?}"
+        );
+        assert!(
+            logged(&format!(
+                "leaving Claude Code's MCP config alone: failed to parse {shown}"
+            )),
+            "{warnings:?}"
+        );
     }
 
     #[test]
