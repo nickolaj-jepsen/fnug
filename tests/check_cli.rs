@@ -643,3 +643,141 @@ fn config_error_exits_2() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }
+
+/// Names of the commands a check ran, from their `PASS` and `FAIL` lines, in order.
+fn ran(output: &Output) -> Vec<String> {
+    stderr(output)
+        .lines()
+        .filter_map(|line| {
+            let rest = line.split_once("] ")?.1;
+            let end = rest.find(" PASS").or_else(|| rest.find(" FAIL"))?;
+            Some(rest[..end].to_string())
+        })
+        .collect()
+}
+
+/// A git repo in `dir` with `config` and `src/a.rs` committed, so the work tree is clean.
+fn clean_repo(dir: &Path, config: &str) -> git2::Repository {
+    let repo = git2::Repository::init(dir).unwrap();
+    common::write_config(dir, config);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+    common::commit_all(&repo);
+    repo
+}
+
+const SELECTION: &str = r"
+name: root
+commands:
+  - name: lint
+    cmd: 'true'
+    auto:
+      git: true
+      path: [src]
+  - name: slow
+    cmd: 'true'
+    auto:
+      git: true
+      path: [src]
+      check: false
+  - name: build
+    cmd: 'true'
+  - name: test
+    cmd: 'true'
+    depends_on: [build]
+";
+
+#[test]
+fn all_runs_every_command_on_clean_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    clean_repo(dir.path(), SELECTION);
+
+    let output = check(dir.path(), &["--all"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        ran(&output),
+        ["lint", "build", "test"],
+        "{}",
+        stderr(&output)
+    );
+
+    let output = check(dir.path(), &["--all", "--include-manual"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        ran(&output),
+        ["lint", "slow", "build", "test"],
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn include_manual_keeps_old_all() {
+    let dir = tempfile::tempdir().unwrap();
+    clean_repo(dir.path(), SELECTION);
+    std::fs::write(dir.path().join("src/a.rs"), "fn a() { }\n").unwrap();
+
+    let output = check(dir.path(), &[]);
+    assert_eq!(ran(&output), ["lint"], "{}", stderr(&output));
+    let output = check(dir.path(), &["--include-manual"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["lint", "slow"], "{}", stderr(&output));
+}
+
+#[test]
+fn targets_run_with_deps() {
+    let dir = tempfile::tempdir().unwrap();
+    clean_repo(dir.path(), SELECTION);
+
+    let output = check(dir.path(), &["test"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["build", "test"], "{}", stderr(&output));
+
+    // By name, case-insensitively, and even with `check: false`
+    let output = check(dir.path(), &["SLOW", "lint"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["lint", "slow"], "{}", stderr(&output));
+
+    for conflicting in [&["test", "--all"][..], &["test", "--include-manual"]] {
+        let output = check(dir.path(), conflicting);
+        assert_eq!(output.status.code(), Some(2), "{conflicting:?}");
+        assert!(
+            stderr(&output).contains("cannot be used with"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn ambiguous_target_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: test
+        cmd: 'echo RAN'
+  - name: frontend
+    commands:
+      - name: test
+        cmd: 'echo RAN'
+",
+    );
+    let output = check(dir.path(), &["test"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("backend/test"), "{err}");
+    assert!(err.contains("frontend/test"), "{err}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("RAN"));
+
+    let output = check(dir.path(), &["tset"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("backend/test"), "{output:?}");
+
+    let output = check(dir.path(), &["backend/test"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["test"], "{}", stderr(&output));
+}

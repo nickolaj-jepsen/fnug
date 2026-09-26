@@ -92,7 +92,8 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--fail-fast`     | Stop on first failure (`check` only)                            |
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
 | `--mute-success`  | Capture each command's output and print it only if it fails (`check` only) |
-| `--all`           | Include commands with `auto.check: false` (`check` only)        |
+| `--all`           | Run every command instead of the ones changes select (`check` only) |
+| `--include-manual` | Also run commands with `auto.check: false` (`check` only)      |
 | `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
 | `-j`, `--jobs <n>` | Run up to `<n>` commands at once, each after its dependencies; `0` means one per CPU (default `1`, `check` only) |
 | `-V`, `--version` | Print fnug's version                                            |
@@ -189,7 +190,7 @@ commands:
 
 ### Excluding commands from check mode
 
-Commands with `auto.check: false` are skipped during `fnug check`, git hooks and the MCP `run_lints`/`run_all` tools, but remain auto-selected in the TUI. Use `fnug check --all` to include them, or MCP `run_lint` to run one by name.
+Commands with `auto.check: false` are skipped during `fnug check`, git hooks and the MCP `run_lints`/`run_all` tools, but remain auto-selected in the TUI. Use `fnug check --include-manual` to include them, name them (`fnug check "integration tests"`), or use MCP `run_lint` to run one by name.
 
 Useful for commands that are too slow or noisy for pre-commit checks but you still want to run them automatically in the TUI.
 
