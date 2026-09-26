@@ -97,6 +97,18 @@ def test_integration_git_selection_from_caller_repo(git_repo, monkeypatch, capfd
     assert str(git_repo) in output.out + output.err
 
 
+def test_integration_default_fnug_version_is_the_binarys(real_fnug):
+    default = Config(name="demo").fnug_version
+    if default is None:
+        pytest.skip("the fnug package is not installed")
+
+    result = subprocess.run(
+        [real_fnug, "--version"], check=True, capture_output=True, text=True
+    )
+
+    assert result.stdout.split() == ["fnug", default]
+
+
 @pytest.mark.usefixtures("real_fnug")
 def test_integration_config_keys_are_accepted(tmp_path, monkeypatch, capfd):
     monkeypatch.chdir(tmp_path)

@@ -8,9 +8,57 @@ inherited value.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import re
+from dataclasses import asdict, dataclass, field
+from importlib import metadata
 from pathlib import Path
 from typing import Any
+
+# A normalized PEP 440 version without an epoch.
+_PEP440 = re.compile(
+    r"(?P<release>\d+(?:\.\d+)*)"
+    r"(?:(?P<pre>a|b|rc)(?P<pre_n>\d+))?"
+    r"(?:\.post(?P<post>\d+))?"
+    r"(?:\.dev(?P<dev>\d+))?"
+    r"(?:\+(?P<local>[a-z0-9.]+))?"
+)
+_PRE_RELEASES = {"a": "alpha", "b": "beta", "rc": "rc"}
+
+
+def semver_from_pep440(version: str) -> str:
+    """Convert a normalized PEP 440 version to the Cargo version it was built from.
+
+    This undoes maturin's conversion: ``0.1.0a13`` becomes ``0.1.0-alpha.13``,
+    ``b``/``rc``/``.post``/``.dev`` parts become ``-beta.N``/``-rc.N``/``-post.N``/
+    ``-dev.N``, and a local version becomes build metadata. A release with fewer than
+    three numbers is padded with zeros. Anything else, such as a version with an epoch,
+    is returned unchanged.
+    """
+    match = _PEP440.fullmatch(version)
+    if match is None:
+        return version
+    release = match["release"].split(".")
+    release += ["0"] * (3 - len(release))
+    pre: list[str] = []
+    if match["pre"]:
+        pre += [_PRE_RELEASES[match["pre"]], match["pre_n"]]
+    for part in ("post", "dev"):
+        if match[part]:
+            pre += [part, match[part]]
+    result = ".".join(release)
+    if pre:
+        result += "-" + ".".join(pre)
+    if match["local"]:
+        result += "+" + match["local"]
+    return result
+
+
+def _package_fnug_version() -> str | None:
+    """The installed fnug package's version as fnug reports it, or None without one."""
+    try:
+        return semver_from_pep440(metadata.version("fnug"))
+    except metadata.PackageNotFoundError:
+        return None
 
 
 def _strip_none(obj: Any) -> Any:  # noqa: ANN401
@@ -99,13 +147,15 @@ class Config:
     """Root configuration for a .fnug.yaml file: the root group plus file settings.
 
     ``schema`` is written as the ``$schema`` key, which editors use and fnug ignores.
-    With ``workspace``, the ids of each package's commands and groups are prefixed with
-    the package's id, such as ``api/build``.
+    ``fnug_version`` defaults to the installed fnug package's version, in the form the
+    binary reports (``0.1.0a13`` becomes ``0.1.0-alpha.13``), and is left out when the
+    package isn't installed. With ``workspace``, the ids of each package's commands and
+    groups are prefixed with the package's id, such as ``api/build``.
     """
 
     schema: str | None = None
     name: str
-    fnug_version: str = "0.1.0"
+    fnug_version: str | None = field(default_factory=_package_fnug_version)
     id: str | None = None
     auto: Auto | None = None
     cwd: str | None = None
