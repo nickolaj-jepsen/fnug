@@ -24,7 +24,9 @@ use super::process::{GroupGuard, ShellInvocation, new_session, shell_invocation}
 use super::report::{CommandReport, Failure, Outcome, RunReport};
 use crate::process::{ExitInfo, ProcessHandle, SignalScope, StopSignal};
 
-/// How long a command gets to exit after `SIGTERM` before it is killed.
+/// How long a stopped command gets to exit after its stop signal (`SIGINT`, `SIGTERM` or
+/// `SIGHUP`) before `SIGKILL`, and a command that got the terminal's Ctrl+C gets before
+/// `SIGTERM`.
 pub const KILL_GRACE: Duration = Duration::from_secs(3);
 
 /// How long to keep reading output after the shell exits, for background processes still

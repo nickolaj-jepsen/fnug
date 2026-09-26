@@ -10,10 +10,10 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 
 ## Features
 
-- **Git integration** — automatically select commands based on uncommitted file changes
+- **Git integration** — automatically select commands based on uncommitted, staged or branch changes
 - **File watching** — monitor the file system and re-select commands when files change
 - **Terminal emulation with scrollback** — full PTY support for interactive commands and long output
-- **Headless mode** (`fnug check`) — run selected commands without the TUI, useful for CI
+- **Headless mode** (`fnug check`) — run selected commands without the TUI, in a pre-commit hook or in CI
 - **Setup wizard** (`fnug setup`) — install a pre-commit hook that runs `fnug check` and add the MCP server to your editor
 - **Command dependencies** — define `depends_on` to control execution order
 - **Environment variables** — set per-command or per-group env vars
@@ -75,7 +75,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | Command       | Description                                                     |
 | ------------- | --------------------------------------------------------------- |
 | `fnug`        | Launch the TUI                                                  |
-| `fnug check`  | Run selected commands headlessly (exit code reflects pass/fail) |
+| `fnug check`  | Run selected commands headlessly; see [What `fnug check` runs](#what-fnug-check-runs) |
 | `fnug setup`  | Interactive wizard: git pre-commit hook and editor MCP config   |
 | `fnug mcp`    | Run an MCP server over stdio                                    |
 | `fnug schema` | Print the config file's JSON Schema                             |
@@ -108,13 +108,59 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 
 Captured commands, from `--mute-success`, `--jobs` above 1, the pre-commit hook or an MCP run, have no terminal. Their stdin is `/dev/null`, and each runs in a session of its own, so opening `/dev/tty`, as password and host-key prompts do, fails at once instead of waiting for input that never comes. When a captured command's shell exits, fnug stops whatever the command left running in its process group, since such a process would keep the output pipe open; start a process that should keep running in a session of its own, for example with `setsid`. Captured output keeps the first 256 KiB and the last 1 MiB of what a command writes, with `… N bytes omitted …` in between.
 
-When none of fnug's stdin, stdout and stderr is a terminal, as in CI or behind a pipe, streamed commands run in a session of their own too, and fnug stops what they leave running in the same way. From a terminal, a streamed command stays in fnug's process group so it can use the terminal, and fnug signals only the command's own process: a process it started, such as a test binary under `cargo test`, can outlive a timeout or a signal and keep writing to the terminal. Use `--mute-success` or `--jobs` for timeouts that stop the whole process tree.
+When none of fnug's stdin, stdout and stderr is a terminal, as in CI, streamed commands run in a session of their own too, and fnug stops what they leave running in the same way. A pipe on stdout alone isn't enough: `fnug check | tee check.log` from a shell keeps the terminal on stdin and stderr. From a terminal, a streamed command stays in fnug's process group so it can use the terminal, and fnug signals only the command's own process: a process it started, such as a test binary under `cargo test`, can outlive a timeout or a signal and keep writing to the terminal. Use `--mute-success` or `--jobs` for timeouts that stop the whole process tree.
 
 On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands, prints the summary so far, marked `Interrupted.`, and exits with 128 plus the signal number. On Ctrl+C (SIGINT), a command that shares fnug's terminal has already got the terminal's SIGINT, so fnug gives it 3 s to finish before sending SIGTERM, while a command in a session of its own gets SIGINT from fnug. On SIGTERM or SIGHUP, commands get the same signal. A timeout, `--fail-fast` and an MCP client's cancellation send SIGTERM. Whichever signal a command gets, it gets SIGKILL if it is still running 3 s later. Signals reach the whole process group of a command in a session of its own, but only the process of a command that shares fnug's terminal.
 
+### What `fnug check` runs
+
+By default, `fnug check` runs the `always` commands and the commands whose `auto` rules match an uncommitted change (staged, unstaged or untracked), each after its `depends_on`. Other ways to choose:
+
+| Invocation                      | Runs                                                           |
+| ------------------------------- | -------------------------------------------------------------- |
+| `fnug check --staged`           | Commands the staged changes select. In a pre-commit hook, those are the changes being committed, also with `git commit -a` and `git commit <path>` |
+| `fnug check --base origin/main` | Commands the changes since the merge base of `HEAD` and `origin/main` select: the branch's commits plus uncommitted changes |
+| `fnug check --all`              | Every command                                                  |
+| `fnug check lint "unit tests"`  | The named commands, by id or name                              |
+
+Commands with `auto.check: false` are left out unless you add `--include-manual` or name them. When nothing is selected, fnug says so and exits with 0, so a commit that only touches docs still passes: `No commands selected (12 configured; use --all, --base <ref>, or name commands)`.
+
+| Exit code | Meaning                                                              |
+| --------- | -------------------------------------------------------------------- |
+| 0         | Every command passed, or none was selected                           |
+| 1         | A command failed, timed out or changed tracked files, or was skipped or not run |
+| 2         | fnug couldn't do its job: a usage error, a config that doesn't load, an unknown or ambiguous name, a `--base` that doesn't resolve, `--staged` outside a git repository, or unstaged changes it couldn't set aside or put back |
+| 128+n     | Stopped by signal n                                                  |
+
+A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects nothing there. In a pull request, compare with the target branch; elsewhere, run everything. `--base` needs the merge base in the clone, so fetch the whole history:
+
+```yaml
+- uses: actions/checkout@v5
+  with:
+    fetch-depth: 0
+- if: github.event_name == 'pull_request'
+  run: fnug check --base "origin/${GITHUB_BASE_REF:-main}"
+- if: github.event_name != 'pull_request'
+  run: fnug check --all
+```
+
+If the checkout belongs to another user than the one running fnug, as in some containers, see [Trusted configs](#trusted-configs).
+
+`fnug check` fails a command that exits with 0 but changes tracked files, and prints `FAIL (modified: src/a.rs — review and re-stage)`. Otherwise a formatter that rewrites files would pass while the commit keeps the unformatted version. Run the checking form in check mode (`cargo fmt --check`, `ruff format --check`), give fixers `auto.check: false` so only the TUI runs them, or pass `--allow-modifications`. New untracked files and ignored files don't count. With `--jobs` above 1, a change counts against every command that was running when it happened; the run fails either way. The TUI and the MCP server let commands change files.
+
+### Checking what is committed
+
+`--staged` decides which commands run, but they still see the work tree, with edits you haven't staged. Add `--stash` to check exactly what is staged: fnug saves the unstaged changes to tracked files as a patch in the git directory, checks the tracked files out from the index, and applies the patch again once the commands have exited. The pre-commit hook that `fnug setup` installs runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`.
+
+- Untracked files stay where they are, and files added with `git add -N` stay intent-to-add.
+- It covers the whole repository that contains the config's directory (or `--root`), even when the hook runs from a subdirectory. In a workspace, other repositories, such as submodules, aren't touched.
+- When a command changed a file that also has unstaged changes, as a formatter can, fnug discards the command's changes to that file to put yours back, and says so. Its changes to other files stay. The command has already failed for changing files.
+- fnug deletes the patch once the files it changes hold exactly your changes again. Otherwise it keeps the patch and prints its path.
+- A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that repository puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Only one such run works on a repository at a time; another one exits with 2.
+
 ### Setup
 
-`fnug setup` installs a git pre-commit hook that runs `fnug check`, and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it.
+`fnug setup` installs a git pre-commit hook that runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`, which checks what is being committed (see [Checking what is committed](#checking-what-is-committed)), and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it.
 
 The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead. A `pre-commit` that is a symlink counts as the file it links to: setup edits that file, shows it in the list of changes, and prints the lines instead if it is outside the repository.
 
@@ -194,7 +240,7 @@ commands:
 
 ### Excluding commands from check mode
 
-Commands with `auto.check: false` are skipped during `fnug check`, git hooks and the MCP `run_lints`/`run_all` tools, but remain auto-selected in the TUI. Use `fnug check --include-manual` to include them, name them (`fnug check "integration tests"`), or use MCP `run_lint` to run one by name.
+Commands with `auto.check: false` are skipped during `fnug check`, including `fnug check --all`, git hooks and the MCP `run_lints`/`run_all` tools, but remain auto-selected in the TUI. Use `fnug check --include-manual` to include them, name them (`fnug check "integration tests"`), or use MCP `run_lint` to run one by name. A command that another command depends on runs with it either way.
 
 Useful for commands that are too slow or noisy for pre-commit checks but you still want to run them automatically in the TUI.
 
@@ -274,6 +320,24 @@ commands:
     env:
       ESLINT_CACHE: "${HOME}/.cache/eslint"
 ```
+
+### Matched files
+
+A command that `fnug check` or MCP `run_lints` selects through `auto.git` gets the changed files that selected it in `FNUG_FILES`, one per line, relative to its `cwd` when they are inside it (with `./` in front of a path that starts with `-`) and absolute otherwise. Files that no longer exist are left out. `{files}` in `cmd` becomes the same list, each path in single quotes for the shell:
+
+```yaml
+fnug_version: 0.1.0
+name: my-project
+commands:
+  - name: ruff
+    cmd: ruff check {files}
+    auto:
+      git: true
+      path: ["./python"]
+      regex: ["\\.py$"]
+```
+
+A command without such a list gets no `FNUG_FILES`, and `{files}` becomes its `auto.path` entries (`.` for its own `cwd`, or when it has none), so it checks everything it covers. That happens when you name it or pass `--all`, when it runs only as another command's dependency, when it has no `auto.git`, when all its matched files were deleted, and, with a warning, when the list is longer than 100 KiB. The TUI doesn't pass file lists yet.
 
 ### Ids and dependencies
 
