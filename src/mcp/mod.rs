@@ -1,3 +1,8 @@
+//! The MCP server: `list_lints`, `run_lints`, `run_lint` and `run_all` over stdio.
+
+mod params;
+mod response;
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,152 +13,22 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router, transport::stdio};
-use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::runner::{
-    self, CaptureLimits, CommandReport, ExecOptions, Failure, NoHook, Outcome, OutputMode,
-    PlanError, PlanOptions, RunReport, Selection, commands_with_group_path,
+    self, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions, Selection,
+    commands_with_group_path,
 };
 use crate::selectors::{self, SelectOptions};
 
+use params::{FailFastParams, ListLintsParams, RunLintParams};
+use response::{AutoRules, LintInfo, RunResult};
+
 /// How long shutdown waits for running commands to stop.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
-
-// ---------------------------------------------------------------------------
-// Parameter structs
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct ListLintsParams {
-    /// Filter by group name (case-insensitive substring match). Groups organize
-    /// commands hierarchically, e.g. "tests", "lints".
-    #[schemars(default)]
-    group: Option<String>,
-    /// Filter by auto-selection type: "git" (selected by changed files), "watch"
-    /// (selected by file watcher), "always" (always runs), or "none" (manual only).
-    #[schemars(default)]
-    auto_type: Option<String>,
-    /// Filter by command name or id (case-insensitive substring match).
-    #[schemars(default)]
-    name: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct FailFastParams {
-    /// Stop on first failure instead of running all commands. Useful for quick
-    /// feedback when you expect failures.
-    #[schemars(default)]
-    fail_fast: Option<bool>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct RunLintParams {
-    /// The command name or id to run. Use `list_lints` to discover available
-    /// commands. Matches by exact id or case-insensitive name.
-    command: String,
-}
-
-// ---------------------------------------------------------------------------
-// Response structs
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct LintInfo {
-    id: String,
-    name: String,
-    cmd: String,
-    cwd: String,
-    auto_rules: AutoRules,
-    depends_on: Vec<String>,
-    group: String,
-    selected: bool,
-}
-
-#[derive(Serialize)]
-struct AutoRules {
-    git: Option<bool>,
-    watch: Option<bool>,
-    always: Option<bool>,
-    check: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct RunResult {
-    total: usize,
-    passed: usize,
-    failed: usize,
-    timed_out: usize,
-    skipped: usize,
-    cancelled: usize,
-    not_run: usize,
-    duration_ms: u128,
-    commands: Vec<CommandRunResult>,
-}
-
-#[derive(Serialize)]
-struct CommandRunResult {
-    name: String,
-    id: String,
-    /// `passed`, `failed`, `timeout`, `skipped`, `cancelled` or `not_run`.
-    status: &'static str,
-    exit_code: Option<i32>,
-    duration_ms: u128,
-    /// stdout and stderr, merged in the order they were written.
-    output: String,
-}
-
-impl From<&RunReport> for RunResult {
-    fn from(report: &RunReport) -> Self {
-        let counts = report.counts();
-        Self {
-            total: counts.total,
-            passed: counts.passed,
-            failed: counts.failed,
-            timed_out: counts.timed_out,
-            skipped: counts.skipped,
-            cancelled: counts.cancelled,
-            not_run: counts.not_run,
-            duration_ms: report.duration.as_millis(),
-            commands: report.commands.iter().map(CommandRunResult::from).collect(),
-        }
-    }
-}
-
-impl From<&CommandReport> for CommandRunResult {
-    fn from(report: &CommandReport) -> Self {
-        let captured = report
-            .output
-            .as_ref()
-            .map(runner::CapturedOutput::text)
-            .unwrap_or_default();
-        let (status, exit_code, output) = match &report.outcome {
-            Outcome::Passed => ("passed", Some(0), captured),
-            Outcome::Failed(Failure::Exit(code)) => ("failed", Some(*code), captured),
-            Outcome::Failed(Failure::Spawn(message)) => ("failed", None, message.clone()),
-            Outcome::Failed(_) => ("failed", None, captured),
-            Outcome::TimedOut(_) => ("timeout", None, captured),
-            Outcome::Skipped { cause } => (
-                "skipped",
-                None,
-                format!("Skipped: dependency '{cause}' failed"),
-            ),
-            Outcome::Cancelled => ("cancelled", None, captured),
-            Outcome::NotRun => ("not_run", None, captured),
-        };
-        Self {
-            name: report.name.clone(),
-            id: report.id.clone(),
-            status,
-            exit_code,
-            duration_ms: report.duration.unwrap_or_default().as_millis(),
-            output,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Server
@@ -421,158 +296,4 @@ pub async fn run(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn server(yaml: &str) -> (FnugMcp, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".fnug.yaml");
-        std::fs::write(&path, yaml).unwrap();
-        let (config, cwd) = crate::load_config(path.to_str(), true).unwrap();
-        (FnugMcp::new(config, cwd), dir)
-    }
-
-    fn json(result: &CallToolResult) -> serde_json::Value {
-        let text = &result.content[0].as_text().unwrap().text;
-        serde_json::from_str(text).unwrap()
-    }
-
-    fn fail_fast(fail_fast: bool) -> Parameters<FailFastParams> {
-        Parameters(FailFastParams {
-            fail_fast: Some(fail_fast),
-        })
-    }
-
-    fn run_lint(command: &str) -> Parameters<RunLintParams> {
-        Parameters(RunLintParams {
-            command: command.to_string(),
-        })
-    }
-
-    #[tokio::test]
-    async fn run_all_skips_check_false_commands() {
-        let (server, _dir) = server(
-            r"
-name: root
-commands:
-  - name: lint
-    cmd: 'true'
-  - name: demo
-    cmd: exit 1
-    auto:
-      check: false
-",
-        );
-        let result = server
-            .run_all(fail_fast(false), CancellationToken::new())
-            .await
-            .unwrap();
-        let result = json(&result);
-        assert_eq!(result["commands"].as_array().unwrap().len(), 1);
-        assert_eq!(result["commands"][0]["name"], "lint");
-        assert_eq!(result["failed"], 0);
-    }
-
-    #[tokio::test]
-    async fn run_lint_ambiguous_name_is_error() {
-        let (server, _dir) = server(
-            r"
-name: root
-children:
-  - name: backend
-    commands:
-      - name: test
-        cmd: 'true'
-  - name: frontend
-    commands:
-      - name: test
-        cmd: 'true'
-",
-        );
-        let Err(err) = server
-            .run_lint(run_lint("test"), CancellationToken::new())
-            .await
-        else {
-            panic!("an ambiguous name ran a command");
-        };
-        assert!(err.message.contains("backend/test"), "{err:?}");
-        assert!(err.message.contains("frontend/test"), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn run_lint_reports_merged_output_and_exit_code() {
-        let (server, _dir) = server(
-            r"
-name: root
-commands:
-  - name: mixed
-    cmd: 'echo o1; echo e1 >&2; echo o2; exit 3'
-  - name: after
-    cmd: 'true'
-    depends_on: [mixed]
-",
-        );
-        let result = server
-            .run_lint(run_lint("after"), CancellationToken::new())
-            .await
-            .unwrap();
-        let result = json(&result);
-        let mixed = &result["commands"][0];
-        assert_eq!(mixed["status"], "failed");
-        assert_eq!(mixed["exit_code"], 3);
-        assert_eq!(mixed["output"], "o1\ne1\no2\n");
-        assert_eq!(result["commands"][1]["status"], "skipped");
-        assert_eq!(
-            (&result["failed"], &result["skipped"]),
-            (&1.into(), &1.into())
-        );
-    }
-
-    #[tokio::test]
-    async fn fail_fast_lists_not_run_commands() {
-        let (server, _dir) = server(
-            r"
-name: root
-commands:
-  - name: first
-    cmd: 'exit 1'
-  - name: second
-    cmd: 'true'
-",
-        );
-        let result = server
-            .run_all(fail_fast(true), CancellationToken::new())
-            .await
-            .unwrap();
-        let result = json(&result);
-        assert_eq!(result["total"], 2);
-        assert_eq!(result["not_run"], 1);
-        assert_eq!(result["commands"][1]["status"], "not_run");
-    }
-
-    #[tokio::test]
-    async fn cancelled_run_reports_cancelled() {
-        let (server, dir) = server(
-            r"
-name: root
-commands:
-  - name: hang
-    cmd: 'touch started; exec sleep 30'
-",
-        );
-        let ct = CancellationToken::new();
-        let started = dir.path().join("started");
-        let cancel = ct.clone();
-        tokio::task::spawn_blocking(move || {
-            assert!(crate::pty::test_util::wait_until(
-                Duration::from_secs(10),
-                || { started.exists() }
-            ));
-            cancel.cancel();
-        });
-        let result = server.run_lint(run_lint("hang"), ct).await.unwrap();
-        let result = json(&result);
-        assert_eq!(result["cancelled"], 1);
-        assert_eq!(result["commands"][0]["status"], "cancelled");
-    }
-}
+mod tests;
