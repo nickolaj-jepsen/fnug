@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use fnug::load_config;
 use fnug::selectors::watch::{WatchError, watch_commands};
 use fnug::selectors::{
-    GitScope, IndexOverride, SelectOptions, SelectedBy, SelectionIssue, SelectorOutput,
-    get_selected_commands, select,
+    GitScope, IndexOverride, SelectOptions, SelectedBy, SelectionIssue, SelectorOutput, select,
 };
 use git2::{IndexAddOption, Repository, RepositoryInitOptions, RepositoryOpenFlags, Signature};
 
@@ -205,16 +204,6 @@ commands:
         "{:?}",
         output.issues
     );
-
-    // The compatibility wrapper logs the issue instead of failing.
-    let (loaded, _) = load_config(Some(config.to_str().unwrap()), true).unwrap();
-    let commands = loaded.all_commands().into_iter().cloned().collect();
-    let names: Vec<String> = get_selected_commands(commands)
-        .unwrap()
-        .into_iter()
-        .map(|c| c.name)
-        .collect();
-    assert_eq!(names, ["always"]);
 }
 
 #[test]

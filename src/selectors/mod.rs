@@ -1,11 +1,9 @@
-use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 
-use log::{debug, warn};
+use log::debug;
 
 use crate::commands::command::Command;
-use thiserror::Error;
 
 pub(crate) mod always;
 mod git;
@@ -15,27 +13,9 @@ pub mod watch;
 
 pub use matching::{match_subject, relative_to};
 
-/// Errors that can occur during selector operations
-#[derive(Error, Debug)]
-pub enum SelectorError {
-    /// Indicates a general git operation error
-    #[error("Git operation failed: {0}")]
-    Git(#[from] git2::Error),
-
-    /// A spawned thread panicked during execution
-    #[error("Thread panicked during git scan")]
-    ThreadPanic,
-}
-
 pub trait RunnableSelector {
     /// Split commands into (active, inactive) based on this selector's criteria.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SelectorError` if the selection logic fails.
-    fn split_active_commands(
-        commands: Vec<Command>,
-    ) -> Result<(Vec<Command>, Vec<Command>), SelectorError>;
+    fn split_active_commands(commands: Vec<Command>) -> (Vec<Command>, Vec<Command>);
 }
 
 /// Which changes git selection looks at.
@@ -256,23 +236,4 @@ pub fn select(commands: &[&Command], opts: &SelectOptions) -> SelectorOutput {
         changed_files: git.changed_files,
         issues: git.issues,
     }
-}
-
-/// Runs [`select`] on the working tree and returns the selected commands. Issues are logged
-/// as warnings.
-///
-/// # Errors
-///
-/// Never; the `Result` is kept for compatibility.
-pub fn get_selected_commands(commands: Vec<Command>) -> Result<Vec<Command>, SelectorError> {
-    let refs: Vec<&Command> = commands.iter().collect();
-    let output = select(&refs, &SelectOptions::default());
-    for issue in &output.issues {
-        warn!("{issue}");
-    }
-    let ids: HashSet<&str> = output.ids().collect();
-    Ok(commands
-        .into_iter()
-        .filter(|c| ids.contains(c.id.as_str()))
-        .collect())
 }
