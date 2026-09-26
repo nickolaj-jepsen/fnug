@@ -3,7 +3,9 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use crossterm::clipboard::CopyToClipboard;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -199,6 +201,7 @@ async fn run_event_loop(
     let mut event_stream = EventStream::new();
     let mut tree_area = Rect::default();
     let mut terminal_area = Rect::default();
+    // Whether anything but the output of the terminal on screen changed since the last frame
     let mut needs_render = true;
     let mut next_frame = Instant::now();
     let output = app.output_notify();
@@ -208,10 +211,11 @@ async fn run_event_loop(
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        needs_render |= app.any_terminal_dirty();
-        if needs_render && Instant::now() >= next_frame {
+        let mut draw_due = needs_render || app.any_terminal_dirty();
+        if draw_due && Instant::now() >= next_frame {
             (tree_area, terminal_area) = draw_frame(terminal, app)?;
             needs_render = false;
+            draw_due = false;
             next_frame = Instant::now() + FRAME;
         }
 
@@ -221,7 +225,7 @@ async fn run_event_loop(
 
         // Wait for events
         tokio::select! {
-            () = tokio::time::sleep_until(next_frame), if needs_render => {}
+            () = tokio::time::sleep_until(next_frame), if draw_due => {}
             // Output for the terminal on screen; the loop's top checks which one got it
             () = output.notified() => {}
             _ = clock.tick(), if app.wants_tick() => {
@@ -235,14 +239,17 @@ async fn run_event_loop(
                         app.handle_key(key, terminal_area);
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
-                        // Clicks land on what is shown, so show what a key before it changed
-                        if needs_render {
+                        // A click must hit what is on screen, so first draw what an earlier key
+                        // or event changed; new output moves nothing, and moves wait for a frame
+                        let button =
+                            matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_));
+                        if needs_render && button {
                             (tree_area, terminal_area) = draw_frame(terminal, app)?;
                             needs_render = false;
                             next_frame = Instant::now() + FRAME;
                         }
                         // Only re-render for move events if hover state changed
-                        if matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
+                        if matches!(mouse.kind, MouseEventKind::Moved) {
                             let old_hover = app.mouse.hover_row;
                             let old_toolbar_hover = app.toolbar.hover;
                             let had_context_menu = app.context_menu.is_some();
