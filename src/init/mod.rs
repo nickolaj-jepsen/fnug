@@ -50,9 +50,13 @@ pub enum InitError {
 /// Where `fnug init` creates a config, and how.
 #[derive(Debug, Clone, Default)]
 pub struct InitOptions {
-    /// The project directory the config goes in.
+    /// The project directory: its tooling is detected, and the config goes in it unless `file`
+    /// is set.
     pub dir: PathBuf,
-    /// Replace the config fnug would load from `dir`, if it has one.
+    /// The config file to write instead, in JSON if it ends in `.json` and in YAML otherwise.
+    /// Its commands run from its own directory unless it is loaded with `dir` as `--root`.
+    pub file: Option<PathBuf>,
+    /// Replace the config fnug would load from `dir`, or `file`, if it exists.
     pub force: bool,
     /// Include every proposal without asking.
     pub yes: bool,
@@ -93,7 +97,16 @@ pub fn prepare(
     groups: Vec<ConfigCommandGroup>,
     ws: Option<WorkspaceConfig>,
 ) -> Result<NewConfig, InitError> {
-    let path = target(dir, force)?;
+    prepare_at(target(dir, force)?, dir, groups, ws)
+}
+
+/// The config at `path` for the project in `dir`, in JSON if `path` ends in `.json`.
+fn prepare_at(
+    path: PathBuf,
+    dir: &Path,
+    groups: Vec<ConfigCommandGroup>,
+    ws: Option<WorkspaceConfig>,
+) -> Result<NewConfig, InitError> {
     let name = project_name(dir);
     let content = if path.extension().is_some_and(|ext| ext == "json") {
         render::render_json(&name, groups, ws)?
@@ -108,6 +121,16 @@ fn target(dir: &Path, force: bool) -> Result<PathBuf, InitError> {
         Some(existing) if force => Ok(existing),
         Some(existing) => Err(InitError::Exists(existing)),
         None => Ok(dir.join(".fnug.yaml")),
+    }
+}
+
+/// Where `opts` puts the config for the project in `dir`: [`InitOptions::file`], or else the
+/// file [`target`] picks.
+fn target_for(opts: &InitOptions, dir: &Path) -> Result<PathBuf, InitError> {
+    match &opts.file {
+        Some(file) if file.exists() && !opts.force => Err(InitError::Exists(file.clone())),
+        Some(file) => Ok(file.clone()),
+        None => target(dir, opts.force),
     }
 }
 
@@ -145,8 +168,8 @@ pub fn prompt(proposals: &[Proposal]) -> Result<Vec<usize>, InitError> {
 ///
 /// # Errors
 ///
-/// Returns `InitError::Dir` if `opts.dir` isn't a directory, `InitError::Exists` if it has a
-/// config and `opts.force` is false (before calling `choose`), whatever `choose` returns, and
+/// Returns `InitError::Dir` if `opts.dir` isn't a directory, `InitError::Exists` if the config
+/// exists and `opts.force` is false (before calling `choose`), whatever `choose` returns, and
 /// `InitError::Write` if the config can't be written.
 pub fn run(
     opts: &InitOptions,
@@ -160,7 +183,7 @@ pub fn run(
     if !dir.is_dir() {
         return Err(dir_error(io::ErrorKind::NotADirectory.into()));
     }
-    target(&dir, opts.force)?;
+    target_for(opts, &dir)?;
 
     let proposals = detect(&dir);
     if proposals.is_empty() {
@@ -177,7 +200,8 @@ pub fn run(
         .filter(|(i, _)| chosen.contains(i))
         .map(|(_, proposal)| proposal.group)
         .collect();
-    let config = prepare(&dir, opts.force, groups, None)?;
+    // Again, in case a config appeared while `choose` asked
+    let config = prepare_at(target_for(opts, &dir)?, &dir, groups, None)?;
     config.write()?;
     Ok(config.path)
 }

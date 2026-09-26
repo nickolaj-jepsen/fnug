@@ -66,6 +66,10 @@ enum Commands {
     /// pdm when locked), Node (the package.json scripts format:check, lint, typecheck and test,
     /// run with the lockfile's package manager), Go (go.mod) and Nix (flake.nix, with alejandra,
     /// statix and deadnix when they are on PATH).
+    ///
+    /// Without DIR, the config goes in --root, or else in the directory of the file -c names. -c
+    /// names the file to write; its commands run from its directory unless it is loaded with
+    /// --root. --no-workspace has no effect.
     Init(init::InitArgs),
     /// Start an MCP server over stdio
     Mcp,
@@ -76,6 +80,24 @@ enum Commands {
 /// Exit code for a fnug error, such as a bad config or an unknown target, as opposed to a failed
 /// check (1). clap exits with it on usage errors too.
 pub(crate) const ERROR_EXIT: u8 = 2;
+
+/// The directory fnug acts from: `load_opts.start_dir`, or else the working directory.
+pub(crate) fn start_dir(load_opts: &LoadOptions) -> std::io::Result<PathBuf> {
+    match &load_opts.start_dir {
+        Some(dir) => Ok(dir.clone()),
+        None => std::env::current_dir(),
+    }
+}
+
+/// Where a new config goes when nothing else says: `--root`, or else the directory fnug acts
+/// from. `fnug setup` without a config and `fnug init` without DIR agree on it.
+pub(crate) fn new_config_dir(load_opts: &LoadOptions) -> std::io::Result<PathBuf> {
+    let start = start_dir(load_opts)?;
+    Ok(load_opts
+        .root_dir
+        .as_ref()
+        .map_or_else(|| start.clone(), |root| start.join(root)))
+}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -132,7 +154,7 @@ async fn run(cli: Cli, logger: LoggerHandle) -> Result<ExitCode, Box<dyn std::er
         Some(Commands::Setup(ref args)) => return setup::run(args, &load_opts),
         // Loads the config on every tool call
         Some(Commands::Mcp) => return mcp::run(load_opts).await,
-        Some(Commands::Init(ref args)) => return init::run(args),
+        Some(Commands::Init(ref args)) => return init::run(args, &load_opts),
         // Commands that need one
         Some(Commands::Check(ref args)) => {
             let loaded = fnug::load(&load_opts)?;
