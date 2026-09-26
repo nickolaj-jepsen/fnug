@@ -8,11 +8,13 @@
 //! never used.
 //!
 //! A lock file in the git dir records the patch, so a run that was killed before it put the
-//! changes back is recovered by the next one.
+//! changes back is recovered by the next one. Only one run at a time recovers, holding
+//! `fnug-stash.recover` in the git dir locked.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -24,6 +26,7 @@ use thiserror::Error;
 
 const LOCK_NAME: &str = "fnug-stash.lock";
 const LOCK_MAGIC: &[u8] = b"fnug-stash-lock 1";
+const RECOVERY_LOCK_NAME: &str = "fnug-stash.recover";
 
 #[derive(Debug, Error)]
 pub enum StashError {
@@ -157,13 +160,20 @@ pub fn stash(cwd: &Path) -> Result<StashGuard, StashError> {
 pub fn recover(cwd: &Path) -> Result<Option<RestoreNote>, StashError> {
     let git = Git::locate(cwd)?;
     let lock = git.git_dir.join(LOCK_NAME);
+    if read_lock(&lock)?.is_none() {
+        return Ok(None);
+    }
+    let _recovery = RecoveryLock::take(&git.git_dir)?;
+    // Read again: another run may have recovered it while this one waited
     let Some(state) = read_lock(&lock)? else {
         return Ok(None);
     };
     if state.pid != std::process::id() && pid_alive(state.pid) {
         return Ok(None);
     }
-    recover_stale(&git, &lock, &state)
+    let note = recover_stale(&git, &lock, &state)?;
+    remove_file(&lock);
+    Ok(note)
 }
 
 /// The lock a stopped run left in the work tree containing `cwd`, if it still has unstaged
@@ -354,25 +364,28 @@ impl Drop for StashGuard {
 /// Take the lock at `lock`, recovering a stopped run's changes first. Returns what putting them
 /// back did, if it put any back.
 fn acquire(git: &Git, lock: &Path) -> Result<Option<RestoreNote>, StashError> {
-    let mut recovered = None;
-    // A second attempt after removing a stale lock; another run can take it in between
+    let ours = LockState {
+        pid: std::process::id(),
+        ..LockState::default()
+    };
+    let mut recovery = None;
+    // A second attempt after the lock went away; another run can take it in between
     for _ in 0..2 {
         match OpenOptions::new().write(true).create_new(true).open(lock) {
             Ok(mut file) => {
-                let state = LockState {
-                    pid: std::process::id(),
-                    ..LockState::default()
-                };
                 if let Err(e) = file
-                    .write_all(&encode_lock(&state))
+                    .write_all(&encode_lock(&ours))
                     .and_then(|()| file.sync_all())
                 {
                     remove_file(lock);
                     return Err(io_error(format!("failed to write {}", lock.display()), e));
                 }
-                return Ok(recovered);
+                return Ok(None);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if recovery.is_none() {
+                    recovery = Some(RecoveryLock::take(&git.git_dir)?);
+                }
                 let Some(state) = read_lock(lock)? else {
                     continue;
                 };
@@ -382,7 +395,10 @@ fn acquire(git: &Git, lock: &Path) -> Result<Option<RestoreNote>, StashError> {
                         lock: lock.to_path_buf(),
                     });
                 }
-                recovered = recover_stale(git, lock, &state)?.or(recovered);
+                let recovered = recover_stale(git, lock, &state)?;
+                // Replaced rather than removed, so no other run can take it in between
+                write_lock(lock, &ours)?;
+                return Ok(recovered);
             }
             Err(e) => {
                 return Err(io_error(format!("failed to create {}", lock.display()), e));
@@ -396,8 +412,36 @@ fn acquire(git: &Git, lock: &Path) -> Result<Option<RestoreNote>, StashError> {
     })
 }
 
-/// Put back the changes a stopped run recorded in `state`, and remove its lock. Returns what
-/// putting them back did, if they were set aside.
+/// An exclusive `flock` on `fnug-stash.recover` in the git dir, held while a stopped run's lock
+/// is recovered, so two runs never put the same changes back. The kernel releases it when fnug
+/// exits, however it exits.
+struct RecoveryLock {
+    _file: File,
+}
+
+impl RecoveryLock {
+    /// Wait for the lock and take it.
+    fn take(git_dir: &Path) -> Result<Self, StashError> {
+        let path = git_dir.join(RECOVERY_LOCK_NAME);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| io_error(format!("failed to open {}", path.display()), e))?;
+        // SAFETY: flock on a file descriptor that `file` owns.
+        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() != io::ErrorKind::Interrupted {
+                return Err(io_error(format!("failed to lock {}", path.display()), e));
+            }
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+/// Put back the changes a stopped run recorded in `state`, leaving its lock to the caller.
+/// Returns what putting them back did, if they were set aside.
 ///
 /// Only when the files they change still match the index they were set aside from; when those
 /// files hold something else, it refuses with `StashError::Stale`.
@@ -437,7 +481,6 @@ fn recover_stale(
         }
     }
     git.add_intent_to_add(&state.intent_to_add);
-    remove_file(lock);
     Ok(note)
 }
 
