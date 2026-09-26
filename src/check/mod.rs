@@ -129,6 +129,11 @@ pub async fn run(
         OutputMode::Capture(CaptureLimits::DEFAULT)
     };
     let mut printer = Printer::new(&plan, output, opts.jobs.get() == 1, opts.mute_success);
+    if !opts.stash
+        && let Some(lock) = stash::pending(cwd)
+    {
+        printer.stash_pending(&lock);
+    }
     if plan.is_empty() {
         if opts.stash
             && let Some(note) = stash::recover(cwd)?

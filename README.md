@@ -156,7 +156,7 @@ If the checkout belongs to another user than the one running fnug, as in some co
 - It covers the whole repository that contains the config's directory (or `--root`), even when the hook runs from a subdirectory. In a workspace, other repositories, such as submodules, aren't touched.
 - When a command changed a file that also has unstaged changes, as a formatter can, fnug discards the command's changes to that file to put yours back, and says so. Its changes to other files stay. The command has already failed for changing files.
 - fnug deletes the patch once the files it changes hold exactly your changes again. Otherwise it keeps the patch and prints its path.
-- A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that repository puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Only one such run works on a repository at a time; another one exits with 2.
+- A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that repository puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Until then, other `fnug check` runs warn that changes are still set aside. Only one such run works on a repository at a time; another one exits with 2.
 
 ### Setup
 
