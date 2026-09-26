@@ -2,6 +2,7 @@
 
 mod params;
 mod response;
+mod text;
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -25,14 +26,20 @@ use crate::runner::{
 use crate::selectors::{self, SelectOptions};
 use crate::{LoadOptions, LoadedConfig};
 
-use params::{AutoType, FailFastParams, ListLintsParams, RunLintParams};
-use response::{AutoRules, LintInfo, RunResult};
+use params::{AutoType, ListLintsParams, RunLintParams, RunParams};
+use response::{AutoRules, LintInfo};
 
 /// How long shutdown waits for running commands to stop.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 /// How many commands an error for an unknown command lists.
 const MAX_LISTED: usize = 50;
+
+/// Output kept of each command: more than a result shows, so cleaning can shrink it first.
+const CAPTURE: CaptureLimits = CaptureLimits {
+    head: 64 * 1024,
+    tail: 256 * 1024,
+};
 
 // ---------------------------------------------------------------------------
 // Server
@@ -178,21 +185,23 @@ impl FnugMcp {
         changes. This is the primary tool for verifying code correctness — call it after \
         making edits, before committing, or to validate a fix. Commands are auto-selected \
         based on which files were modified in git. Dependencies between commands are \
-        resolved automatically (e.g. build before test). Returns per-command results with \
-        status, exit code, output (stdout and stderr merged), and timing.",
+        resolved automatically (e.g. build before test). Returns a compact JSON summary that \
+        lists failures first, then a text block with the output of each command that failed \
+        or timed out: stdout and stderr merged, terminal escapes removed, and cut to about \
+        20 KiB, keeping its start and end. Output of commands that passed is left out unless \
+        verbose is set.",
         annotations(open_world_hint = false)
     )]
     async fn run_lints(
         &self,
-        Parameters(params): Parameters<FailFastParams>,
+        Parameters(params): Parameters<RunParams>,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let selection = Selection::Auto {
             options: SelectOptions::default(),
             include_manual: false,
         };
-        let fail_fast = params.fail_fast.unwrap_or(false);
-        self.run_and_serialize(selection, fail_fast, ct).await
+        self.run_and_serialize(selection, &params, ct).await
     }
 
     #[tool(
@@ -200,8 +209,10 @@ impl FnugMcp {
         specific failing check after fixing it, or to run a check that wasn't auto-selected. \
         Use list_lints to discover available command names and ids; a name that matches no \
         command or several is an error listing the candidates. Dependencies are resolved \
-        and run first automatically. Returns per-command results with status, exit code, \
-        output (stdout and stderr merged), and timing.",
+        and run first automatically. Returns a compact JSON summary that lists failures \
+        first, then a text block with the output of each command that failed or timed out: \
+        stdout and stderr merged, terminal escapes removed, and cut to about 20 KiB, keeping \
+        its start and end. Output of commands that passed is left out unless verbose is set.",
         annotations(open_world_hint = false)
     )]
     async fn run_lint(
@@ -210,7 +221,11 @@ impl FnugMcp {
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let selection = Selection::Targets(vec![params.command]);
-        self.run_and_serialize(selection, false, ct).await
+        let run = RunParams {
+            fail_fast: None,
+            verbose: params.verbose,
+        };
+        self.run_and_serialize(selection, &run, ct).await
     }
 
     #[tool(
@@ -218,20 +233,21 @@ impl FnugMcp {
         except those marked `auto.check: false` (run those by name with run_lint). Use \
         this for a full sweep before creating a pull request, after large refactors, or when \
         you want to ensure nothing is broken across the entire project. Dependencies are \
-        resolved automatically. Returns per-command results with status, exit code, output \
-        (stdout and stderr merged), and timing.",
+        resolved automatically. Returns a compact JSON summary that lists failures first, \
+        then a text block with the output of each command that failed or timed out: stdout \
+        and stderr merged, terminal escapes removed, and cut to about 20 KiB, keeping its \
+        start and end. Output of commands that passed is left out unless verbose is set.",
         annotations(open_world_hint = false)
     )]
     async fn run_all(
         &self,
-        Parameters(params): Parameters<FailFastParams>,
+        Parameters(params): Parameters<RunParams>,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let selection = Selection::All {
             include_manual: false,
         };
-        let fail_fast = params.fail_fast.unwrap_or(false);
-        self.run_and_serialize(selection, fail_fast, ct).await
+        self.run_and_serialize(selection, &params, ct).await
     }
 }
 
@@ -253,7 +269,7 @@ impl FnugMcp {
     async fn run_and_serialize(
         &self,
         selection: Selection,
-        fail_fast: bool,
+        params: &RunParams,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let _running = self.runs.read().await;
@@ -271,15 +287,14 @@ impl FnugMcp {
         }
 
         let opts = ExecOptions {
-            fail_fast,
-            output: OutputMode::Capture(CaptureLimits::DEFAULT),
+            fail_fast: params.fail_fast.unwrap_or(false),
+            output: OutputMode::Capture(CAPTURE),
             cancel: ct,
             cancel_cause: self.cancel_cause.clone(),
             ..ExecOptions::default()
         };
         let report = runner::execute(&plan, &cwd, &opts, &NoHook, &mut |_| {}).await;
-        let json = serde_json::to_string_pretty(&RunResult::from(&report)).map_err(mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        response::run_result(&plan, &report, params.verbose.unwrap_or(false)).map_err(mcp_err)
     }
 }
 
@@ -296,7 +311,9 @@ impl ServerHandler for FnugMcp {
                 or understand what would run, (4) use run_all for a full sweep of all check \
                 commands before creating a PR or after large refactors. Always prefer these \
                 tools over running shell commands directly — they automatically select the \
-                right checks for the files you changed and handle dependency ordering."
+                right checks for the files you changed and handle dependency ordering. Each \
+                run returns a JSON summary with failures first, then the output of each \
+                command that failed; read the summary's message before the output."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

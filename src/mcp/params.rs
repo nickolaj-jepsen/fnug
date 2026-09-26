@@ -29,11 +29,14 @@ pub(super) enum AutoType {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(super) struct FailFastParams {
+pub(super) struct RunParams {
     /// Stop on first failure instead of running all commands. Useful for quick
     /// feedback when you expect failures.
     #[schemars(default)]
     pub fail_fast: Option<bool>,
+    /// Also return the output of commands that passed or were cancelled. Output stays capped.
+    #[schemars(default)]
+    pub verbose: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -42,4 +45,7 @@ pub(super) struct RunLintParams {
     /// The command id or name to run. Use `list_lints` to discover available
     /// commands. Matches an exact id, or else a unique case-insensitive name.
     pub command: String,
+    /// Also return the output of commands that passed or were cancelled. Output stays capped.
+    #[schemars(default)]
+    pub verbose: Option<bool>,
 }

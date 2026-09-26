@@ -185,6 +185,8 @@ Setup edits the editor configs in place, keeping comments and formatting, and ad
 
 The server loads the config again on every tool call, so edits to it apply without a restart. It also starts when the config is missing or broken; each tool call then fails with the reason until the config is fixed.
 
+A run returns a compact JSON summary, then a text block for each command that failed or timed out. The summary's `message` sums the run up in a sentence or two, and `commands` lists every planned command, failures first, with its `status` (`passed`, `failed`, `timeout`, `skipped`, `cancelled` or `not_run`), exit code, duration and output size. A text block holds the command's output with stdout and stderr merged in order and terminal escapes and carriage-return overwrites removed, cut to its first 4 KiB and last 16 KiB; `truncated_bytes` in the summary says how much was left out. A result keeps at most 60 KiB of output in all. Set `verbose` to also get the output of commands that passed.
+
 Cancelling a tool call stops its commands with SIGTERM. When the client closes the server's stdin, the server does the same for every running call, waits up to 10 s for the commands to exit and then exits. On SIGINT, SIGTERM or SIGHUP, running commands get the same signal and the server exits with 128 plus its number. A command still running 3 s after its signal gets SIGKILL.
 
 ## Configuration
