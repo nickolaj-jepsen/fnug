@@ -5,7 +5,7 @@ use rmcp::model::CallToolResult;
 use tokio_util::sync::CancellationToken;
 
 use super::FnugMcp;
-use super::params::{FailFastParams, ListLintsParams, RunLintParams};
+use super::params::{AutoType, FailFastParams, ListLintsParams, RunLintParams};
 use crate::LoadOptions;
 use crate::runner::CancelCause;
 
@@ -123,10 +123,7 @@ commands:
     assert_eq!(result["failed"], 0);
 }
 
-#[tokio::test]
-async fn run_lint_ambiguous_name_is_error() {
-    let (server, _dir) = server(
-        r"
+const SAME_NAMES: &str = r"
 name: root
 children:
   - name: backend
@@ -137,16 +134,91 @@ children:
     commands:
       - name: test
         cmd: 'true'
-",
-    );
-    let Err(err) = server
+      - name: lint
+        cmd: 'true'
+";
+
+#[tokio::test]
+async fn ambiguous_name_is_tool_error() {
+    let (server, _dir) = server(SAME_NAMES);
+    let result = server
         .run_lint(run_lint("test"), CancellationToken::new())
         .await
-    else {
-        panic!("an ambiguous name ran a command");
-    };
-    assert!(err.message.contains("backend/test"), "{err:?}");
-    assert!(err.message.contains("frontend/test"), "{err:?}");
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let text = text(&result);
+    assert!(text.contains("backend/test (root > backend)"), "{text}");
+    assert!(text.contains("frontend/test (root > frontend)"), "{text}");
+}
+
+#[tokio::test]
+async fn not_found_is_tool_error_listing_ids() {
+    let (server, _dir) = server(SAME_NAMES);
+    let result = server
+        .run_lint(run_lint("lnit"), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let text = text(&result);
+    assert!(text.contains("did you mean 'lint'"), "{text}");
+    for listed in [
+        "backend/test: test (root > backend)",
+        "frontend/test: test (root > frontend)",
+        "lint: lint (root > frontend)",
+    ] {
+        assert!(text.contains(listed), "{text}");
+    }
+}
+
+#[test]
+fn auto_type_typo_rejected() {
+    let parse = |value| serde_json::from_value::<ListLintsParams>(value);
+    assert!(parse(serde_json::json!({"auto_type": "git"})).is_ok());
+    assert!(parse(serde_json::json!({"auto_type": "gti"})).is_err());
+    assert!(parse(serde_json::json!({"nmae": "test"})).is_err());
+    assert!(serde_json::from_value::<RunLintParams>(serde_json::json!({"cmd": "x"})).is_err());
+
+    let schema = serde_json::to_string(&*FnugMcp::list_lints_tool_attr().input_schema).unwrap();
+    assert!(
+        schema.contains(r#"["git","watch","always","none"]"#),
+        "{schema}"
+    );
+}
+
+#[tokio::test]
+async fn auto_type_filters_by_rule() {
+    let (server, _dir) = server(
+        r"
+name: root
+commands:
+  - name: on-change
+    cmd: 'true'
+    auto: {git: true, path: [.]}
+  - name: every-time
+    cmd: 'true'
+    auto: {always: true}
+  - name: by-hand
+    cmd: 'true'
+",
+    );
+    for (auto_type, expected) in [
+        (AutoType::Git, "on-change"),
+        (AutoType::Always, "every-time"),
+        (AutoType::None, "by-hand"),
+    ] {
+        let params = ListLintsParams {
+            auto_type: Some(auto_type),
+            ..list_all().0
+        };
+        let result = server.list_lints(Parameters(params)).await.unwrap();
+        let ids: Vec<_> = json(&result)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|lint| lint["id"].clone())
+            .collect();
+        assert_eq!(ids, [expected], "{auto_type:?}");
+    }
 }
 
 #[tokio::test]
