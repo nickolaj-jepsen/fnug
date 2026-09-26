@@ -364,7 +364,7 @@ commands:
         let status = wait(&mut child);
         let stderr = stderr(&child.wait_with_output().unwrap());
         assert_eq!(status.code(), Some(1), "{stderr}");
-        assert!(stderr.contains("hang TIMEOUT after 0.3s"), "{stderr}");
+        assert!(stderr.contains("hang TIMEOUT after 0.3s\n"), "{stderr}");
         assert!(stderr.contains("slow PASS"), "{stderr}");
     }
 
