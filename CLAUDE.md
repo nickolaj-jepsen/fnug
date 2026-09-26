@@ -109,7 +109,7 @@ let (config, cwd) = common::load(dir.path(), "fnug_version: 0.1.0\nname: t\ncomm
 
 Tests that start the binary use `env!("CARGO_BIN_EXE_fnug")`. Process and PTY tests synchronise through files the commands write and poll with a timeout instead of sleeping, and PTY tests skip themselves when no PTY can be opened. Review changed snapshots with `cargo insta review`, or accept them with `INSTA_UPDATE=always cargo test`.
 
-The Python tests (`python/tests`) run the wrapper against a fake binary that records its arguments; `test_integration.py` needs the real one (`maturin develop`, or `FNUG_TEST_BINARY`) and skips without it. `test_config.py` checks `Config.to_dict()` against `fnug schema`, or the committed schema without a binary.
+The Python tests (`python/tests`) run the wrapper against a fake binary that records its arguments; `test_integration.py` needs the real one (`maturin develop`, or `FNUG_TEST_BINARY`) and skips without it; it also checks that `check()` and `start()` take exactly the options `--help` lists. `test_config.py` checks `Config.to_dict()` against `fnug schema`, or the committed schema without a binary.
 
 ## Configuration
 

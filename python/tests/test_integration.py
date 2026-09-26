@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import os
+import re
 import shutil
 import subprocess
 from typing import TYPE_CHECKING
@@ -16,6 +18,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.integration
+
+# A long option at the start of a --help line, such as `  -c, --config <CONFIG>`.
+OPTION = re.compile(r"^\s+(?:-\w, )?--([a-z][a-z-]*)", re.MULTILINE)
+# Options whose keyword isn't the option name with `-` as `_`.
+KWARGS = {"all": "all_", "config": "config_path"}
 
 
 @pytest.fixture
@@ -120,6 +127,44 @@ def test_integration_workspace_config_object(tmp_path, monkeypatch, capfd, works
     assert result.returncode == 0, output
     assert f"hello from {package.resolve()}" in output.out, output
     assert f"root at {tmp_path.resolve()}" in output.out, output
+
+
+def help_options(binary, *args):
+    """The long options ``fnug <args> --help`` lists, as wrapper keyword names."""
+    result = subprocess.run(
+        [binary, *args, "--help"], check=True, capture_output=True, text=True
+    )
+    names = set(OPTION.findall(result.stdout)) - {"help", "version"}
+    return {KWARGS.get(name, name.replace("-", "_")) for name in names}
+
+
+def wrapper_options(function):
+    return set(inspect.signature(function).parameters) - {"config"}
+
+
+def test_integration_check_takes_every_check_option(real_fnug):
+    assert wrapper_options(fnug.check) == help_options(real_fnug, "check") | {"targets"}
+
+
+def test_integration_start_takes_every_global_option(real_fnug):
+    assert wrapper_options(fnug.start) == help_options(real_fnug)
+
+
+@pytest.mark.usefixtures("real_fnug")
+def test_integration_root_with_config_object(tmp_path, monkeypatch, capfd):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(tmp_path)
+    config = Config(
+        name="demo",
+        commands=[Command(name="where", cmd="echo running in $PWD")],
+    )
+
+    result = fnug.check(config, root="project", all_=True, no_tui=True)
+
+    output = capfd.readouterr()
+    assert result.returncode == 0, output
+    assert f"running in {project.resolve()}" in output.out, output
 
 
 def test_integration_default_fnug_version_is_the_binarys(real_fnug):

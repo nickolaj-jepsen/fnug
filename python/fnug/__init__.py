@@ -10,12 +10,14 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fnug.config import Auto, Command, CommandGroup, Config, WorkspaceOptions
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+
+LogLevel = Literal["off", "error", "warn", "info", "debug", "trace"]
 
 __all__ = [
     "Auto",
@@ -67,16 +69,15 @@ def run(*args: str) -> subprocess.CompletedProcess[bytes]:
 
 
 @contextmanager
-def _config_tempfile(config: Config) -> Iterator[str]:
+def _config_tempfile(config: Config, root: Path) -> Iterator[str]:
     """Write a Config to a temporary JSON file, yield its path, and delete it after.
 
-    The written copy pins the root ``cwd`` to the caller's working directory: an
-    unset ``cwd`` becomes that directory and a relative one is resolved against it.
-    ``config`` itself is not modified. Workspace discovery needs fnug's ``--root``,
-    since it searches the config's directory otherwise.
+    The written copy pins the root ``cwd`` to the absolute directory ``root``: an unset
+    ``cwd`` becomes ``root`` and a relative one is resolved against it. ``config``
+    itself is not modified.
     """
     data = config.to_dict()
-    data["cwd"] = str((Path.cwd() / data.get("cwd", ".")).resolve())
+    data["cwd"] = str((root / data.get("cwd", ".")).resolve())
     # Outside the project, so the file itself never counts as a changed file.
     fd, path = tempfile.mkstemp(suffix=".fnug.json")
     try:
@@ -88,28 +89,17 @@ def _config_tempfile(config: Config) -> Iterator[str]:
 
 
 def _global_args(
-    config: Config | None,
-    config_path: str | Path | None,
     *,
     log_file: str | Path | None,
+    log_level: LogLevel | None,
     no_workspace: bool,
 ) -> list[str]:
-    """Build the flags that go before any subcommand.
-
-    The ``--config`` flag for an in-memory ``config`` is not included; it is added
-    once the temporary file exists.
-
-    Raises:
-        ValueError: If both config and config_path are provided.
-    """
-    if config is not None and config_path is not None:
-        msg = "Cannot specify both 'config' and 'config_path'"
-        raise ValueError(msg)
+    """Build the flags before any subcommand, except ``--config`` and ``--root``."""
     args: list[str] = []
-    if config_path is not None:
-        args.extend(["--config", str(config_path)])
     if log_file is not None:
         args.extend(["--log-file", str(log_file)])
+    if log_level is not None:
+        args.extend(["--log-level", log_level])
     if no_workspace:
         args.append("--no-workspace")
     return args
@@ -117,35 +107,55 @@ def _global_args(
 
 def _run_with_config(
     config: Config | None,
+    config_path: str | Path | None,
+    root: str | Path | None,
     *args: str,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run fnug with ``args``, passing ``config`` through a temporary file if given.
+    """Run fnug with ``--config`` and ``--root`` for the given config, then ``args``.
 
-    With ``config``, ``--root`` is the caller's working directory, so fnug acts from
-    there rather than from the temporary file's directory.
+    ``config`` is passed through a temporary file, and ``--root`` is then ``root``
+    resolved against the caller's working directory, or that directory itself, so fnug
+    acts from there rather than from the temporary file's directory.
+
+    Raises:
+        ValueError: If both config and config_path are provided.
     """
+    if config is not None and config_path is not None:
+        msg = "Cannot specify both 'config' and 'config_path'"
+        raise ValueError(msg)
     if config is None:
-        return run(*args)
-    root = str(Path.cwd().resolve())
-    with _config_tempfile(config) as path:
-        return run("--config", path, "--root", root, *args)
+        flags: list[str] = []
+        if config_path is not None:
+            flags.extend(["--config", str(config_path)])
+        if root is not None:
+            flags.extend(["--root", str(root)])
+        return run(*flags, *args)
+    root_dir = (Path.cwd() / (root if root is not None else ".")).resolve()
+    with _config_tempfile(config, root_dir) as path:
+        return run("--config", path, "--root", str(root_dir), *args)
 
 
-def start(
+def start(  # noqa: PLR0913
     config: Config | None = None,
     *,
     config_path: str | Path | None = None,
+    root: str | Path | None = None,
     log_file: str | Path | None = None,
+    log_level: LogLevel | None = None,
     no_workspace: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """Launch the fnug TUI.
 
     Args:
         config: A Config to use. It is written to a temporary file, and its paths
-            and workspace discovery are resolved against the caller's working
-            directory.
+            and workspace discovery are resolved against ``root``, or else the
+            caller's working directory.
         config_path: Path to an existing .fnug.yaml file.
+        root: Resolve the config's paths and workspace against this directory
+            instead of the config's own; without a config, search for one from it.
         log_file: Path for file logging.
+        log_level: ``"off"``, ``"error"``, ``"warn"``, ``"info"``, ``"debug"`` or
+            ``"trace"``.
         no_workspace: Don't resolve upward to a parent workspace root.
 
     Returns:
@@ -155,12 +165,11 @@ def start(
         ValueError: If both config and config_path are provided.
     """
     args = _global_args(
-        config,
-        config_path,
         log_file=log_file,
+        log_level=log_level,
         no_workspace=no_workspace,
     )
-    return _run_with_config(config, *args)
+    return _run_with_config(config, config_path, root, *args)
 
 
 def check(  # noqa: PLR0913
@@ -180,7 +189,9 @@ def check(  # noqa: PLR0913
     timeout: str | int | None = None,
     allow_modifications: bool = False,
     no_workspace: bool = False,
+    root: str | Path | None = None,
     log_file: str | Path | None = None,
+    log_level: LogLevel | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run fnug in headless check mode.
 
@@ -190,8 +201,8 @@ def check(  # noqa: PLR0913
 
     Args:
         config: A Config to use. It is written to a temporary file, and its paths
-            and workspace discovery are resolved against the caller's working
-            directory.
+            and workspace discovery are resolved against ``root``, or else the
+            caller's working directory.
         config_path: Path to an existing .fnug.yaml file.
         targets: Run these commands, by id or name, after their dependencies.
         all_: Run every command, except those with ``auto.check: false`` unless
@@ -209,7 +220,11 @@ def check(  # noqa: PLR0913
             duration such as ``"5m"``, unless their config sets ``timeout``.
         allow_modifications: Don't fail commands that change tracked files.
         no_workspace: Don't resolve upward to a parent workspace root.
+        root: Resolve the config's paths and workspace against this directory
+            instead of the config's own; without a config, search for one from it.
         log_file: Path for file logging.
+        log_level: ``"off"``, ``"error"``, ``"warn"``, ``"info"``, ``"debug"`` or
+            ``"trace"``.
 
     Returns:
         The completed process result.
@@ -218,9 +233,8 @@ def check(  # noqa: PLR0913
         ValueError: If both config and config_path are provided.
     """
     args = _global_args(
-        config,
-        config_path,
         log_file=log_file,
+        log_level=log_level,
         no_workspace=no_workspace,
     )
     args.append("check")
@@ -243,7 +257,7 @@ def check(  # noqa: PLR0913
         args.extend(["--timeout", str(timeout)])
     if targets:
         args.extend(["--", *targets])
-    return _run_with_config(config, *args)
+    return _run_with_config(config, config_path, root, *args)
 
 
 def main() -> None:
