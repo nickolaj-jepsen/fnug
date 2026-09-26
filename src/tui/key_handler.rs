@@ -487,6 +487,8 @@ mod tests {
             };
             let codes = match key {
                 "↑/↓" => vec![KeyCode::Up, KeyCode::Down],
+                "Home" => vec![KeyCode::Home],
+                "End" => vec![KeyCode::End],
                 "↑" => vec![KeyCode::Up],
                 "↓" => vec![KeyCode::Down],
                 "←" => vec![KeyCode::Left],
@@ -653,7 +655,8 @@ mod tests {
                         "k" | "↑" | "h" | "←" => "grp",
                         "l" | "→" => "closed",
                         "s" | "c" => "waiter",
-                        "Space" | "r" | "x" | "Tab" | "Shift+↑/↓" | "{" | "}" => "out",
+                        "Space" | "r" | "x" | "Tab" | "Shift+↑/↓" | "{" | "}" | "Shift+Home"
+                        | "Shift+End" => "out",
                         _ => "root",
                     };
                     cursor_to(app, at);
@@ -718,8 +721,7 @@ mod tests {
                 .collect()
         }
 
-        /// Modified keys aren't tried: most bindings ignore Shift, and Shift+Home/End scroll
-        /// like `{` and `}`.
+        /// Modified keys aren't tried, since most bindings ignore Shift.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn unlisted_keys_do_nothing_in_the_tree() {
             if !pty_available() {
