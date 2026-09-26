@@ -169,6 +169,20 @@ fn flush_outbox(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut
     }
 }
 
+/// Draw a frame and size the PTYs to its terminal pane. Returns the `(tree, terminal)` areas.
+fn draw_frame(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> io::Result<(Rect, Rect)> {
+    app.clear_terminal_dirty();
+    let mut areas = (Rect::default(), Rect::default());
+    terminal.draw(|frame| areas = app.render(frame))?;
+    // Whatever changed the pane: a window resize, fullscreen, or the divider
+    app.sync_pty_size(areas.1);
+    flush_outbox(terminal, app);
+    Ok(areas)
+}
+
 /// Draw and handle events until the user quits or `cancel` is cancelled.
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -195,17 +209,9 @@ async fn run_event_loop(
     loop {
         needs_render |= app.any_terminal_dirty();
         if needs_render && Instant::now() >= next_frame {
-            app.clear_terminal_dirty();
-            terminal.draw(|frame| {
-                let (ta, term_a) = app.render(frame);
-                tree_area = ta;
-                terminal_area = term_a;
-            })?;
+            (tree_area, terminal_area) = draw_frame(terminal, app)?;
             needs_render = false;
             next_frame = Instant::now() + FRAME;
-            // Whatever changed the pane: a window resize, fullscreen, or the divider
-            app.sync_pty_size(terminal_area);
-            flush_outbox(terminal, app);
         }
 
         if app.should_quit {
@@ -228,6 +234,12 @@ async fn run_event_loop(
                         app.handle_key(key, terminal_area);
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
+                        // Clicks land on what is shown, so show what a key before it changed
+                        if needs_render {
+                            (tree_area, terminal_area) = draw_frame(terminal, app)?;
+                            needs_render = false;
+                            next_frame = Instant::now() + FRAME;
+                        }
                         // Only re-render for move events if hover state changed
                         if matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
                             let old_hover = app.mouse.hover_row;
