@@ -955,6 +955,41 @@ fn hook_linked_into_the_work_tree_is_shared() {
 }
 
 #[test]
+fn chaining_a_linked_hook_writes_the_wrapper_for_the_hooks_dir() {
+    let (_tmp, root, hook) = repo();
+    let interpreter = fake_interpreter(&root, "python3");
+    let tracked = root.join("scripts/pre-commit");
+    let original = format!("#!{}\nexit 4\n", interpreter.display());
+    write_executable(&tracked, &original);
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../../scripts/pre-commit", &hook).unwrap();
+    let target = hooks::resolve(&root).unwrap();
+    assert_eq!(target.location, HookLocation::Shared);
+    let opts = InstallOptions {
+        fallback_exe: Some("/opt/fnug/bin/fnug".into()),
+        ..options(ForeignPolicy::Chain)
+    };
+
+    hooks::install_with(&target, &opts).unwrap();
+
+    assert_eq!(read(&tracked), original);
+    assert_eq!(read(&hook.with_file_name("pre-commit.local")), original);
+    // The wrapper replaces the link with a file in .git/hooks, which no one else runs
+    let wrapper = read(&hook);
+    assert!(wrapper.contains("/opt/fnug/bin/fnug"), "{wrapper}");
+    let target = hooks::resolve(&root).unwrap();
+    assert_eq!(
+        (target.location, target.resolved),
+        (HookLocation::Local, None)
+    );
+    assert_eq!(
+        hooks::status_with(&hooks::resolve(&root).unwrap(), &opts),
+        HookStatus::Installed,
+        "a second run has nothing to update"
+    );
+}
+
+#[test]
 fn hook_linked_out_of_the_repo_is_refused() {
     let (_tmp, root) = tempdir();
     let repo_dir = root.join("repo");
