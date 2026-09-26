@@ -11,12 +11,13 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 ## Features
 
 - **Git integration** — automatically select commands based on uncommitted, staged or branch changes
-- **File watching** — monitor the file system and re-select commands when files change
+- **File watching** — monitor the file system and re-select commands when files change, or run them right away
 - **Terminal emulation with scrollback** — full PTY support for interactive commands and long output
 - **Headless mode** (`fnug check`) — run selected commands without the TUI, in a pre-commit hook or in CI
 - **Config scaffolding** (`fnug init`) — write a starter `.fnug.yaml` for the Rust, Python, Node, Go or Nix tooling it finds, or package configs and a workspace root in a monorepo
 - **Setup wizard** (`fnug setup`) — install a pre-commit hook that runs `fnug check` and add the MCP server to your editor
-- **Command dependencies** — define `depends_on` to control execution order
+- **MCP server** (`fnug mcp`) — let coding agents list and run your checks
+- **Command dependencies** — define `depends_on` to control execution order, and run independent commands in parallel with `fnug check --jobs`
 - **Environment variables** — set per-command or per-group env vars
 - **Nested command groups** — organize commands into a hierarchical tree with inherited settings
 - **Workspace support** — discover and merge `.fnug.yaml` files from subdirectories in mono-repos
@@ -67,76 +68,175 @@ cd fnug
 cargo install --path .
 ```
 
+## Quick start
+
+```bash
+fnug init    # write a .fnug.yaml for the tooling in this directory
+fnug         # open the TUI; Enter runs the commands your changes selected
+fnug check   # run them without the TUI instead
+fnug setup   # add a pre-commit hook and the MCP server for your editor
+```
+
 ## Usage
 
-Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c path/to/config.yaml`). `fnug init` creates one.
+Run `fnug` in a directory with a `.fnug.yaml` configuration file, or below one, or pass `-c path/to/config.yaml`. `fnug init` creates one.
 
 ### Subcommands
 
-| Command       | Description                                                     |
-| ------------- | --------------------------------------------------------------- |
-| `fnug`        | Launch the TUI                                                  |
-| `fnug check`  | Run selected commands headlessly; see [What `fnug check` runs](#what-fnug-check-runs) |
-| `fnug init [dir]` | Create a `.fnug.yaml` for the project's tooling; see [Init](#init) |
-| `fnug setup`  | Interactive wizard: git pre-commit hook and editor MCP config   |
-| `fnug mcp`    | Run an MCP server over stdio                                    |
-| `fnug schema` | Print the config file's JSON Schema                             |
+| Command                  | Description                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `fnug`                   | Launch the TUI; see [TUI](#tui)                                                                         |
+| `fnug check [TARGET]...` | Run selected commands headlessly (useful for pre-commit hooks); see [Headless checks](#headless-checks) |
+| `fnug setup`             | Interactive setup wizard for git hooks and MCP server configuration; see [Setup](#setup)                |
+| `fnug init [DIR]`        | Create a .fnug.yaml with lint and test commands for the project's tooling; see [Init](#init)            |
+| `fnug mcp`               | Start an MCP server over stdio; see [MCP server](#mcp-server)                                           |
+| `fnug schema`            | Print the config file's JSON Schema; see [Editor support](#editor-support)                              |
+| `fnug help [COMMAND]`    | Print this message or the help of the given subcommand(s)                                               |
 
-### Flags
+### Global options
 
-| Flag              | Description                                                     |
-| ----------------- | --------------------------------------------------------------- |
-| `-c <path>`       | Path to config file, always loaded as the root                  |
-| `--no-workspace`  | Disable workspace resolution (don't search for a parent root)   |
-| `--root <dir>`    | Resolve the config's paths and workspace against `<dir>` instead of the config's directory, and don't look for a parent workspace root; without `-c`, search for the config from `<dir>` |
-| `--log-file`      | Also write logs to a file                                       |
-| `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info, and warn on stderr) |
-| `--fail-fast`     | Stop on first failure (`check` only)                            |
-| `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
-| `--mute-success`  | Capture each command's output and print it only if it fails (`check` only) |
-| `--all`           | Run every command except `auto.check: false` ones (add `--include-manual` for those) instead of the ones changes select (`check` only) |
-| `--include-manual` | Also run commands with `auto.check: false` (`check` only)      |
-| `--base <ref>`    | Select by the changes since the merge base of `HEAD` and `<ref>`, such as `origin/main`: commits since then plus uncommitted changes (`check` only) |
-| `--staged`        | Select by the changes staged for the next commit, or in a pre-commit hook the ones being committed; unstaged and untracked changes don't count (`check` only) |
-| `--stash`         | Needs `--staged`: set unstaged changes to tracked files aside while commands run, so they check exactly what is staged; each command's output is captured and printed when it ends (`check` only) |
-| `--allow-modifications` | Don't fail commands that change tracked files (`check` only) |
-| `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
-| `-j`, `--jobs <n>` | Run up to `<n>` commands at once, each after its dependencies; `0` means one per CPU (default `1`, `check` only) |
-| `--force`         | Replace the directory's config (`init` only)                    |
-| `-y`, `--yes`     | Include everything detected without asking (`init` only)        |
-| `-V`, `--version` | Print fnug's version                                            |
+Every subcommand takes these, before or after its name: `fnug --no-workspace check` and `fnug check --no-workspace` are the same.
 
-`-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand; [Init](#init) says what `-c` and `--root` mean to `fnug init`. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
+| Option                    | Description                                                                                        |
+| ------------------------- | -------------------------------------------------------------------------------------------------- |
+| `-c`, `--config <CONFIG>` | Path to config file (auto-detected if not specified)                                               |
+| `--log-file <LOG_FILE>`   | Also write logs to this file                                                                       |
+| `--log-level <LOG_LEVEL>` | Log level: `off`, `error`, `warn`, `info`, `debug` or `trace` [default: info, and warn for stderr] |
+| `--no-workspace`          | Disable workspace resolution (don't search for a parent workspace root)                            |
+| `--root <DIR>`            | Resolve the config's paths and workspace against DIR instead of the config's directory             |
+| `-h`, `--help`            | Print help                                                                                         |
+| `-V`, `--version`         | Print version (`fnug -V`)                                                                          |
 
-`fnug check` prints a line for each command, such as `PASS`, `FAIL (exit 3)`, `TIMEOUT after 5m`, `SKIP (build failed)`, `CANCELLED` or `NOT RUN`, then a summary that counts every selected command once: passed, failed, timed out, skipped because a dependency failed, cancelled, and not run. When `--fail-fast` stops a run, commands still running are stopped and counted as cancelled, and commands not yet started as not run. Without `--mute-success` or `--stash`, commands share fnug's terminal and their output streams through. With `--mute-success`, fnug prints `[i/N] name` when a command starts and its result when it ends, followed by the command's output, captured with stdout and stderr merged in order, if it didn't pass. `--stash` alone does the same, but prints the output of commands that pass too. `--jobs` above 1 captures output the same way and prints each command's result line and output, unless it passed and `--mute-success` is set, as soon as the command finishes. Commands still start in config order once their dependencies pass, and an `exclusive` one waits until nothing else runs and holds back the rest until it ends.
+`-c` always loads the given file as the root, even when a parent workspace root would include it (see [Workspace](#workspace)). `--root` doesn't look for a parent workspace root either, and without `-c`, fnug searches for the config from DIR instead of the current directory. [Init](#init) says what `-c` and `--root` mean to `fnug init`; `fnug schema` ignores them.
 
-Captured commands, from `--mute-success`, `--stash`, `--jobs` above 1, the pre-commit hook or an MCP run, have no terminal. Their stdin is `/dev/null`, and each runs in a session of its own, so opening `/dev/tty`, as password and host-key prompts do, fails at once instead of waiting for input that never comes. When a captured command's shell exits, fnug stops whatever the command left running in its process group, since such a process would keep the output pipe open; start a process that should keep running in a session of its own, for example with `setsid`. Captured output keeps the first 256 KiB and the last 1 MiB of what a command writes, with `… N bytes omitted …` in between. MCP runs keep the first 64 KiB and the last 256 KiB, of which a result shows less (see [MCP server](#mcp-server)).
+### Logging
 
-When none of fnug's stdin, stdout and stderr is a terminal, as in CI, streamed commands run in a session of their own too, and fnug stops what they leave running in the same way. A pipe on stdout alone isn't enough: `fnug check | tee check.log` from a shell keeps the terminal on stdin and stderr. From a terminal, a streamed command stays in fnug's process group so it can use the terminal, and fnug signals only the command's own process: a process it started, such as a test binary under `cargo test`, can outlive a timeout or a signal and keep writing to the terminal. Use `--mute-success` or `--jobs` for timeouts that stop the whole process tree. `--stash` always captures output for the same reason, so that nothing a command started writes to files once your unstaged changes are back.
+By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
 
-On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands, prints the summary so far, marked `Interrupted.`, and exits with 128 plus the signal number. On Ctrl+C (SIGINT), a command that shares fnug's terminal has already got the terminal's SIGINT, so fnug gives it 3 s to finish before sending SIGTERM, while a command in a session of its own gets SIGINT from fnug. On SIGTERM or SIGHUP, commands get the same signal. A timeout, `--fail-fast` and an MCP client's cancellation send SIGTERM. Whichever signal a command gets, it gets SIGKILL if it is still running 3 s later. Signals reach the whole process group of a command in a session of its own, but only the process of a command that shares fnug's terminal.
+## TUI
+
+`fnug` opens the TUI: the config's groups and commands on the left, and on the right the output of the command under the cursor, each command in a terminal of its own. At startup, and when you press `g`, fnug selects (●) the `auto.always` commands and the ones whose `auto.git` rules match an uncommitted change; with `auto.watch`, saving a file selects the commands it matches. `Enter` runs the selected commands, each after its `depends_on`, and `r` runs the command or group under the cursor.
+
+### Keyboard Shortcuts
+
+| Key            | Context    | Action                   |
+| -------------- | ---------- | ------------------------ |
+| `j` / `↓`      | Tree       | Move down                |
+| `k` / `↑`      | Tree       | Move up                  |
+| `h` / `←`      | Tree       | Collapse / deselect      |
+| `l` / `→`      | Tree       | Expand / select          |
+| `Space`        | Tree       | Toggle selection         |
+| `E`            | Tree       | Expand all groups        |
+| `W`            | Tree       | Collapse all groups      |
+| `/`            | Tree       | Search and filter        |
+| `Enter`        | Tree       | Run selected commands    |
+| `r`            | Tree       | Run command or group     |
+| `s`            | Tree       | Stop command             |
+| `x`            | Tree       | Clear command            |
+| `g`            | Tree       | Select by git changes    |
+| `F5`           | Tree       | Reload the config        |
+| `w`            | Tree       | Toggle auto-run          |
+| `c`            | Tree       | Copy output              |
+| `Shift+↑/↓`    | Tree       | Scroll output            |
+| `{` / `}`      | Tree       | Output top / bottom      |
+| `Shift+Home`   | Tree       | Output top               |
+| `Shift+End`    | Tree       | Output bottom            |
+| `Tab`          | Tree       | Type into the command    |
+| `Ctrl+R`       | Tree       | Toggle fullscreen        |
+| `L`            | Tree       | Toggle log panel         |
+| `?`            | Tree       | Toggle this help         |
+| `q` / `Ctrl+C` | Tree       | Quit                     |
+| `Enter`        | Search     | Keep the filter          |
+| `Esc`          | Search     | Clear the search         |
+| `Ctrl+]`       | Terminal   | Back to the tree         |
+| `Esc`          | Terminal   | Back, unless full-screen |
+| `Esc`          | Fullscreen | Exit fullscreen          |
+
+`?` shows this list in the TUI; `j` and `k` scroll it when it doesn't fit. The toolbar at the bottom shows the shortcuts for the item under the cursor, the most needed first when they don't all fit, and always `? Help` at its right edge; click one to use it.
+
+`Tab` gives the keyboard to the command under the cursor while it runs, so you can answer a prompt or use a full-screen program. While a command has the keyboard, every key but `Ctrl+]` goes to it, `Ctrl+C` and `Ctrl+R` included, and so does `Esc` if it runs a full-screen program. The keyboard returns to the tree when the command exits.
+
+### Mouse
+
+- **Click** a tree item to move the cursor to it
+- **Double-click** a command to run it, or a group to expand/collapse
+- **Click** the selection orb (●/○) or arrow (▼/▶) to toggle
+- **Click** a toolbar shortcut to use it
+- **Drag** the separator between tree and terminal to resize
+- **Scroll wheel** over the tree to scroll it, and over the terminal panel to scroll output, or to scroll in a program that uses the mouse
+- **Click** or drag the terminal panel's rightmost column to jump through the scrollback
+- **Click** the terminal panel of a running full-screen or mouse-aware program to type into it
+- **Right-click** a group, a command or the terminal panel for a context menu: run, restart, stop, copy output, clear and more
+
+### Copying output
+
+`c` copies the command's whole output, scrollback included, without the lines fnug adds before and after it. When the command's latest queued run never started, because you stopped it or a command it depends on, `c` copies nothing and says so, as the pane shows no output then. fnug uses `pbcopy` on macOS and `wl-copy`, `xclip` or `xsel` on Linux, and falls back to OSC 52, an escape sequence that asks the terminal fnug runs in to set the clipboard. Over SSH, OSC 52 comes first, so the text lands on your machine rather than the server. Inside tmux, OSC 52 needs `set -g set-clipboard on`. Output over 1 MiB is cut to its last 1 MiB. Some terminals limit the size of an OSC 52 copy and silently drop a larger one, and fnug can't tell when that happens.
+
+### Reloading the config
+
+The TUI loads the config again when you save one of its files, or when you press `F5`. Commands and groups keep their output, selection and expansion by id. A command that is no longer in the config is stopped, and a running command whose `cmd`, `cwd` or `env` now differs from what it was started with keeps running as it was until you restart it; the toolbar names it. While a `fnug check --stash` runs, reloads wait for it to end (see [Checking what is committed](#checking-what-is-committed)). If the new config doesn't load, the old one stays and the toolbar shows why until a reload succeeds. A new workspace package is only picked up by `F5`, since fnug watches the config files it loaded.
+
+## Headless checks
+
+`fnug check` runs the selected commands without the TUI, prints how each one ended, and exits with a code that says whether they all passed, for a pre-commit hook, CI or a script.
+
+### Options
+
+| Option                  | Description                                                                                                                                                 |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[TARGET]...`           | Run these commands, by id or name, after their dependencies, instead of the ones changes select. They run even with `auto.check: false`                     |
+| `--all`                 | Run every command instead of the ones changes select, except those with `auto.check: false` unless `--include-manual` is given                              |
+| `--include-manual`      | Also run commands with `auto.check: false`                                                                                                                  |
+| `--base <REF>`          | Select by the changes since the merge base of HEAD and REF, such as `origin/main`: commits since then plus uncommitted changes                              |
+| `--staged`              | Select by the changes staged for the next commit; unstaged and untracked changes don't count. In a pre-commit hook, the index git is committing             |
+| `--stash`               | With `--staged`: set unstaged changes to tracked files aside while commands run, so they check exactly what is staged, and put them back afterwards         |
+| `--fail-fast`           | Stop on first failure                                                                                                                                       |
+| `--no-tui`              | Never prompt to open the TUI on failure                                                                                                                     |
+| `--mute-success`        | Suppress stdout/stderr for commands that pass                                                                                                               |
+| `--timeout <DURATION>`  | Kill commands that run longer than DURATION (seconds, or e.g. `90s`, `5m`), unless their config sets `timeout`                                              |
+| `-j`, `--jobs <N>`      | Run up to N commands at once, each after its dependencies (`0`: one per CPU). Above 1, output is captured and printed as each command finishes [default: 1] |
+| `--allow-modifications` | Let commands change tracked files, such as a formatter that fixes what it finds, without failing                                                            |
+
+Targets, `--all`, `--base` and `--staged` each decide what runs, so only one of them can be given. `--include-manual` doesn't go with targets, which run even with `auto.check: false`, and `--stash` needs `--staged`. `--timeout 0` means no limit.
 
 ### What `fnug check` runs
 
 By default, `fnug check` runs the `always` commands and the commands whose `auto` rules match an uncommitted change (staged, unstaged or untracked), each after its `depends_on`. Other ways to choose:
 
-| Invocation                      | Runs                                                           |
-| ------------------------------- | -------------------------------------------------------------- |
-| `fnug check --staged`           | Commands the staged changes select. In a pre-commit hook, those are the changes being committed, also with `git commit -a` and `git commit <path>` |
-| `fnug check --base origin/main` | Commands the changes since the merge base of `HEAD` and `origin/main` select: the branch's commits plus uncommitted changes |
-| `fnug check --all`              | Every command except `auto.check: false` ones (all of them with `--include-manual`) |
-| `fnug check lint "unit tests"`  | The named commands, by id or name                              |
+| Invocation                          | Runs                                                                                                |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `fnug check --staged`               | The `always` commands and those the staged changes select                                           |
+| `fnug check --base origin/main`     | The `always` commands and those the changes since the merge base of `HEAD` and `origin/main` select |
+| `fnug check --all`                  | Every command except `auto.check: false` ones                                                       |
+| `fnug check --all --include-manual` | Every command                                                                                       |
+| `fnug check lint "unit tests"`      | The named commands, by id or name                                                                   |
+
+In a pre-commit hook, the staged changes are the ones being committed, also with `git commit -a` and `git commit <path>`. The changes since the merge base are the branch's commits plus uncommitted changes.
 
 Commands with `auto.check: false` are left out unless you add `--include-manual` or name them. When nothing is selected, fnug says so and exits with 0: `No commands selected (12 configured; use --all, --base <ref>, or name commands)`. With `--staged`, as in the pre-commit hook, it leaves out the hint and prints `No commands selected (12 configured)`, so a commit that only touches docs passes with one line of output.
 
-| Exit code | Meaning                                                              |
-| --------- | -------------------------------------------------------------------- |
-| 0         | Every command passed, or none was selected                           |
+`--base` compares in the git repository that contains the current directory, not the config file's, so `fnug -c /elsewhere/fnug.yaml check --base origin/main` works when run inside the repository. The base has to resolve there even when no command has `auto.git`, so a typo in it fails the run instead of running only the `always` commands. In a workspace whose packages are other repositories, such as submodules, a package repository where the base doesn't resolve, or that has no commits yet, gets a warning and none of its commands are selected; the rest still run. When the current directory is outside every repository that `auto.git` commands' paths are in, as at the root of a workspace that isn't a repository but whose packages each are, the base must resolve in each of those repositories instead.
+
+### Output
+
+`fnug check` prints a line for each command, such as `PASS`, `FAIL (exit 3)`, `TIMEOUT after 5m`, `SKIP (build failed)`, `CANCELLED` or `NOT RUN`, then a summary that counts every selected command once: passed, failed, timed out, skipped because a dependency failed, cancelled, and not run. When `--fail-fast` stops a run, commands still running are stopped and counted as cancelled, and commands not yet started as not run. Without `--mute-success` or `--stash`, commands share fnug's terminal and their output streams through. With `--mute-success`, fnug prints `[i/N] name` when a command starts and its result when it ends, followed by the command's output, captured with stdout and stderr merged in order, if it didn't pass. `--stash` alone does the same, but prints the output of commands that pass too. `--jobs` above 1 captures output the same way and prints each command's result line and output, unless it passed and `--mute-success` is set, as soon as the command finishes. Commands still start in config order once their dependencies pass, and an `exclusive` one waits until nothing else runs and holds back the rest until it ends.
+
+When a command fails and both stdin and stderr are terminals, `fnug check` asks `Open TUI to investigate? [y/N]`. Answer `y` to open the TUI, which selects the commands that failed, timed out or were skipped and runs them again. `--no-tui` never asks.
+
+### Exit codes
+
+| Exit code | Meaning                                                                         |
+| --------- | ------------------------------------------------------------------------------- |
+| 0         | Every command passed, or none was selected                                      |
 | 1         | A command failed, timed out or changed tracked files, or was skipped or not run |
-| 2         | fnug couldn't do its job: a usage error, a config that doesn't load, an unknown or ambiguous name, a `--base` that doesn't resolve in the current directory's repository, `--staged` outside a git repository, `--base` when neither the current directory nor an `auto.git` command's path is in one, or unstaged changes it couldn't set aside or put back |
-| 128+n     | Stopped by signal n                                                  |
+| 2         | fnug couldn't do its job (see below)                                            |
+| 128+n     | Stopped by signal n                                                             |
+
+Exit code 2 means a usage error, a config that doesn't load, an unknown or ambiguous name, a `--base` that doesn't resolve in the current directory's repository, `--staged` outside a git repository, `--base` when neither the current directory nor an `auto.git` command's path is in one, or unstaged changes that `--stash` couldn't set aside or put back.
 
 The TUI exits with the same codes: 128+n when a signal stops it, 2 when it fails, such as when it can no longer read from or draw to its terminal, and 0 when you quit. When `fnug check` opens the TUI after a failure, quitting it keeps the check's 1.
+
+### CI usage
 
 A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects nothing there. In a pull request, compare with the target branch; elsewhere, run everything. `--base` needs the merge base in the clone, so fetch the whole history:
 
@@ -150,9 +250,9 @@ A fresh CI checkout has no uncommitted changes, so plain `fnug check` selects no
   run: fnug check --all
 ```
 
-`--base` compares in the git repository that contains the current directory, not the config file's, so `fnug -c /elsewhere/fnug.yaml check --base origin/main` works when run inside the repository. The base has to resolve there even when no command has `auto.git`, so a typo in it fails the run instead of running only the `always` commands. In a workspace whose packages are other repositories, such as submodules, a package repository where the base doesn't resolve, or that has no commits yet, gets a warning and none of its commands are selected; the rest still run. When the current directory is outside every repository that `auto.git` commands' paths are in, as at the root of a workspace that isn't a repository but whose packages each are, the base must resolve in each of those repositories instead.
-
 If the checkout belongs to another user than the one running fnug, as in some containers, see [Trusted configs](#trusted-configs).
+
+### Commands that change files
 
 `fnug check` fails a command that exits with 0 but changes tracked files, and prints `FAIL (modified: src/a.rs — review and re-stage)`. Otherwise a formatter that rewrites files would pass while the commit keeps the unformatted version. Run the checking form in check mode (`cargo fmt --check`, `ruff format --check`), give fixers `auto.check: false` so only the TUI runs them, or pass `--allow-modifications`. New untracked files and ignored files don't count. With `--jobs` above 1, a change counts against every command that was running when it happened; the run fails either way. The TUI and the MCP server let commands change files.
 
@@ -167,17 +267,38 @@ If the checkout belongs to another user than the one running fnug, as in some co
 - A TUI open in the same worktree waits while a `fnug check --stash` runs, such as the pre-commit hook: the files the checkout and the restore change don't select commands or start `auto.run_on_change` runs, a config reload (from a saved config file or `F5`) is put off, and the toolbar says `Waiting for fnug check --stash to finish`. Once the run has ended, which the TUI checks about once a second, it reloads the config once if a config file changed, then selects what the changed files select and auto-runs those commands, on the final content.
 - A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that worktree puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Until then, other `fnug check` runs warn that changes are still set aside. Only one such run works on a worktree at a time; another one exits with 2. Linked worktrees of one repository don't wait for each other.
 
-### Init
+### Commands without a terminal
 
-`fnug init` writes a `.fnug.yaml` in the current directory, or in the directory you pass, with a group of commands for each kind of tooling it finds there:
+Captured commands, from `--mute-success`, `--stash`, `--jobs` above 1, the pre-commit hook or an MCP run, have no terminal. Their stdin is `/dev/null`, and each runs in a session of its own, so opening `/dev/tty`, as password and host-key prompts do, fails at once instead of waiting for input that never comes. When a captured command's shell exits, fnug stops whatever the command left running in its process group, since such a process would keep the output pipe open; start a process that should keep running in a session of its own, for example with `setsid`. Captured output keeps the first 256 KiB and the last 1 MiB of what a command writes, with `… N bytes omitted …` in between. MCP runs keep the first 64 KiB and the last 256 KiB, of which a result shows less (see [MCP server](#mcp-server)).
 
-| Found                                   | Commands                                                                 |
-| --------------------------------------- | ------------------------------------------------------------------------ |
-| `Cargo.toml`                            | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
-| `pyproject.toml`, `ruff.toml`           | `ruff check .`, `ruff format --check .`, and `mypy .` and `pytest` if `pyproject.toml` configures or depends on them (or `mypy.ini`, `pytest.ini` or `conftest.py` exists); prefixed with `uv run`, `poetry run` or `pdm run` when that tool's lockfile exists |
-| `package.json`                          | Its `format:check`, `lint`, `typecheck` and `test` scripts, run with pnpm, yarn, bun or npm to match the lockfile; `test` gets `CI=true` so test runners don't start in watch mode, and is left out if it is the placeholder `npm init` writes |
-| `go.mod`                                | A `gofmt -l` check that fails if gofmt fails or lists any file, `go vet ./...`, `go test ./...`; like `go vet ./...`, the gofmt check skips `vendor/`, `testdata/` and directories whose names start with `.` or `_` |
-| `flake.nix`                             | `alejandra --check .`, `statix check .` and `deadnix --fail .`, each only if it is on `PATH` |
+When none of fnug's stdin, stdout and stderr is a terminal, as in CI, streamed commands run in a session of their own too, and fnug stops what they leave running in the same way. A pipe on stdout alone isn't enough: `fnug check | tee check.log` from a shell keeps the terminal on stdin and stderr. From a terminal, a streamed command stays in fnug's process group so it can use the terminal, and fnug signals only the command's own process: a process it started, such as a test binary under `cargo test`, can outlive a timeout or a signal and keep writing to the terminal. Use `--mute-success` or `--jobs` for timeouts that stop the whole process tree. `--stash` always captures output for the same reason, so that nothing a command started writes to files once your unstaged changes are back.
+
+### Signals
+
+On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands, prints the summary so far, marked `Interrupted.`, and exits with 128 plus the signal number. On Ctrl+C (SIGINT), a command that shares fnug's terminal has already got the terminal's SIGINT, so fnug gives it 3 s to finish before sending SIGTERM, while a command in a session of its own gets SIGINT from fnug. On SIGTERM or SIGHUP, commands get the same signal. A timeout, `--fail-fast` and an MCP client's cancellation send SIGTERM. Whichever signal a command gets, it gets SIGKILL if it is still running 3 s later. Signals reach the whole process group of a command in a session of its own, but only the process of a command that shares fnug's terminal.
+
+## Init
+
+`fnug init` writes a `.fnug.yaml` in the current directory, or in the directory you pass, with a group of commands for each kind of tooling it finds there.
+
+| Argument / option | Description                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `[DIR]`           | Directory to create the config in [default: `--root`, `-c`'s directory, or the working directory] |
+| `--force`         | Replace the directory's config if it has one                                                      |
+| `-y`, `--yes`     | Include everything detected without asking; the default when stdin isn't a terminal               |
+
+| Found                         | Commands                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `Cargo.toml`                  | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
+| `pyproject.toml`, `ruff.toml` | `ruff check .`, `ruff format --check .`, `mypy .`, `pytest`                    |
+| `package.json`                | Its `format:check`, `lint`, `typecheck` and `test` scripts                     |
+| `go.mod`                      | A `gofmt -l` check, `go vet ./...`, `go test ./...`                            |
+| `flake.nix`                   | `alejandra --check .`, `statix check .`, `deadnix --fail .`                    |
+
+- Python: `mypy .` and `pytest` only if `pyproject.toml` configures or depends on them (or `mypy.ini`, `pytest.ini` or `conftest.py` exists). The commands are prefixed with `uv run`, `poetry run` or `pdm run` when that tool's lockfile exists.
+- Node: the scripts run with pnpm, yarn, bun or npm to match the lockfile. `test` gets `CI=true` so test runners don't start in watch mode, and is left out if it is the placeholder `npm init` writes.
+- Go: the gofmt check fails if gofmt fails or lists any file. Like `go vet ./...`, it skips `vendor/`, `testdata/` and directories whose names start with `.` or `_`.
+- Nix: each tool only if it is on `PATH`.
 
 Each group's commands are selected by uncommitted changes to the files they check (`auto.git`) and by edits to them while fnug runs (`auto.watch`). `fnug init` asks which groups to include; `--yes`, or a stdin that isn't a terminal, includes them all. If it finds nothing, the config has an example command to replace. The file starts with a comment that points the YAML language server at the schema for your fnug version (see [Editor support](#editor-support)) and sets `fnug_version`.
 
@@ -187,9 +308,9 @@ It never replaces an existing config unless you pass `--force`, which rewrites t
 
 Without a directory argument, the config goes in `--root`, as `fnug setup`'s offer does, or else in the directory of the file `-c` names, or else in the current directory. `-c FILE` names the file to write, in JSON if it ends in `.json` and in YAML otherwise. A config runs its commands from its own directory unless it is loaded with `--root`, so a `-c` file outside the project directory needs `--root` as well; without it, `fnug init` exits with 2, as it does when the directory argument and `--root` differ. `--no-workspace` has no effect on `fnug init`.
 
-### Setup
+## Setup
 
-`fnug setup` installs a git pre-commit hook that runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`, which checks what is being committed (see [Checking what is committed](#checking-what-is-committed)), and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It lists every change before making any, and makes them only once you confirm. Deselect something to remove it. When neither the directory nor a parent has a config, setup first offers to create what `fnug init` would: a config with the groups it proposes for the directory's own tooling, or in a monorepo a workspace root and a config for each package (see [Init](#init)), or else a config with an example command. It writes them before the hook and the editor entries that run them. If you leave it unticked, the list of changes notes that the hook fails every commit, and every call to the MCP server fails, until there is a config. When a config fails to load, here or in a parent, setup offers none and warns instead.
+`fnug setup` installs a git pre-commit hook that runs `fnug check --staged --stash --fail-fast --mute-success --jobs 0`, which checks what is being committed (see [Checking what is committed](#checking-what-is-committed)), and adds the MCP server to your editors' project config: `.mcp.json` for Claude Code, `.vscode/mcp.json` and `.cursor/mcp.json`. It needs a terminal to ask on, lists every change before making any, and makes them only once you confirm. Deselect something to remove it. When neither the directory nor a parent has a config, setup first offers to create what `fnug init` would: a config with the groups it proposes for the directory's own tooling, or in a monorepo a workspace root and a config for each package (see [Init](#init)), or else a config with an example command. It writes them before the hook and the editor entries that run them. If you leave it unticked, the list of changes notes that the hook fails every commit, and every call to the MCP server fails, until there is a config. When a config fails to load, here or in a parent, setup offers none and warns instead.
 
 The hook goes where git reads hooks: in `core.hooksPath` if that is set, otherwise in the main repository's `.git/hooks`, which linked worktrees share. If husky manages the hooks, or `core.hooksPath` points outside the repository, setup prints the lines to add yourself instead. A `pre-commit` that is a symlink counts as the file it links to: setup edits that file, shows it in the list of changes, and prints the lines instead if it is outside the repository.
 
@@ -201,16 +322,18 @@ In a workspace, setup also offers a hook for each package whose config is in ano
 
 Setup edits the editor configs in place, keeping comments and formatting, and adds or removes only the `fnug` entry. The entry runs `fnug mcp` with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given, with paths relative to the project directory the editor starts it in, since the editor config is usually committed. fnug has to be on the editor's `PATH`. Run setup again with other flags, and it offers to update the entry.
 
-### MCP server
+## MCP server
 
-`fnug mcp` lets coding agents run your checks through the Model Context Protocol, over stdio. It has four tools:
+`fnug mcp` lets coding agents run your checks through the Model Context Protocol, over stdio. `fnug setup` adds it to Claude Code, VS Code and Cursor; other clients can start `fnug mcp` in the project directory. It has four tools:
 
-| Tool         | Description                                                                 |
-| ------------ | --------------------------------------------------------------------------- |
-| `list_lints` | List the commands, optionally filtered, and whether the current changes select them |
-| `run_lints`  | Run the commands the current git changes select, as `fnug check` does       |
-| `run_lint`   | Run one command by id or name, after its dependencies                       |
-| `run_all`    | Run every command except those with `auto.check: false`                     |
+| Tool         | Parameters                                                               | Description                                                                         |
+| ------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `list_lints` | `group`, `name`, `auto_type`, `base`                                     | List the commands, optionally filtered, and whether the current changes select them |
+| `run_lints`  | `base`, `include_manual`, `fail_fast`, `jobs`, `timeout_secs`, `verbose` | Run the commands the current git changes select, as `fnug check` does               |
+| `run_lint`   | `command`, `timeout_secs`, `verbose`                                     | Run one command by id or name, after its dependencies                               |
+| `run_all`    | `include_manual`, `fail_fast`, `jobs`, `timeout_secs`, `verbose`         | Run every command except those with `auto.check: false`                             |
+
+`list_lints` filters by a substring of the group name (`group`) or of the command's name or id (`name`), and by `auto_type`: `git`, `watch`, `always` or `none`.
 
 The server loads the config again on every tool call, so edits to it apply without a restart. Its warnings, such as an empty group or a `fnug_version` mismatch, go to stderr once at startup and again only when a reload gives different ones. It also starts when the config is missing or broken; each tool call then fails with the reason until the config is fixed.
 
@@ -486,122 +609,67 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 
 #### Root fields
 
-| Field          | Type              | Description                                                       |
-| -------------- | ----------------- | ----------------------------------------------------------------- |
-| `fnug_version` | string            | Optional. fnug version the config targets (see below)             |
-| `name`         | string            | Display name for the root group                                   |
-| `workspace`    | bool / object     | Enable workspace mode (see [Workspace](#workspace))               |
-| `commands`     | list              | Top-level commands                                                |
-| `children`     | list              | Nested command groups                                             |
-| `cwd`          | string            | Working directory (inherited by children)                         |
-| `env`          | map               | Environment variables (inherited by children, `$VAR` expanded)    |
-| `auto`         | object            | Default auto rules (inherited by children)                        |
-| `timeout`      | integer / string  | Default command `timeout` (inherited by children)                 |
-| `exclusive`    | bool              | Default command `exclusive` (inherited by children)               |
-| `$schema`      | string            | JSON Schema URL for editors (mainly for `.fnug.json`); ignored    |
+| Field          | Type             | Description                                                    |
+| -------------- | ---------------- | -------------------------------------------------------------- |
+| `fnug_version` | string           | Optional. fnug version the config targets (see below)          |
+| `name`         | string           | Display name for the root group                                |
+| `workspace`    | bool / object    | Enable workspace mode (see [Workspace](#workspace))            |
+| `commands`     | list             | Top-level commands                                             |
+| `children`     | list             | Nested command groups                                          |
+| `cwd`          | string           | Working directory (inherited by children)                      |
+| `env`          | map              | Environment variables (inherited by children, `$VAR` expanded) |
+| `auto`         | object           | Default auto rules (inherited by children)                     |
+| `timeout`      | integer / string | Default command `timeout` (inherited by children)              |
+| `exclusive`    | bool             | Default command `exclusive` (inherited by children)            |
+| `$schema`      | string           | JSON Schema URL for editors (mainly for `.fnug.json`); ignored |
 
 `fnug_version` compares only the `major.minor.patch` numbers, so `0.1.0` matches `0.1.0-alpha.13`. fnug warns when the config needs a newer fnug, when it was written for an older release series (a different minor version before 1.0, a different major version after), or when the version can't be parsed.
 
 #### Command fields
 
-| Field        | Type              | Description                                                         |
-| ------------ | ----------------- | ------------------------------------------------------------------- |
-| `name`       | string            | Display name (required)                                             |
-| `cmd`        | string            | Shell command to run (required)                                     |
-| `id`         | string            | Identifier — defaults to the name ([Ids](#ids-and-dependencies))    |
-| `cwd`        | string            | Working directory override                                          |
-| `env`        | map               | Extra environment variables (`$VAR` expanded)                       |
-| `auto`       | object            | Auto-selection rules (see below)                                    |
-| `depends_on` | list of strings   | Commands that must finish first, by id or unique name               |
-| `scrollback` | integer           | PTY scrollback buffer size (number of lines)                        |
-| `timeout`    | integer / string  | Time limit in `fnug check` and MCP runs (see below)                 |
-| `exclusive`  | bool              | Never run alongside another command in `fnug check --jobs` runs     |
+| Field        | Type             | Description                                                      |
+| ------------ | ---------------- | ---------------------------------------------------------------- |
+| `name`       | string           | Display name (required)                                          |
+| `cmd`        | string           | Shell command to run (required)                                  |
+| `id`         | string           | Identifier — defaults to the name ([Ids](#ids-and-dependencies)) |
+| `cwd`        | string           | Working directory override                                       |
+| `env`        | map              | Extra environment variables (`$VAR` expanded)                    |
+| `auto`       | object           | Auto-selection rules (see below)                                 |
+| `depends_on` | list of strings  | Commands that must finish first, by id or unique name            |
+| `scrollback` | integer          | PTY scrollback buffer size (number of lines)                     |
+| `timeout`    | integer / string | Time limit in `fnug check` and MCP runs (see below)              |
+| `exclusive`  | bool             | Never run alongside another command in `fnug check --jobs` runs  |
 
-`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM`, then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. The signals reach every process in the command's process group, unless the command streams to fnug's terminal: then only its own process gets them (see `fnug check` above). `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
+`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM`, then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. The signals reach every process in the command's process group, unless the command streams to fnug's terminal: then only its own process gets them (see [Commands without a terminal](#commands-without-a-terminal)). `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
 
 `exclusive: true` suits commands that rewrite files, such as formatters, so that nothing reads the files while they change. It matters only when `fnug check --jobs` runs several commands at once; the TUI ignores it.
 
 #### Group fields
 
-| Field      | Type              | Description                                                           |
-| ---------- | ----------------- | --------------------------------------------------------------------- |
-| `name`     | string            | Display name (required)                                               |
-| `id`       | string            | Identifier — defaults to the name ([Ids](#ids-and-dependencies))      |
-| `cwd`      | string            | Working directory (inherited by children)                             |
-| `env`      | map               | Environment variables (inherited by children, `$VAR` expanded)        |
-| `auto`     | object            | Default auto rules (inherited by children)                            |
-| `timeout`  | integer / string  | Default command `timeout` (inherited by children)                     |
-| `exclusive` | bool             | Default command `exclusive` (inherited by children)                   |
-| `commands` | list              | Commands in this group                                                |
-| `children` | list              | Nested child groups                                                   |
+| Field       | Type             | Description                                                      |
+| ----------- | ---------------- | ---------------------------------------------------------------- |
+| `name`      | string           | Display name (required)                                          |
+| `id`        | string           | Identifier — defaults to the name ([Ids](#ids-and-dependencies)) |
+| `cwd`       | string           | Working directory (inherited by children)                        |
+| `env`       | map              | Environment variables (inherited by children, `$VAR` expanded)   |
+| `auto`      | object           | Default auto rules (inherited by children)                       |
+| `timeout`   | integer / string | Default command `timeout` (inherited by children)                |
+| `exclusive` | bool             | Default command `exclusive` (inherited by children)              |
+| `commands`  | list             | Commands in this group                                           |
+| `children`  | list             | Nested child groups                                              |
 
 #### Auto fields
 
-| Field    | Type              | Description                                                             |
-| -------- | ----------------- | ----------------------------------------------------------------------- |
-| `git`    | bool              | Select when git-changed files match `path`/`regex`                      |
-| `watch`  | bool              | Select when watched files match `path`/`regex`                          |
-| `always` | bool              | Always selected regardless of changes                                   |
-| `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`); they may not exist yet |
-| `regex`  | list of strings   | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)      |
-| `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
-| `run_on_change` | bool         | In the TUI, run the command when a watched change selects it; needs `watch` (default `false`) |
+| Field           | Type            | Description                                                                                   |
+| --------------- | --------------- | --------------------------------------------------------------------------------------------- |
+| `git`           | bool            | Select when git-changed files match `path`/`regex`                                            |
+| `watch`         | bool            | Select when watched files match `path`/`regex`                                                |
+| `always`        | bool            | Always selected regardless of changes                                                         |
+| `path`          | list of strings | Path prefixes to match against (e.g. `"./src"`); they may not exist yet                       |
+| `regex`         | list of strings | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)                            |
+| `check`         | bool            | Include in `fnug check` — set `false` to skip (default `true`)                                |
+| `run_on_change` | bool            | In the TUI, run the command when a watched change selects it; needs `watch` (default `false`) |
 
 A changed file selects a command when it is under one of its `path` entries and matches one of its `regex` patterns (any file, if there are none). The patterns see the file's path relative to the command's `cwd`, such as `src/main.rs`, or `../shared/lib.rs` for a file outside it. Anchor with `^` to match from the `cwd` (`^tests/`), or write `(^|/)tests/` to match a directory at any depth.
 
 Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `.git/info/exclude` or `core.excludesFile`) or anything inside a `.git` directory. The watcher makes one exception: below a `path` that git ignores itself, such as `./target/doc`, every change counts. It goes by the ignore rules alone, so it also skips a file that git tracks although a rule matches it, which `git` still counts. A watch `path` that doesn't exist when fnug starts is not watched. Like `git`, the watcher doesn't follow symlinked directories. On Linux, a directory that a `.gitignore` edit stops ignoring is only watched once fnug restarts.
-
-## Keyboard Shortcuts
-
-| Key            | Context    | Action                   |
-| -------------- | ---------- | ------------------------ |
-| `j` / `↓`      | Tree       | Move down                |
-| `k` / `↑`      | Tree       | Move up                  |
-| `h` / `←`      | Tree       | Collapse / deselect      |
-| `l` / `→`      | Tree       | Expand / select          |
-| `Space`        | Tree       | Toggle selection         |
-| `E`            | Tree       | Expand all groups        |
-| `W`            | Tree       | Collapse all groups      |
-| `/`            | Tree       | Search and filter        |
-| `Enter`        | Tree       | Run selected commands    |
-| `r`            | Tree       | Run command or group     |
-| `s`            | Tree       | Stop command             |
-| `x`            | Tree       | Clear command            |
-| `g`            | Tree       | Select by git changes    |
-| `F5`           | Tree       | Reload the config        |
-| `w`            | Tree       | Toggle auto-run          |
-| `c`            | Tree       | Copy output              |
-| `Shift+↑/↓`    | Tree       | Scroll output            |
-| `{` / `}`      | Tree       | Output top / bottom      |
-| `Shift+Home`   | Tree       | Output top               |
-| `Shift+End`    | Tree       | Output bottom            |
-| `Tab`          | Tree       | Type into the command    |
-| `Ctrl+R`       | Tree       | Toggle fullscreen        |
-| `L`            | Tree       | Toggle log panel         |
-| `?`            | Tree       | Toggle this help         |
-| `q` / `Ctrl+C` | Tree       | Quit                     |
-| `Enter`        | Search     | Keep the filter          |
-| `Esc`          | Search     | Clear the search         |
-| `Ctrl+]`       | Terminal   | Back to the tree         |
-| `Esc`          | Terminal   | Back, unless full-screen |
-| `Esc`          | Fullscreen | Exit fullscreen          |
-
-`?` shows this list in the TUI. `Shift+Home` and `Shift+End` also jump to the top and bottom of the output. While a command has the keyboard, every key but `Ctrl+]` goes to it, and so does `Esc` if it runs a full-screen program.
-
-### Mouse
-
-- **Click** a tree item to select it
-- **Double-click** a command to run it, or a group to expand/collapse
-- **Click** the selection orb (●/○) or arrow (▼/▶) to toggle
-- **Drag** the separator between tree and terminal to resize
-- **Scroll wheel** in the terminal panel to scroll output
-- **Click** the terminal panel of a running full-screen or mouse-aware program to type into it
-- **Right-click** a command for a context menu with run/stop/clear options
-
-### Copying output
-
-`c` copies the command's whole output, scrollback included, without the lines fnug adds before and after it. When the command's latest queued run never started, because you stopped it or a command it depends on, `c` copies nothing and says so, as the pane shows no output then. fnug uses `pbcopy` on macOS and `wl-copy`, `xclip` or `xsel` on Linux, and falls back to OSC 52, an escape sequence that asks the terminal fnug runs in to set the clipboard. Over SSH, OSC 52 comes first, so the text lands on your machine rather than the server. Inside tmux, OSC 52 needs `set -g set-clipboard on`. Output over 1 MiB is cut to its last 1 MiB. Some terminals limit the size of an OSC 52 copy and silently drop a larger one, and fnug can't tell when that happens.
-
-### Reloading the config
-
-The TUI loads the config again when you save one of its files, or when you press `F5`. Commands and groups keep their output, selection and expansion by id. A command that is no longer in the config is stopped, and a running command whose `cmd`, `cwd` or `env` now differs from what it was started with keeps running as it was until you restart it; the toolbar names it. While a `fnug check --stash` runs, reloads wait for it to end (see [Checking what is committed](#checking-what-is-committed)). If the new config doesn't load, the old one stays and the toolbar shows why until a reload succeeds. A new workspace package is only picked up by `F5`, since fnug watches the config files it loaded.
