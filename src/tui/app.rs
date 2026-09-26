@@ -19,6 +19,7 @@ use crate::selectors::{self, SelectOptions};
 use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
 use super::run_summary::{RunRecord, RunSummary};
+use super::status::{StatusLevel, StatusMessage};
 use super::toolbar;
 use super::tree_state::{TreeContext, find_command_in_group, find_group_in_group, flatten_group};
 use super::tree_widget::{NodeKind, VisibleNode};
@@ -86,6 +87,11 @@ pub enum AppEvent {
     WatcherTriggered(Vec<WatchMatch>),
     LogUpdated,
     GitSelectionComplete(u64, Vec<Command>),
+    /// Show a message in the toolbar
+    Status {
+        text: String,
+        level: StatusLevel,
+    },
 }
 
 /// Which pane currently has keyboard focus
@@ -243,6 +249,12 @@ pub struct App {
     pub log_buffer: LogBuffer,
     /// Scroll offset for the log panel (0 = bottom / newest)
     pub log_scroll: usize,
+    /// The log buffer's issue count when the log panel last showed
+    pub(super) seen_log_issues: usize,
+    /// Unseen warnings and errors as of the last log update, to redraw when the count changes
+    log_badge: usize,
+    /// Message shown in the toolbar until it expires
+    pub status: Option<StatusMessage>,
     /// Search / filter bar state
     pub search: SearchState,
     /// Which commands wait on which, and how each command's last run in this session ended
@@ -341,6 +353,9 @@ impl App {
             show_logs: false,
             log_buffer,
             log_scroll: 0,
+            seen_log_issues: 0,
+            log_badge: 0,
+            status: None,
             search: SearchState::Inactive,
             dag: DagState::new(),
             queued_generation: HashMap::new(),
@@ -602,9 +617,56 @@ impl App {
                 self.fit_expansion_to_selection(false);
                 self.mark_tree_dirty();
             }
-            AppEvent::LogUpdated => return self.show_logs,
+            AppEvent::LogUpdated => {
+                let unseen = self.unseen_log_issues();
+                let badge_changed = unseen != self.log_badge;
+                self.log_badge = unseen;
+                return self.logs_on_screen() || badge_changed;
+            }
+            AppEvent::Status { text, level } => self.set_status(text, level),
         }
         true
+    }
+
+    /// Show `text` in the toolbar for a few seconds, replacing any earlier message.
+    pub fn set_status(&mut self, text: impl Into<String>, level: StatusLevel) {
+        self.status = Some(StatusMessage::new(text.into(), level, Instant::now()));
+    }
+
+    /// Warnings and errors logged since the log panel last showed
+    #[must_use]
+    pub fn unseen_log_issues(&self) -> usize {
+        self.log_buffer
+            .issue_count()
+            .saturating_sub(self.seen_log_issues)
+    }
+
+    /// Record that the log panel shows every warning and error logged so far.
+    pub(super) fn mark_logs_seen(&mut self) {
+        self.seen_log_issues = self.log_buffer.issue_count();
+        self.log_badge = 0;
+    }
+
+    /// Whether [`tick`](Self::tick) has anything to do: advance running commands' elapsed
+    /// time, or expire the status message.
+    #[must_use]
+    pub fn wants_tick(&self) -> bool {
+        self.has_active_runs() || self.status.is_some()
+    }
+
+    /// Update what changes with time alone, at `now`. Returns whether the screen needs a
+    /// redraw.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        if self.status.as_ref().is_some_and(|s| now >= s.expires_at) {
+            self.status = None;
+            changed = true;
+        }
+        if self.has_active_runs() {
+            self.mark_tree_dirty();
+            changed = true;
+        }
+        changed
     }
 
     /// The process for `id`, unless an event of `generation` comes from an earlier, replaced run
@@ -1202,11 +1264,41 @@ mod tests {
     }
 
     #[test]
+    fn status_expires_by_level() {
+        let mut app = App::new(make_test_tree(), PathBuf::new(), LogBuffer::new());
+        assert!(!app.wants_tick());
+
+        app.set_status("copied", StatusLevel::Info);
+        assert!(app.wants_tick());
+        let later = Instant::now() + Duration::from_secs(5);
+        assert!(app.tick(later));
+        assert_eq!(app.status, None);
+
+        app.set_status("failed", StatusLevel::Error);
+        assert!(!app.tick(later));
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn status_event_shows_message() {
+        let mut app = App::new(make_test_tree(), PathBuf::new(), LogBuffer::new());
+        let event = AppEvent::Status {
+            text: "watch limit".into(),
+            level: StatusLevel::Warn,
+        };
+        assert!(app.handle_app_event(event));
+        assert_eq!(app.status.as_ref().unwrap().text, "watch limit");
+    }
+
+    #[test]
     fn log_update_redraws_only_under_log_panel() {
         let mut app = App::new(make_test_tree(), PathBuf::new(), LogBuffer::new());
         assert!(!app.handle_app_event(AppEvent::LogUpdated));
         app.show_logs = true;
         assert!(app.handle_app_event(AppEvent::LogUpdated));
+        // Fullscreen shows the terminal instead
+        app.fullscreen = true;
+        assert!(!app.handle_app_event(AppEvent::LogUpdated));
     }
 
     mod expansion {

@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
@@ -28,6 +28,8 @@ pub struct LogEntry {
 #[derive(Debug, Clone)]
 pub struct LogBuffer {
     entries: Arc<Mutex<VecDeque<LogEntry>>>,
+    /// Warnings and errors pushed so far, including those the ring dropped since
+    issues: Arc<AtomicUsize>,
     start: Instant,
 }
 
@@ -36,6 +38,7 @@ impl LogBuffer {
     pub fn new() -> Self {
         Self {
             entries: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))),
+            issues: Arc::new(AtomicUsize::new(0)),
             start: Instant::now(),
         }
     }
@@ -45,7 +48,16 @@ impl LogBuffer {
         self.start
     }
 
+    /// How many warnings and errors were ever pushed; it only grows.
+    #[must_use]
+    pub fn issue_count(&self) -> usize {
+        self.issues.load(Ordering::Relaxed)
+    }
+
     pub fn push(&self, entry: LogEntry) {
+        if entry.level <= Level::Warn {
+            self.issues.fetch_add(1, Ordering::Relaxed);
+        }
         let mut entries = self.entries.lock();
         if entries.len() >= MAX_LOG_ENTRIES {
             entries.pop_front();
@@ -447,6 +459,18 @@ mod tests {
         // Oldest 500 entries should have been dropped
         assert_eq!(entries[0].message, "msg-500");
         assert_eq!(entries[999].message, "msg-1499");
+    }
+
+    #[test]
+    fn issue_count_survives_overflow() {
+        let buf = LogBuffer::new();
+        buf.push(make_entry(Level::Error, "broken"));
+        buf.push(make_entry(Level::Warn, "odd"));
+        buf.push(make_entry(Level::Info, "fine"));
+        for _ in 0..MAX_LOG_ENTRIES {
+            buf.push(make_entry(Level::Debug, "noise"));
+        }
+        assert_eq!(buf.issue_count(), 2);
     }
 
     #[test]

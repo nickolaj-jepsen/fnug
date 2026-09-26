@@ -1,9 +1,10 @@
 use std::borrow::Cow;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::app::{App, CommandStatus, Focus};
+use super::status::{StatusLevel, StatusMessage};
 use super::tree_widget::NodeKind;
 use crate::theme;
 
@@ -173,7 +174,14 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
                 shortcuts.push(Shortcut::new("/", "Search", ToolbarAction::Search));
             }
 
-            let log_label = if app.show_logs { "Hide logs" } else { "Logs" };
+            let unseen = app.unseen_log_issues();
+            let log_label: Cow<'static, str> = if app.show_logs {
+                "Hide logs".into()
+            } else if unseen > 0 {
+                format!("Logs ({unseen}!)").into()
+            } else {
+                "Logs".into()
+            };
             shortcuts.push(Shortcut::new("L", log_label, ToolbarAction::ToggleLogs));
             shortcuts.push(Shortcut::new("?", "Help", ToolbarAction::ShowHelp));
             shortcuts.push(Shortcut::new("Q", "Quit", ToolbarAction::Quit));
@@ -186,23 +194,90 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
 /// Separator between shortcuts
 const SEP: &str = "  ";
 
-pub fn build_toolbar_line(app: &App, width: u16) -> (Line<'static>, Vec<ToolbarRegion>) {
-    let shortcuts = get_shortcuts(app);
-    let max_width = width as usize;
-
+/// A shortcut as a key badge, " KEY ", then its description
+fn shortcut_spans(shortcut: &Shortcut, hovered: bool) -> [Span<'static>; 3] {
     let key_style = Style::default()
         .fg(theme::TOOLBAR_KEY_FG)
         .bg(theme::TOOLBAR_KEY_BG)
         .add_modifier(Modifier::BOLD);
-    let desc_style = Style::default()
+    let mut desc_style = Style::default()
         .fg(theme::TOOLBAR_DESC)
         .bg(theme::TOOLBAR_BG);
-    let bg_style = Style::default().bg(theme::TOOLBAR_BG);
+    if hovered {
+        desc_style = desc_style.add_modifier(Modifier::UNDERLINED);
+    }
+    [
+        Span::styled(format!(" {} ", shortcut.key), key_style),
+        Span::styled(" ", Style::default().bg(theme::TOOLBAR_BG)),
+        Span::styled(shortcut.desc.clone(), desc_style),
+    ]
+}
 
-    let hover_desc_style = Style::default()
-        .fg(theme::TOOLBAR_DESC)
-        .bg(theme::TOOLBAR_BG)
-        .add_modifier(Modifier::UNDERLINED);
+/// `text` cut to at most `max` characters, ending in `…` when cut
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    if max > 0 {
+        cut.push('…');
+    }
+    cut
+}
+
+/// The status message in place of the shortcuts, with `? Help` kept at the right edge
+fn status_line(
+    app: &App,
+    status: &StatusMessage,
+    width: u16,
+) -> (Line<'static>, Vec<ToolbarRegion>) {
+    let max_width = usize::from(width);
+    let bg_style = Style::default().bg(theme::TOOLBAR_BG);
+    let color = match status.level {
+        StatusLevel::Info => theme::TOOLBAR_DESC,
+        StatusLevel::Warn => Color::Yellow,
+        StatusLevel::Error => theme::FAILURE,
+    };
+    let help = Shortcut::new("?", "Help", ToolbarAction::ShowHelp);
+    // A leading space, the text, and at least one space before the help
+    let text = truncate(&status.text, max_width.saturating_sub(help.width() + 2));
+    let used = 1 + text.chars().count();
+
+    let mut spans = vec![
+        Span::styled(" ", bg_style),
+        Span::styled(text, Style::default().fg(color).bg(theme::TOOLBAR_BG)),
+    ];
+    let mut regions = Vec::new();
+    if used + 1 + help.width() <= max_width {
+        let x_start = max_width - help.width();
+        spans.push(Span::styled(" ".repeat(x_start - used), bg_style));
+        spans.extend(shortcut_spans(&help, app.toolbar.hover == Some(0)));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "toolbar x position fits in u16"
+        )]
+        regions.push(ToolbarRegion {
+            x_start: x_start as u16,
+            x_end: width,
+            action: help.action,
+        });
+    } else if used < max_width {
+        spans.push(Span::styled(" ".repeat(max_width - used), bg_style));
+    }
+    (Line::from(spans), regions)
+}
+
+pub fn build_toolbar_line(app: &App, width: u16) -> (Line<'static>, Vec<ToolbarRegion>) {
+    // Fullscreen and terminal focus keep their few shortcuts: they tell how to get back
+    if let Some(status) = &app.status
+        && !app.fullscreen
+        && app.focus == Focus::Tree
+    {
+        return status_line(app, status, width);
+    }
+    let shortcuts = get_shortcuts(app);
+    let max_width = width as usize;
+    let bg_style = Style::default().bg(theme::TOOLBAR_BG);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut regions: Vec<ToolbarRegion> = Vec::new();
@@ -226,20 +301,7 @@ pub fn build_toolbar_line(app: &App, width: u16) -> (Line<'static>, Vec<ToolbarR
             reason = "toolbar x position fits in u16"
         )]
         let x_start = x as u16;
-        let is_hovered = app.toolbar.hover == Some(i);
-
-        // Key rendered as a badge: " KEY " on dark background
-        spans.push(Span::styled(format!(" {} ", shortcut.key), key_style));
-        spans.push(Span::styled(" ", bg_style));
-        spans.push(Span::styled(
-            shortcut.desc.clone(),
-            if is_hovered {
-                hover_desc_style
-            } else {
-                desc_style
-            },
-        ));
-
+        spans.extend(shortcut_spans(shortcut, app.toolbar.hover == Some(i)));
         x += shortcut.width();
 
         regions.push(ToolbarRegion {
@@ -260,4 +322,87 @@ pub fn build_toolbar_line(app: &App, width: u16) -> (Line<'static>, Vec<ToolbarR
     }
 
     (Line::from(spans), regions)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use crossterm::event::KeyCode;
+    use log::Level;
+
+    use super::*;
+    use crate::logger::LogEntry;
+    use crate::tui::app::AppEvent;
+    use crate::tui::test_util::{draw, press, two_groups};
+
+    fn toolbar_text(app: &App, width: u16) -> String {
+        let (line, _) = build_toolbar_line(app, width);
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn status_replaces_shortcuts_but_keeps_help() {
+        let mut app = two_groups();
+        app.set_status("Not watching every file", StatusLevel::Warn);
+
+        let (_, regions) = build_toolbar_line(&app, 80);
+        let text = toolbar_text(&app, 80);
+
+        assert!(text.starts_with(" Not watching every file "), "{text:?}");
+        assert!(text.ends_with(" ?  Help"), "{text:?}");
+        assert!(!text.contains("Quit"), "{text:?}");
+        assert_eq!(text.chars().count(), 80);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].action, ToolbarAction::ShowHelp);
+        assert_eq!(regions[0].x_end, 80);
+    }
+
+    #[test]
+    fn long_status_is_cut_before_help() {
+        let mut app = two_groups();
+        app.set_status("x".repeat(100), StatusLevel::Error);
+
+        let text = toolbar_text(&app, 40);
+
+        assert!(text.contains("x…"), "{text:?}");
+        assert!(text.ends_with(" ?  Help"), "{text:?}");
+        assert_eq!(text.chars().count(), 40);
+    }
+
+    #[test]
+    fn terminal_focus_keeps_its_shortcuts_over_status() {
+        let mut app = two_groups();
+        app.set_status("Copied", StatusLevel::Info);
+        app.focus = Focus::Terminal;
+
+        assert!(toolbar_text(&app, 80).contains("Back to tree"));
+    }
+
+    #[test]
+    fn log_badge_counts_unseen_issues() {
+        let mut app = two_groups();
+        let warn = LogEntry {
+            level: Level::Warn,
+            target: "test".into(),
+            message: "careful".into(),
+            timestamp: Instant::now(),
+        };
+        app.log_buffer.push(warn.clone());
+        app.log_buffer.push(warn);
+        assert!(app.handle_app_event(AppEvent::LogUpdated));
+        assert!(toolbar_text(&app, 120).contains("Logs (2!)"));
+        // Nothing new to show
+        assert!(!app.handle_app_event(AppEvent::LogUpdated));
+
+        press(&mut app, KeyCode::Char('L'));
+        draw(&mut app, 120, 24);
+        press(&mut app, KeyCode::Char('L'));
+
+        let text = toolbar_text(&app, 120);
+        assert!(
+            text.contains(" Logs ") && !text.contains("(2!)"),
+            "{text:?}"
+        );
+    }
 }

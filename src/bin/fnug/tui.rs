@@ -19,6 +19,7 @@ use fnug::commands::group::CommandGroup;
 use fnug::logger::LoggerHandle;
 use fnug::selectors::watch::{WatchError, WatchReport, watch_commands};
 use fnug::tui::app::{App, AppEvent};
+use fnug::tui::status::{StatusLevel, watch_problems};
 
 /// Start a file watcher that forwards watch events to the app event channel.
 /// The watcher setup (inotify registration) runs on a blocking thread to avoid
@@ -34,9 +35,16 @@ fn start_file_watcher(
         // large directory trees is slow and would block the TUI event loop).
         let result = tokio::task::spawn_blocking(move || watch_commands(all_commands)).await;
 
+        let status = |text: String| AppEvent::Status {
+            text,
+            level: StatusLevel::Warn,
+        };
         let mut handle = match result {
             Ok(Ok(handle)) => {
                 log_watch_report(&handle.report);
+                if let Some(problems) = watch_problems(&handle.report) {
+                    let _ = event_tx.send(status(problems)).await;
+                }
                 handle
             }
             Ok(Err(WatchError::NoWatchableCommands)) => {
@@ -48,6 +56,9 @@ fn start_file_watcher(
                     log_watch_report(report);
                 }
                 warn!("File watcher not started: {e}");
+                let _ = event_tx
+                    .send(status(format!("File watcher not started: {e}")))
+                    .await;
                 return;
             }
             Err(e) => {
@@ -214,7 +225,7 @@ async fn run_event_loop(
     let mut next_frame = Instant::now();
     let output = app.output_notify();
 
-    // Advances the elapsed time of running commands
+    // Advances running commands' elapsed time and expires status messages
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -242,9 +253,8 @@ async fn run_event_loop(
             () = tokio::time::sleep_until(next_frame), if needs_render => {}
             // Output for the terminal on screen; the loop's top checks which one got it
             () = output.notified() => {}
-            _ = clock.tick(), if app.has_active_runs() => {
-                app.mark_tree_dirty();
-                needs_render = true;
+            _ = clock.tick(), if app.wants_tick() => {
+                needs_render |= app.tick(std::time::Instant::now());
             }
             // Crossterm events
             maybe_event = event_stream.next() => {
