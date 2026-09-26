@@ -63,20 +63,29 @@ fn format_duration(d: Duration) -> String {
 /// Prints [`RunEvent`]s as they arrive.
 ///
 /// With streamed output, a command's header goes on its own line before the command writes
-/// anything, and its result follows its output. With captured output, each command is printed
-/// once it ends: its result, then its output unless it passed and passing output is muted.
+/// anything, and its result follows its output. With captured output, a command's result is
+/// followed by its output unless it passed and passing output is muted. One command at a time,
+/// the header is printed when the command starts and the result ends the same line; with
+/// several, the whole line is printed when the command ends.
 pub(super) struct Printer {
     sty: Style,
     streaming: bool,
+    /// Captured output, one command at a time.
+    inline: bool,
+    /// The `seq` of the command whose line waits for its result.
+    open: Option<usize>,
     mute_success: bool,
     names: HashMap<String, String>,
 }
 
 impl Printer {
-    pub(super) fn new(plan: &Plan, output: OutputMode, mute_success: bool) -> Self {
+    pub(super) fn new(plan: &Plan, output: OutputMode, serial: bool, mute_success: bool) -> Self {
+        let streaming = output == OutputMode::Inherit;
         Self {
             sty: Style::new(),
-            streaming: output == OutputMode::Inherit,
+            streaming,
+            inline: !streaming && serial,
+            open: None,
             mute_success,
             names: plan
                 .commands
@@ -93,12 +102,16 @@ impl Printer {
     pub(super) fn event(&mut self, event: &RunEvent) {
         match *event {
             RunEvent::Started { seq, total, cmd } => {
+                let header = format!(
+                    "{} {}",
+                    self.sty.bold(&counter(seq, total)),
+                    cmd.command.name
+                );
                 if self.streaming {
-                    eprintln!(
-                        "{} {}",
-                        self.sty.bold(&counter(seq, total)),
-                        cmd.command.name
-                    );
+                    eprintln!("{header}");
+                } else if self.inline {
+                    eprint!("{header} ");
+                    self.open = Some(seq);
                 }
             }
             RunEvent::Finished {
@@ -111,13 +124,26 @@ impl Printer {
                 if report.outcome == Outcome::NotRun {
                     return;
                 }
-                let index = if self.streaming { seq } else { done };
-                eprintln!(
-                    "{} {} {}",
-                    self.sty.dim(&counter(index, total)),
-                    report.name,
-                    self.status(report)
-                );
+                let status = self.status(report);
+                match self.open.take() {
+                    Some(open) if open == seq => eprintln!("{status}"),
+                    open => {
+                        // Another command's line is open; it gets a line of its own when it ends
+                        if open.is_some() {
+                            eprintln!();
+                        }
+                        let index = if self.streaming || self.inline {
+                            seq
+                        } else {
+                            done
+                        };
+                        eprintln!(
+                            "{} {} {status}",
+                            self.sty.dim(&counter(index, total)),
+                            report.name,
+                        );
+                    }
+                }
                 self.print_output(report);
             }
         }
