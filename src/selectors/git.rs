@@ -149,6 +149,25 @@ impl From<git2::Error> for ScanError {
     }
 }
 
+impl ScanError {
+    /// The issue for the repo with work tree `repo`; a base problem there is `fatal` or not.
+    fn into_issue(self, repo: PathBuf, fatal: bool) -> SelectionIssue {
+        match self {
+            ScanError::Git(e) => SelectionIssue::ScanFailed {
+                repo,
+                message: e.message().to_string(),
+            },
+            ScanError::BaseRefNotFound { base, message } => SelectionIssue::BaseRefNotFound {
+                repo,
+                base,
+                message,
+                fatal,
+            },
+            ScanError::UnbornHead => SelectionIssue::UnbornHead { repo, fatal },
+        }
+    }
+}
+
 /// Collect the changed files under a repo's pathspecs within `scope`, reading `index_file`
 /// instead of the repo's index if given.
 fn scan(
@@ -224,8 +243,8 @@ fn scan_staged(entry: &RepoEntry, index_file: Option<&Path>) -> Result<Vec<Chang
     Ok(diff_changes(entry, &diff))
 }
 
-fn scan_since(entry: &RepoEntry, base: &str) -> Result<Vec<Change>, ScanError> {
-    let repo = &entry.repo;
+/// The merge base of `repo`'s `HEAD` and `base`.
+fn merge_base(repo: &Repository, base: &str) -> Result<git2::Oid, ScanError> {
     let head = match repo.head() {
         Ok(head) => head.peel_to_commit()?,
         Err(e) if matches!(e.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
@@ -241,7 +260,7 @@ fn scan_since(entry: &RepoEntry, base: &str) -> Result<Vec<Change>, ScanError> {
         .revparse_single(base)
         .and_then(|object| object.peel_to_commit())
         .map_err(|e| not_found(e.message().to_string()))?;
-    let merge_base = repo.merge_base(head.id(), base_commit.id()).map_err(|e| {
+    repo.merge_base(head.id(), base_commit.id()).map_err(|e| {
         not_found(if e.code() != ErrorCode::NotFound {
             e.message().to_string()
         } else if repo.is_shallow() {
@@ -249,8 +268,12 @@ fn scan_since(entry: &RepoEntry, base: &str) -> Result<Vec<Change>, ScanError> {
         } else {
             "no common history with HEAD".to_string()
         })
-    })?;
-    let tree = repo.find_commit(merge_base)?.tree()?;
+    })
+}
+
+fn scan_since(entry: &RepoEntry, base: &str) -> Result<Vec<Change>, ScanError> {
+    let repo = &entry.repo;
+    let tree = repo.find_commit(merge_base(repo, base)?)?.tree()?;
     let mut opts = diff_options(entry);
     opts.include_untracked(true).recurse_untracked_dirs(true);
     let diff = repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))?;
@@ -294,6 +317,15 @@ fn check_current_repo(opts: &SelectOptions, current_dir: Option<&Path>) -> Optio
         message,
         fatal: true,
     })
+}
+
+/// Under the since-base scope with no repo to scan, `base` must still resolve in the repo
+/// containing `current_dir`, if there is one, or selecting nothing would pass unnoticed.
+/// Returns the fatal issue if it doesn't.
+fn check_base(base: &str, current_dir: Option<&Path>) -> Option<SelectionIssue> {
+    let (workdir, repo) = open_work_tree(current_dir?).ok()?;
+    let error = merge_base(&repo, base).err()?;
+    Some(error.into_issue(workdir, true))
 }
 
 /// Discover the repo of every `auto.path` of the git-enabled `commands`, once per path.
@@ -372,19 +404,7 @@ fn scan_repos(
             let fatal = primary.is_none_or(|primary| primary == repo);
             let issue = match result {
                 Ok(Ok(changes)) => return Some(changes),
-                Ok(Err(ScanError::Git(e))) => SelectionIssue::ScanFailed {
-                    repo,
-                    message: e.message().to_string(),
-                },
-                Ok(Err(ScanError::BaseRefNotFound { base, message })) => {
-                    SelectionIssue::BaseRefNotFound {
-                        repo,
-                        base,
-                        message,
-                        fatal,
-                    }
-                }
-                Ok(Err(ScanError::UnbornHead)) => SelectionIssue::UnbornHead { repo, fatal },
+                Ok(Err(e)) => e.into_issue(repo, fatal),
                 Err(_) => SelectionIssue::ScanFailed {
                     repo,
                     message: "the scan panicked".to_string(),
@@ -437,6 +457,11 @@ pub(super) fn select(
     let mut issues: Vec<SelectionIssue> =
         check_current_repo(opts, current_dir).into_iter().collect();
     let (repos, path_repo) = discover_repos(commands, &mut issues);
+    if let GitScope::Since(base) = &opts.scope
+        && repos.is_empty()
+    {
+        issues.extend(check_base(base, current_dir));
+    }
     let primary = current_dir
         .and_then(|dir| open_work_tree(dir).ok())
         .map(|(workdir, _)| workdir)

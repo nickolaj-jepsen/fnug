@@ -898,6 +898,26 @@ fn base_unresolvable_exits_2() {
 }
 
 #[test]
+fn base_unresolvable_without_git_commands_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    clean_repo(
+        dir.path(),
+        "name: root\nauto:\n  always: true\ncommands:\n  - name: build\n    cmd: 'true'\n",
+    );
+
+    // Nothing is scanned for changes, but passing with a base that doesn't exist would be false
+    let output = check(dir.path(), &["--base", "origin/nope"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("base 'origin/nope'"), "{err}");
+    assert!(ran(&output).is_empty(), "{err}");
+
+    let output = check(dir.path(), &["--base", "HEAD"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["build"], "{}", stderr(&output));
+}
+
+#[test]
 fn base_outside_repo_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     if git2::Repository::discover(dir.path()).is_ok() {
