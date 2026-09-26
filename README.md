@@ -388,7 +388,7 @@ They run the `fnug` installed next to the Python interpreter, as the wheel does,
 
 ## Configuration
 
-Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from the current directory upward.
+Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from the current directory upward. In a directory with more than one, `.fnug.json` wins, then `.fnug.yaml`.
 
 Unknown keys are errors, so a typo like `depends-on` or `gti` fails loudly with its line number and a suggestion instead of being ignored. YAML anchors and aliases work (`auto: *defaults`), but merge keys (`<<: *defaults`) are not supported.
 
@@ -592,9 +592,9 @@ children:
 
 ### Workspace
 
-Workspace mode discovers `.fnug.yaml` files in subdirectories and merges them as child groups. This is useful for mono-repos where each package has its own config.
+Workspace mode discovers `.fnug.yaml` files (or `.fnug.yml`, `.fnug.json`) in subdirectories and merges them as child groups. This is useful for mono-repos where each package has its own config.
 
-When `workspace: true`, fnug walks the filesystem (skipping `.gitignore`'d and hidden directories) to find sub-configs. Files do not need to be git-tracked to be discovered. Outside a git repository nothing counts as ignored, so only hidden directories are skipped.
+When `workspace: true`, fnug walks the filesystem (skipping `.gitignore`'d and hidden directories) to find sub-configs. Files do not need to be git-tracked to be discovered. Outside a git repository nothing counts as ignored, so only hidden directories are skipped. The walk doesn't look inside a directory that has a config, and a package's own `workspace` key is ignored with a warning, so packages don't nest.
 
 ```yaml
 # Auto-discover sub-configs (walks up to 5 levels deep)
@@ -648,69 +648,83 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 
 ### Configuration reference
 
+Every key the schema (`fnug schema`) allows. "Inherited" keys also apply to everything below, unless a group or command sets them itself.
+
 #### Root fields
 
-| Field          | Type             | Description                                                    |
-| -------------- | ---------------- | -------------------------------------------------------------- |
-| `fnug_version` | string           | Optional. fnug version the config targets (see below)          |
-| `name`         | string           | Display name for the root group                                |
-| `workspace`    | bool / object    | Enable workspace mode (see [Workspace](#workspace))            |
-| `commands`     | list             | Top-level commands                                             |
-| `children`     | list             | Nested command groups                                          |
-| `cwd`          | string           | Working directory (inherited by children)                      |
-| `env`          | map              | Environment variables (inherited by children, `$VAR` expanded) |
-| `auto`         | object           | Default auto rules (inherited by children)                     |
-| `timeout`      | integer / string | Default command `timeout` (inherited by children)              |
-| `exclusive`    | bool             | Default command `exclusive` (inherited by children)            |
-| `$schema`      | string           | JSON Schema URL for editors (mainly for `.fnug.json`); ignored |
+| Field          | Type             | Default                             | Description                                                                    |
+| -------------- | ---------------- | ----------------------------------- | ------------------------------------------------------------------------------ |
+| `name`         | string           | required                            | Display name for the root group                                                |
+| `fnug_version` | string           | none                                | fnug version the config is written for (see below)                             |
+| `id`           | string           | the name                            | Id of the root group; in a workspace package, the prefix of its ids            |
+| `workspace`    | bool / object    | `false`                             | Discover and merge package configs (see [Workspace fields](#workspace-fields)) |
+| `commands`     | list of commands | none                                | Top-level commands                                                             |
+| `children`     | list of groups   | none                                | Command groups                                                                 |
+| `cwd`          | string           | the config's directory, or `--root` | Working directory, relative to the config's directory or `--root` (inherited)  |
+| `env`          | map of strings   | none                                | Environment variables for every command, `$VAR` expanded (inherited)           |
+| `auto`         | object           | none                                | Default auto rules for every command (inherited)                               |
+| `timeout`      | integer / string | no limit                            | Default command `timeout` (inherited)                                          |
+| `exclusive`    | bool             | `false`                             | Default command `exclusive` (inherited)                                        |
+| `$schema`      | string           | none                                | JSON Schema URL for editors (mainly for `.fnug.json`); ignored                 |
 
-`fnug_version` compares only the `major.minor.patch` numbers, so `0.1.0` matches `0.1.0-alpha.13`. fnug warns when the config needs a newer fnug, when it was written for an older release series (a different minor version before 1.0, a different major version after), or when the version can't be parsed.
-
-#### Command fields
-
-| Field        | Type             | Description                                                      |
-| ------------ | ---------------- | ---------------------------------------------------------------- |
-| `name`       | string           | Display name (required)                                          |
-| `cmd`        | string           | Shell command to run (required)                                  |
-| `id`         | string           | Identifier — defaults to the name ([Ids](#ids-and-dependencies)) |
-| `cwd`        | string           | Working directory override                                       |
-| `env`        | map              | Extra environment variables (`$VAR` expanded)                    |
-| `auto`       | object           | Auto-selection rules (see below)                                 |
-| `depends_on` | list of strings  | Commands that must finish first, by id or unique name            |
-| `scrollback` | integer          | PTY scrollback buffer size (number of lines)                     |
-| `timeout`    | integer / string | Time limit in `fnug check` and MCP runs (see below)              |
-| `exclusive`  | bool             | Never run alongside another command in `fnug check --jobs` runs  |
-
-`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM`, then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. The signals reach every process in the command's process group, unless the command streams to fnug's terminal: then only its own process gets them (see [Commands without a terminal](#commands-without-a-terminal)). `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
-
-`exclusive: true` suits commands that rewrite files, such as formatters, so that nothing reads the files while they change. It matters only when `fnug check --jobs` runs several commands at once; the TUI ignores it.
+`fnug_version` compares only the `major.minor.patch` numbers, so `0.1.0` matches `0.1.0-alpha.13`. fnug warns when the config needs a newer fnug, when it was written for an older release series (a different minor version before 1.0, a different major version after), or when the version can't be parsed. Without it, fnug doesn't check.
 
 #### Group fields
 
-| Field       | Type             | Description                                                      |
-| ----------- | ---------------- | ---------------------------------------------------------------- |
-| `name`      | string           | Display name (required)                                          |
-| `id`        | string           | Identifier — defaults to the name ([Ids](#ids-and-dependencies)) |
-| `cwd`       | string           | Working directory (inherited by children)                        |
-| `env`       | map              | Environment variables (inherited by children, `$VAR` expanded)   |
-| `auto`      | object           | Default auto rules (inherited by children)                       |
-| `timeout`   | integer / string | Default command `timeout` (inherited by children)                |
-| `exclusive` | bool             | Default command `exclusive` (inherited by children)              |
-| `commands`  | list             | Commands in this group                                           |
-| `children`  | list             | Nested child groups                                              |
+| Field       | Type             | Default      | Description                                                                     |
+| ----------- | ---------------- | ------------ | ------------------------------------------------------------------------------- |
+| `name`      | string           | required     | Display name                                                                    |
+| `id`        | string           | the name     | Identifier (see [Ids and dependencies](#ids-and-dependencies))                  |
+| `cwd`       | string           | the parent's | Working directory, relative to the parent group's (inherited)                   |
+| `env`       | map of strings   | none         | Environment variables, added to the inherited ones, `$VAR` expanded (inherited) |
+| `auto`      | object           | the parent's | Default auto rules, each field on its own (inherited)                           |
+| `timeout`   | integer / string | the parent's | Default command `timeout` (inherited)                                           |
+| `exclusive` | bool             | the parent's | Default command `exclusive` (inherited)                                         |
+| `commands`  | list of commands | none         | Commands in the group                                                           |
+| `children`  | list of groups   | none         | Nested groups                                                                   |
+
+#### Command fields
+
+| Field        | Type             | Default                  | Description                                                                                                             |
+| ------------ | ---------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `name`       | string           | required                 | Display name                                                                                                            |
+| `cmd`        | string           | required                 | Shell command, run with `sh -c`                                                                                         |
+| `id`         | string           | the name                 | Identifier for `depends_on`, `fnug check` targets and the MCP tools (see [Ids and dependencies](#ids-and-dependencies)) |
+| `cwd`        | string           | the group's              | Working directory, relative to the group's                                                                              |
+| `env`        | map of strings   | none                     | Environment variables, added to the inherited ones, `$VAR` expanded                                                     |
+| `auto`       | object           | the group's              | Auto-selection rules, each field on its own (see [Auto fields](#auto-fields))                                           |
+| `depends_on` | list of strings  | none                     | Commands that must pass before this one runs, by id or name                                                             |
+| `scrollback` | integer          | `3500`                   | Lines of scrollback kept for the command's terminal in the TUI                                                          |
+| `timeout`    | integer / string | the group's, or no limit | Time limit in `fnug check` and MCP runs (see below)                                                                     |
+| `exclusive`  | bool             | the group's, or `false`  | Never run alongside another command in parallel runs (see below)                                                        |
+
+`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM`, then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. The signals reach every process in the command's process group, unless the command streams to fnug's terminal: then only its own process gets them (see [Commands without a terminal](#commands-without-a-terminal)). `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
+
+`exclusive: true` suits commands that rewrite files, such as formatters, so that nothing reads the files while they change. It matters only when `fnug check --jobs` or the MCP `jobs` parameter runs several commands at once; the TUI ignores it.
 
 #### Auto fields
 
-| Field           | Type            | Description                                                                                   |
-| --------------- | --------------- | --------------------------------------------------------------------------------------------- |
-| `git`           | bool            | Select when git-changed files match `path`/`regex`                                            |
-| `watch`         | bool            | Select when watched files match `path`/`regex`                                                |
-| `always`        | bool            | Always selected regardless of changes                                                         |
-| `path`          | list of strings | Path prefixes to match against (e.g. `"./src"`); they may not exist yet                       |
-| `regex`         | list of strings | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)                            |
-| `check`         | bool            | Include in `fnug check` — set `false` to skip (default `true`)                                |
-| `run_on_change` | bool            | In the TUI, run the command when a watched change selects it; needs `watch` (default `false`) |
+| Field           | Type            | Default               | Description                                                                             |
+| --------------- | --------------- | --------------------- | --------------------------------------------------------------------------------------- |
+| `git`           | bool            | `false`               | Select when a file under `path` that matches `regex` has changed in git                 |
+| `watch`         | bool            | `false`               | Select when a watched file under `path` that matches `regex` changes                    |
+| `always`        | bool            | `false`               | Always select, regardless of changes                                                    |
+| `path`          | list of strings | the working directory | Path prefixes that changed files must be under (e.g. `"./src"`); they may not exist yet |
+| `regex`         | list of strings | any file              | Patterns for the file's path relative to `cwd` (e.g. `"^src/.*\\.rs$"`)                 |
+| `check`         | bool            | `true`                | Set `false` to skip in `fnug check`, git hooks and MCP runs                             |
+| `run_on_change` | bool            | `false`               | In the TUI, run the command when a watched change selects it; needs `watch`             |
+
+Which changes `git` looks at depends on the mode: uncommitted ones in the TUI and plain `fnug check`, and in `fnug check` the staged ones with `--staged` or those since a merge base with `--base` (see [What `fnug check` runs](#what-fnug-check-runs)). `watch` works while the TUI runs, and `run_on_change` is described under [File watching](#file-watching). `path: []` resets an inherited `path` to the command's own directory, and `regex: []` clears an inherited `regex`.
 
 A changed file selects a command when it is under one of its `path` entries and matches one of its `regex` patterns (any file, if there are none). The patterns see the file's path relative to the command's `cwd`, such as `src/main.rs`, or `../shared/lib.rs` for a file outside it. Anchor with `^` to match from the `cwd` (`^tests/`), or write `(^|/)tests/` to match a directory at any depth.
 
 Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `.git/info/exclude` or `core.excludesFile`) or anything inside a `.git` directory. The watcher makes one exception: below a `path` that git ignores itself, such as `./target/doc`, every change counts. It goes by the ignore rules alone, so it also skips a file that git tracks although a rule matches it, which `git` still counts. A watch `path` that doesn't exist when fnug starts is not watched. Like `git`, the watcher doesn't follow symlinked directories. On Linux, a directory that a `.gitignore` edit stops ignoring is only watched once fnug restarts.
+
+#### Workspace fields
+
+`workspace: true` walks the directory tree for package configs, down to the default `max_depth`. An object sets these instead:
+
+| Field       | Type            | Default             | Description                                                      |
+| ----------- | --------------- | ------------------- | ---------------------------------------------------------------- |
+| `paths`     | list of strings | none: walk the tree | Glob patterns for package directories, relative to the config    |
+| `max_depth` | integer         | `5`                 | How many directory levels the walk descends; unused with `paths` |
