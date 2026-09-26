@@ -1,13 +1,16 @@
 //! Configuration file handling for Fnug
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use log::{debug, info};
 use regex_cache::LazyRegex;
-use schemars::JsonSchema;
-use serde::de::{self, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::de::{self, MapAccess, Unexpected, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::commands::auto::Auto;
@@ -158,6 +161,82 @@ pub fn parse_regexes(regex: Vec<String>) -> Result<Vec<LazyRegex>, ConfigError> 
         .collect()
 }
 
+/// Parse whole seconds (`90`) or a duration with units (`90s`, `1m 30s`, `500ms`).
+///
+/// # Errors
+///
+/// Returns a message naming the problem when `s` is neither.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(Duration::from_secs(secs));
+    }
+    humantime::parse_duration(s).map_err(|e| {
+        format!("invalid duration `{s}` ({e}); use seconds or a value such as `90s` or `5m`")
+    })
+}
+
+/// A duration in a config file: whole seconds, or a string with units such as `90s`, `5m` or
+/// `1h 30m`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigDuration(pub Duration);
+
+impl Serialize for ConfigDuration {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.0.subsec_nanos() == 0 {
+            serializer.serialize_u64(self.0.as_secs())
+        } else {
+            serializer.collect_str(&humantime::format_duration(self.0))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigDuration {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DurationVisitor;
+
+        impl Visitor<'_> for DurationVisitor {
+            type Value = ConfigDuration;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("whole seconds or a duration such as `90s` or `5m`")
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(ConfigDuration(Duration::from_secs(v)))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                let secs =
+                    u64::try_from(v).map_err(|_| E::invalid_value(Unexpected::Signed(v), &self))?;
+                Ok(ConfigDuration(Duration::from_secs(secs)))
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                parse_duration(v).map(ConfigDuration).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(DurationVisitor)
+    }
+}
+
+impl JsonSchema for ConfigDuration {
+    fn schema_name() -> Cow<'static, str> {
+        "Duration".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "Whole seconds, or a duration such as `90s`, `5m` or `1h 30m`.",
+            "anyOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "string" }
+            ]
+        })
+    }
+}
+
 /// Rules for when a command is selected automatically. Each field is inherited from the
 /// parent group unless set here.
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Default)]
@@ -230,6 +309,11 @@ pub struct ConfigCommand {
     /// Number of scrollback lines kept for the command's terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scrollback: Option<usize>,
+    /// In `fnug check` and MCP runs, kill the command once it has run this long. `0` means no
+    /// limit, overriding the parent group's value and `fnug check --timeout`. The TUI ignores
+    /// it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<ConfigDuration>,
 }
 
 impl TryFrom<ConfigCommand> for Command {
@@ -245,6 +329,7 @@ impl TryFrom<ConfigCommand> for Command {
             env: config.env.unwrap_or_default(),
             depends_on: config.depends_on.unwrap_or_default(),
             scrollback: config.scrollback,
+            timeout: config.timeout.map(|t| t.0),
         })
     }
 }
@@ -322,6 +407,9 @@ pub struct ConfigCommandGroup {
     /// `$`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+    /// Default `timeout` for everything in the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<ConfigDuration>,
     /// The config file this group is the root of.
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -351,6 +439,7 @@ impl TryFrom<ConfigCommandGroup> for CommandGroup {
             commands,
             children,
             env: config.env.unwrap_or_default(),
+            timeout: config.timeout.map(|t| t.0),
             source: config.source,
         })
     }
@@ -394,6 +483,9 @@ pub struct Config {
     /// environment; `$$` is a literal `$`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+    /// Default `timeout` for every command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<ConfigDuration>,
 }
 
 /// List of supported configuration file names
@@ -416,6 +508,7 @@ impl Config {
             commands: self.commands,
             children: self.children,
             env: self.env,
+            timeout: self.timeout,
             source: None,
         };
         (root, self.workspace)
@@ -501,6 +594,38 @@ mod tests {
         .unwrap();
         let config = Config::from_file(&path).unwrap();
         assert_eq!(config.name, "root");
+    }
+
+    fn command_timeout(value: &str) -> Result<Option<ConfigDuration>, serde_yaml::Error> {
+        let yaml =
+            format!("name: root\ncommands:\n  - name: a\n    cmd: 'true'\n    timeout: {value}\n");
+        let config: Config = serde_yaml::from_str(&yaml)?;
+        Ok(config.commands.unwrap().remove(0).timeout)
+    }
+
+    #[test]
+    fn timeout_accepts_seconds_and_durations() {
+        for (value, millis) in [
+            ("90", 90_000),
+            ("'90'", 90_000),
+            ("1m 30s", 90_000),
+            ("500ms", 500),
+            ("0", 0),
+        ] {
+            let expected = ConfigDuration(Duration::from_millis(millis));
+            assert_eq!(command_timeout(value).unwrap(), Some(expected), "{value}");
+        }
+    }
+
+    #[test]
+    fn timeout_rejects_other_values() {
+        for value in ["-1", "1.5", "soon", "'5 parsecs'", "true"] {
+            let err = command_timeout(value).unwrap_err().to_string();
+            assert!(
+                err.contains("whole seconds") || err.contains("invalid duration"),
+                "{value}: {err}"
+            );
+        }
     }
 
     #[test]
