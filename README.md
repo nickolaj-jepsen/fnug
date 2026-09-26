@@ -379,12 +379,12 @@ config.write(".fnug.yaml")     # or save it: JSON for a .json path, YAML otherwi
 
 - `fnug.check()` runs `fnug check`, with its options as keyword arguments: `targets`, `all_`, `include_manual`, `base`, `staged`, `stash`, `fail_fast`, `no_tui`, `mute_success`, `jobs`, `timeout` and `allow_modifications`.
 - `fnug.start()` opens the TUI.
-- Both take the global options `config_path`, `no_workspace` and `log_file`, or a `Config` as their first argument instead of `config_path`. They return the `subprocess.CompletedProcess`, with the output left on the terminal, and don't raise when a check fails.
+- Both take the global options `config_path`, `root`, `no_workspace`, `log_file` and `log_level`, or a `Config` as their first argument instead of `config_path`. They return the `subprocess.CompletedProcess`, with the output left on the terminal, and don't raise when a check fails.
 - `fnug.run(*args)` runs the binary with any arguments.
 
 They run the `fnug` next to the Python interpreter, where the wheel installs it, or else the first one on `PATH`.
 
-`Config`, `CommandGroup`, `Command`, `Auto` and `WorkspaceOptions` are dataclasses with keyword-only fields named after the config keys (see [Configuration reference](#configuration-reference)); `Config.schema` is written as `$schema`. `to_dict()`, `to_yaml()`, `to_json()` and `write(path)` leave out the fields that are `None`. `fnug_version` defaults to the installed package's version in the form the binary reports, so `0.1.0a13` from PyPI becomes `0.1.0-alpha.13`. A `Config` passed to `check()` or `start()` is written to a temporary JSON file, and fnug gets `--root` set to the working directory, so the config's paths, commands and `workspace` work as they would in a `.fnug.yaml` there.
+`Config`, `CommandGroup`, `Command`, `Auto` and `WorkspaceOptions` are dataclasses with keyword-only fields named after the config keys (see [Configuration reference](#configuration-reference)); `Config.schema` is written as `$schema`. `to_dict()`, `to_yaml()`, `to_json()` and `write(path)` leave out the fields that are `None`. `fnug_version` defaults to the installed package's version in the form the binary reports, so `0.1.0a13` from PyPI becomes `0.1.0-alpha.13`. A `Config` passed to `check()` or `start()` is written to a temporary JSON file, and fnug gets `--root` set to the working directory, or to `root` if given, so the config's paths, commands and `workspace` work as they would in a `.fnug.yaml` there.
 
 ## Configuration
 

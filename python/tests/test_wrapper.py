@@ -221,6 +221,35 @@ def test_start_no_workspace(fake_fnug):
     assert fake_fnug.last()["argv"] == ["--no-workspace"]
 
 
+def test_root_and_log_level(fake_fnug):
+    fnug.check(config_path="ci.yaml", root="..", log_level="debug", no_tui=True)
+    assert fake_fnug.last()["argv"] == [
+        "--config",
+        "ci.yaml",
+        "--root",
+        "..",
+        "--log-level",
+        "debug",
+        "check",
+        "--no-tui",
+    ]
+
+    fnug.start(root="sub", log_level="trace")
+    assert fake_fnug.last()["argv"] == ["--root", "sub", "--log-level", "trace"]
+
+
+@pytest.mark.parametrize("launch", [fnug.check, fnug.start])
+def test_root_with_config_object(fake_fnug, tmp_path, monkeypatch, launch):
+    project = tmp_path / "project"
+    (project / "sub").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    launch(demo_config(cwd="sub"), root="project")
+
+    assert fake_fnug.last()["argv"][2:4] == ["--root", str(project.resolve())]
+    assert fake_fnug.last_config()["cwd"] == str((project / "sub").resolve())
+
+
 def test_no_python_wrapper_env(fake_fnug, monkeypatch):
     monkeypatch.delenv("FNUG_PYTHON_WRAPPER", raising=False)
 
