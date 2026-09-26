@@ -917,6 +917,48 @@ fn base_outside_repo_exits_2() {
 }
 
 #[test]
+fn base_missing_in_another_repo_only_warns() {
+    if !common::git::available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    common::git::init(root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "ok\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "sub/\n").unwrap();
+    common::write_config(
+        root,
+        "name: root\ncommands:\n  - name: lint\n    cmd: 'true'\n    auto:\n      git: true\n      \
+         path: [src]\n  - name: sub-lint\n    cmd: 'true'\n    cwd: sub\n    auto:\n      \
+         git: true\n      path: [.]\n",
+    );
+    common::git::git(root, &["add", "-A"]);
+    common::git::git(root, &["commit", "-qm", "init"]);
+    common::git::git(root, &["branch", "base"]);
+    // A repo of its own, as a package of a workspace can be, without the base
+    let sub = root.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    common::git::init(&sub);
+    std::fs::write(sub.join("b.txt"), "b\n").unwrap();
+    common::git::git(&sub, &["add", "-A"]);
+    common::git::git(&sub, &["commit", "-qm", "init"]);
+    std::fs::write(root.join("src/a.rs"), "ok\nchanged\n").unwrap();
+
+    let output = check(root, &["--base", "base"]);
+    let err = stderr(&output);
+    assert!(output.status.success(), "{err}");
+    assert_eq!(ran(&output), ["lint"], "{err}");
+    assert!(err.contains("base 'base'"), "{err}");
+
+    // From the repo without it, comparing is impossible
+    let output = check(&sub, &["--base", "base"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(ran(&output).is_empty(), "{err}");
+}
+
+#[test]
 fn staged_selecting_nothing_gives_no_hint() {
     let dir = tempfile::tempdir().unwrap();
     clean_repo(dir.path(), SELECTION);

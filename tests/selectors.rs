@@ -994,7 +994,7 @@ fn since_unborn_head_is_fatal_issue() {
     assert!(
         matches!(
             output.issues.as_slice(),
-            [issue @ SelectionIssue::UnbornHead { repo }] if repo == &root && issue.is_fatal()
+            [issue @ SelectionIssue::UnbornHead { repo, .. }] if repo == &root && issue.is_fatal()
         ),
         "{:?}",
         output.issues

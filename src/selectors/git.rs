@@ -340,10 +340,13 @@ fn discover_repos<'a>(
     (repos, path_repo)
 }
 
-/// Scan `repos` in parallel. A repo that fails becomes an issue and `None`.
+/// Scan `repos` in parallel. A repo that fails becomes an issue and `None`. A base that can't be
+/// compared with is fatal only in `primary`, the repo of the working directory, or in any repo
+/// when that is `None`.
 fn scan_repos(
     repos: Vec<RepoEntry>,
     opts: &SelectOptions,
+    primary: Option<&Path>,
     issues: &mut Vec<SelectionIssue>,
 ) -> Vec<Option<Vec<Change>>> {
     let workdirs: Vec<PathBuf> = repos.iter().map(|r| r.workdir.clone()).collect();
@@ -366,6 +369,7 @@ fn scan_repos(
         .into_iter()
         .zip(workdirs)
         .map(|(result, repo)| {
+            let fatal = primary.is_none_or(|primary| primary == repo);
             let issue = match result {
                 Ok(Ok(changes)) => return Some(changes),
                 Ok(Err(ScanError::Git(e))) => SelectionIssue::ScanFailed {
@@ -377,9 +381,10 @@ fn scan_repos(
                         repo,
                         base,
                         message,
+                        fatal,
                     }
                 }
-                Ok(Err(ScanError::UnbornHead)) => SelectionIssue::UnbornHead { repo },
+                Ok(Err(ScanError::UnbornHead)) => SelectionIssue::UnbornHead { repo, fatal },
                 Err(_) => SelectionIssue::ScanFailed {
                     repo,
                     message: "the scan panicked".to_string(),
@@ -432,7 +437,11 @@ pub(super) fn select(
     let mut issues: Vec<SelectionIssue> =
         check_current_repo(opts, current_dir).into_iter().collect();
     let (repos, path_repo) = discover_repos(commands, &mut issues);
-    let scanned = scan_repos(repos, opts, &mut issues);
+    let primary = current_dir
+        .and_then(|dir| open_work_tree(dir).ok())
+        .map(|(workdir, _)| workdir)
+        .filter(|workdir| repos.iter().any(|r| &r.workdir == workdir));
+    let scanned = scan_repos(repos, opts, primary.as_deref(), &mut issues);
     let changed_files = scanned
         .iter()
         .flatten()
