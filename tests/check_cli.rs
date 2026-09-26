@@ -937,6 +937,53 @@ fn base_outside_repo_exits_2() {
 }
 
 #[test]
+fn base_in_multi_repo_workspace_from_a_non_git_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    if !common::git::available() || git2::Repository::discover(root).is_ok() {
+        return;
+    }
+    common::write_config(root, "name: root\nworkspace: true\n");
+    // Each package is a repo of its own
+    let pkg = root.join("pkg");
+    std::fs::create_dir(&pkg).unwrap();
+    common::git::init(&pkg);
+    common::write_config(
+        &pkg,
+        "name: pkg\ncommands:\n  - name: lint\n    cmd: 'true'\n    auto:\n      git: true\n      \
+         path: [.]\n",
+    );
+    std::fs::write(pkg.join("a.txt"), "one\n").unwrap();
+    common::git::git(&pkg, &["add", "-A"]);
+    common::git::git(&pkg, &["commit", "-qm", "init"]);
+    std::fs::write(pkg.join("a.txt"), "two\n").unwrap();
+    common::git::git(&pkg, &["commit", "-qam", "two"]);
+    let check = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fnug"));
+        common::git::isolate(&mut command)
+            .current_dir(root)
+            .args(["check", "--no-tui"])
+            .args(args)
+            .env_remove("FNUG_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    let output = check(&["--base", "HEAD~1"]);
+    let err = stderr(&output);
+    assert!(output.status.success(), "{err}");
+    assert_eq!(ran(&output), ["lint"], "{err}");
+
+    // The package's repo decides whether the base exists
+    let output = check(&["--base", "nope"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("base 'nope'"), "{err}");
+    assert!(ran(&output).is_empty(), "{err}");
+}
+
+#[test]
 fn base_missing_in_another_repo_only_warns() {
     if !common::git::available() {
         return;
