@@ -781,3 +781,76 @@ children:
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(ran(&output), ["test"], "{}", stderr(&output));
 }
+
+/// A clean repo from [`clean_repo`] with a branch `base` at its first commit.
+fn repo_with_base_branch(dir: &Path) -> git2::Repository {
+    let repo = clean_repo(dir, SELECTION);
+    {
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("base", &head, false).unwrap();
+    }
+    repo
+}
+
+#[test]
+fn base_selects_committed_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_base_branch(dir.path());
+    std::fs::write(dir.path().join("src/a.rs"), "fn a() { }\n").unwrap();
+    common::commit_all(&repo);
+
+    // A clean tree selects nothing by itself, and says how to select more
+    let output = check(dir.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(ran(&output).is_empty(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(
+            "No commands selected (4 configured; use --all, --base <ref>, or name commands)"
+        ),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = check(dir.path(), &["--base", "base"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["lint"], "{}", stderr(&output));
+
+    let output = check(dir.path(), &["--base", "base", "--include-manual"]);
+    assert_eq!(ran(&output), ["lint", "slow"], "{}", stderr(&output));
+
+    // Nothing changed since HEAD itself
+    let output = check(dir.path(), &["--base", "HEAD"]);
+    assert!(ran(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn base_includes_untracked() {
+    let dir = tempfile::tempdir().unwrap();
+    repo_with_base_branch(dir.path());
+    std::fs::write(dir.path().join("src/new.rs"), "fn new() {}\n").unwrap();
+
+    let output = check(dir.path(), &["--base", "base"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["lint"], "{}", stderr(&output));
+}
+
+#[test]
+fn base_unresolvable_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    repo_with_base_branch(dir.path());
+    std::fs::write(dir.path().join("src/a.rs"), "fn a() { }\n").unwrap();
+
+    let output = check(dir.path(), &["--base", "origin/nope"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("base 'origin/nope'"), "{err}");
+    assert!(err.contains("fetch-depth: 0"), "{err}");
+    assert!(ran(&output).is_empty(), "{err}");
+
+    let output = check(dir.path(), &["--base", "base", "--all"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("cannot be used with"),
+        "{output:?}"
+    );
+}

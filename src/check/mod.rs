@@ -97,7 +97,7 @@ pub async fn run(
     };
     let mut printer = Printer::new(&plan, output, opts.jobs.get() == 1, opts.mute_success);
     if plan.is_empty() {
-        printer.nothing_selected();
+        printer.nothing_selected(config.all_commands().len());
         return Ok(CheckResult {
             exit_code: 0,
             report: RunReport::default(),

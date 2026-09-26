@@ -11,7 +11,7 @@ use fnug::check::{CheckOptions, CheckResult};
 use fnug::commands::group::CommandGroup;
 use fnug::config_file::parse_duration;
 use fnug::runner::Selection;
-use fnug::selectors::SelectOptions;
+use fnug::selectors::{GitScope, SelectOptions};
 
 use crate::signals;
 
@@ -31,6 +31,11 @@ pub struct CheckArgs {
     /// Also run commands with `auto.check: false`
     #[arg(long, conflicts_with = "targets")]
     include_manual: bool,
+
+    /// Select by the changes since the merge base of HEAD and REF, such as origin/main:
+    /// commits since then plus uncommitted changes
+    #[arg(long, value_name = "REF", group = "source")]
+    base: Option<String>,
 
     /// Stop on first failure
     #[arg(long)]
@@ -64,8 +69,15 @@ impl CheckArgs {
         } else if self.all {
             Selection::All { include_manual }
         } else {
+            let scope = match &self.base {
+                Some(base) => GitScope::Since(base.clone()),
+                None => GitScope::WorkingTree,
+            };
             Selection::Auto {
-                options: SelectOptions::default(),
+                options: SelectOptions {
+                    scope,
+                    index_override: None,
+                },
                 include_manual,
             }
         }
