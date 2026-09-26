@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget};
 
-use super::app::{App, CommandStatus};
+use super::app::App;
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: usize) {
     let mut state = ScrollbarState::new(total).position(position);
@@ -19,6 +19,7 @@ use super::log_state::level_color;
 use super::terminal_widget::PseudoTerminal;
 use super::toolbar;
 use super::tree_widget::TreeWidget;
+use crate::runner::NodeState;
 use crate::theme;
 
 impl App {
@@ -154,8 +155,8 @@ impl App {
                 return;
             }
 
-            // Check for pending dependencies
-            if let Some(dep_ids) = self.pending_deps.get(active_id) {
+            let dep_ids = self.dag.waiting_on(active_id);
+            if !dep_ids.is_empty() {
                 let mut lines: Vec<Line> = vec![
                     Line::from(""),
                     Line::from(Span::styled(
@@ -167,14 +168,10 @@ impl App {
                     Line::from(""),
                 ];
                 for dep_id in dep_ids {
-                    let (label, color) = match self.processes.get(dep_id).map(|p| &p.status) {
-                        Some(CommandStatus::Running) => ("running", theme::RUNNING),
-                        Some(CommandStatus::Success) => ("done", theme::SUCCESS),
-                        Some(CommandStatus::Failure(_) | CommandStatus::Error(_)) => {
-                            ("failed", theme::FAILURE)
-                        }
-                        Some(CommandStatus::Stopped) => ("stopped", theme::DIM),
-                        _ => ("pending", theme::DIM),
+                    // Only dependencies still to run or finish are waited on
+                    let (label, color) = match self.dag.state(dep_id) {
+                        Some(NodeState::Running) => ("running", theme::RUNNING),
+                        _ => ("waiting", theme::DIM),
                     };
                     let name = self
                         .find_command(dep_id)
