@@ -414,7 +414,7 @@ fn init_refuses_existing() {
             panic!("{err:?}");
         };
         assert_eq!(existing.file_name().unwrap(), file);
-        assert!(err.to_string().contains("--force"), "{err}");
+        assert!(err.to_string().ends_with("already exists"), "{err}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join(file)).unwrap(),
             "keep me"
@@ -487,6 +487,11 @@ fn init_cli_proposes_nix_tools_on_path() {
     assert!(!again.status.success(), "{again:?}");
     let stderr = String::from_utf8_lossy(&again.stderr);
     assert!(stderr.contains("already exists"), "{stderr}");
+    // The hint replaces the same directory's config
+    assert!(
+        stderr.contains("run `fnug init --force project` to replace it"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -529,7 +534,11 @@ fn init_cli_writes_the_config_file() {
 
     let again = fnug(dir.path(), &["-c", "sub/ci.yaml", "init", "--yes"]);
     assert_eq!(again.status.code(), Some(2), "{again:?}");
-    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        stderr.contains("already exists; run `fnug -c sub/ci.yaml init --force --yes`"),
+        "{stderr}"
+    );
 
     let output = fnug(dir.path(), &["-c", "sub/ci.json", "init", "--yes"]);
     assert!(output.status.success(), "{output:?}");

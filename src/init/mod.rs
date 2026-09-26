@@ -20,7 +20,7 @@ pub use render::render;
 /// Why a config couldn't be created.
 #[derive(Error, Debug)]
 pub enum InitError {
-    #[error("{0} already exists; run `fnug init --force` to replace it")]
+    #[error("{0} already exists")]
     Exists(PathBuf),
 
     #[error("unable to create a config in {path}: {source}")]
