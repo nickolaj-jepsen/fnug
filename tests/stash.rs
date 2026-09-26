@@ -529,6 +529,12 @@ fn stash_sigkill_then_edit_is_left_to_the_user() {
         matches!(&patches[..], [patch] if patch.contains("+unstaged")),
         "{patches:?}"
     );
+
+    // Plain check leaves it alone, but says so
+    let output = fnug(dir, &[]).output().unwrap();
+    let err = stderr(&output);
+    assert!(err.contains("fnug-stash.lock"), "{err}");
+    assert!(dir.join(".git/fnug-stash.lock").exists());
 }
 
 #[test]

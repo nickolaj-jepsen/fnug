@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::time::Duration;
 
 use super::stash::RestoreNote;
@@ -109,6 +110,17 @@ impl Printer {
             self.sty.dim(&format!(
                 "No commands selected ({configured} configured; use --all, --base <ref>, or name \
                  commands)"
+            ))
+        );
+    }
+
+    pub(super) fn stash_pending(&self, lock: &Path) {
+        eprintln!(
+            "{}",
+            self.sty.yellow(&format!(
+                "A stopped `fnug check --stash` left unstaged changes set aside ({}); run `fnug \
+                 check --staged --stash` to put them back.",
+                lock.display()
             ))
         );
     }

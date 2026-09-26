@@ -168,6 +168,16 @@ pub fn recover(cwd: &Path) -> Result<Option<RestoreNote>, StashError> {
     recover_stale(&git, &lock, &state)
 }
 
+/// The lock a stopped run left in the work tree containing `cwd`, if any: its unstaged changes
+/// are still set aside until [`stash`] or [`recover`] runs there.
+#[must_use]
+pub fn pending(cwd: &Path) -> Option<PathBuf> {
+    let (_, git_dir) = Git::locate(cwd).ok()?;
+    let lock = git_dir.join(LOCK_NAME);
+    let state = read_lock(&lock).ok()??;
+    (!pid_alive(state.pid)).then_some(lock)
+}
+
 impl StashGuard {
     /// What putting back a stopped run's unstaged changes did, if this one put any back before
     /// it started.
