@@ -51,13 +51,3 @@ pub fn install() -> io::Result<Signals> {
     }
     Ok(Signals { cancel, cause })
 }
-
-/// Let SIGTERM and SIGHUP end fnug again, for the TUI, which handles neither. SIGINT stays
-/// with tokio, which the TUI listens to.
-pub fn restore_default() {
-    for signal in [libc::SIGTERM, libc::SIGHUP] {
-        // SAFETY: setting the default disposition is always valid; it only replaces tokio's
-        // handler, whose listeners then see no more signals.
-        unsafe { libc::signal(signal, libc::SIG_DFL) };
-    }
-}

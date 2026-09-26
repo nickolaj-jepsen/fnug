@@ -146,10 +146,7 @@ pub async fn run(
     // On failure in an interactive terminal, offer to open the TUI
     if !args.no_tui && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
         match prompt_open_tui(&signals.cancel).await? {
-            Some(true) => {
-                signals::restore_default();
-                return Ok(CheckOutcome::OpenTui(result));
-            }
+            Some(true) => return Ok(CheckOutcome::OpenTui(result)),
             Some(false) => {}
             None => {
                 let code = signals.exit_code().unwrap_or(ExitCode::FAILURE);

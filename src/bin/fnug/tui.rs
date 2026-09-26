@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use std::io;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use crossterm::clipboard::CopyToClipboard;
@@ -18,6 +18,9 @@ use fnug::check::CheckResult;
 use fnug::logger::LoggerHandle;
 use fnug::tui::app::{App, AppEvent, Outbound};
 use fnug::{LoadOptions, LoadedConfig};
+use tokio_util::sync::CancellationToken;
+
+use crate::signals;
 
 /// Log line for a panic on `thread`, or `None` for the main thread, which runs the UI.
 ///
@@ -48,6 +51,8 @@ pub async fn run(
         }
     }));
 
+    // From here on SIGINT, SIGTERM and SIGHUP quit like `q`, so the terminal gets restored
+    let signals = signals::install()?;
     // Log lines would corrupt the TUI; the log panel shows them instead
     logger.set_stderr(false);
     enable_raw_mode()?;
@@ -74,33 +79,39 @@ pub async fn run(
     app.watch_config(reload, &loaded.sources);
 
     // Main event loop
-    let result = run_event_loop(&mut terminal, &mut app).await;
+    let result = run_event_loop(&mut terminal, &mut app, &signals.cancel).await;
     if let Err(e) = &result {
         // Only to the log panel's buffer and the log file; stderr gets it once, below
         error!("Application error: {e}");
     }
 
-    // Give the terminal back before waiting for commands to stop
-    let restored = restore_terminal(&mut terminal);
+    // Give the terminal back before waiting for commands to stop. It may be hung up, which
+    // fails every write, so nothing from here on may panic on one, as eprintln! does.
+    let restored = restore_terminal(terminal);
     // So problems stopping the commands reach stderr
     logger.set_stderr(true);
+    if let Err(e) = restored {
+        warn!("Failed to restore the terminal: {e}");
+    }
     let running = app
         .processes
         .values()
         .filter(|p| p.terminal.is_running())
         .count();
     if running > 0 {
-        eprintln!("Stopping {running} running command(s)…");
+        let _ = writeln!(io::stderr(), "Stopping {running} running command(s)…");
     }
     app.shutdown().await;
-    restored?;
 
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        return Ok(ExitCode::FAILURE);
+    if let Err(e) = &result {
+        let _ = writeln!(io::stderr(), "Error: {e}");
     }
-
-    Ok(ExitCode::SUCCESS)
+    let code = if result.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    };
+    Ok(signals.exit_code().unwrap_or(code))
 }
 
 /// Draw a first frame, then rerun the check's failures at the pane size it drew: output
@@ -116,14 +127,21 @@ fn apply_check_result<B: Backend>(
     Ok(())
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(
+/// Leave raw mode, the alternate screen and mouse capture, and show the cursor. Tries every
+/// step and returns the first failure.
+fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    let raw_mode = disable_raw_mode();
+    let screen = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
-    )?;
-    terminal.show_cursor()
+    );
+    let cursor = terminal.show_cursor();
+    if cursor.is_err() {
+        // Its Drop would retry and eprintln! the failure, which panics on a hung-up terminal
+        std::mem::forget(terminal);
+    }
+    raw_mode.and(screen).and(cursor)
 }
 
 /// Write what the app queued for the terminal, such as an OSC 52 copy.
@@ -140,9 +158,11 @@ fn flush_outbox(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut
     }
 }
 
+/// Draw and handle events until the user quits or `cancel` is cancelled.
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    cancel: &CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
     use tokio::time::Instant;
@@ -228,9 +248,9 @@ async fn run_event_loop(
                     needs_render |= app.handle_app_event(app_event);
                 }
             }
-            // Defense-in-depth: handle Ctrl+C even if crossterm misses it
-            _ = tokio::signal::ctrl_c() => {
-                debug!("Received Ctrl+C signal");
+            // SIGINT, SIGTERM or SIGHUP; in raw mode Ctrl+C is a key, not SIGINT
+            () = cancel.cancelled() => {
+                debug!("Quitting on a signal");
                 break;
             }
         }
