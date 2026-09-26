@@ -130,11 +130,16 @@ def _run_with_config(
     config: Config | None,
     *args: str,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run fnug with ``args``, passing ``config`` through a temporary file if given."""
+    """Run fnug with ``args``, passing ``config`` through a temporary file if given.
+
+    With ``config``, ``--root`` is the caller's working directory, so fnug acts from
+    there rather than from the temporary file's directory.
+    """
     if config is None:
         return run(*args)
+    root = str(Path.cwd().resolve())
     with _config_tempfile(config) as path:
-        return run("--config", path, *args)
+        return run("--config", path, "--root", root, *args)
 
 
 def start(

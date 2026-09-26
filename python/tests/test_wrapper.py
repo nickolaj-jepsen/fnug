@@ -70,10 +70,27 @@ def test_config_object_is_written_to_a_temp_file(fake_fnug):
 
     argv = fake_fnug.last()["argv"]
     assert argv[0] == "--config"
-    assert argv[2:] == ["check", "--no-tui"]
+    assert argv[4:] == ["check", "--no-tui"]
     assert fake_fnug.last_config()["commands"] == [
         {"name": "where", "cmd": "pwd", "auto": {"always": True}},
     ]
+
+
+@pytest.mark.parametrize("launch", [fnug.check, fnug.start])
+def test_config_object_roots_at_caller_cwd(fake_fnug, tmp_path, monkeypatch, launch):
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    launch(demo_config(cwd="sub"))
+
+    argv = fake_fnug.last()["argv"]
+    assert argv[2:4] == ["--root", str(tmp_path.resolve())]
+
+
+def test_config_path_has_no_root(fake_fnug):
+    fnug.check(config_path="project/.fnug.yaml")
+
+    assert "--root" not in fake_fnug.last()["argv"]
 
 
 def test_temp_config_removed(fake_fnug):
