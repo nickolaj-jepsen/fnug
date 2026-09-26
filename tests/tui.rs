@@ -38,6 +38,11 @@ struct Master {
 impl Tui {
     /// Run fnug with `args` in `dir`, or `None` where no PTY can be opened.
     fn spawn(dir: &Path, args: &[&str]) -> Option<Self> {
+        Self::spawn_program(dir, env!("CARGO_BIN_EXE_fnug"), args)
+    }
+
+    /// Run `program` with `args` in `dir`, or `None` where no PTY can be opened.
+    fn spawn_program(dir: &Path, program: &str, args: &[&str]) -> Option<Self> {
         let size = PtySize {
             rows: 24,
             cols: 100,
@@ -47,7 +52,7 @@ impl Tui {
             eprintln!("skipping: no PTY available");
             return None;
         };
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_fnug"));
+        let mut cmd = CommandBuilder::new(program);
         cmd.args(args);
         cmd.cwd(dir);
         cmd.env("TERM", "xterm-256color");
@@ -193,23 +198,59 @@ fn tui_quits_cleanly_on_sigterm_and_sighup() {
 }
 
 #[test]
-fn check_handoff_quits_cleanly_on_sigterm() {
+fn check_handoff_quits_cleanly_on_sigterm_and_sighup() {
+    for (signal, code) in [(libc::SIGTERM, 143), (libc::SIGHUP, 129)] {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "name: root\ncommands:\n  - name: failcmd\n    cmd: \"exit 1\"\n    auto:\n      always: true\n",
+        );
+        let Some(mut tui) = Tui::spawn(dir.path(), &["check"]) else {
+            return;
+        };
+        tui.wait_for(0, "Open TUI");
+        let prompt = tui.output().len();
+        tui.send(b"y\r");
+
+        // As in headless check, the signal wins over the check's failure
+        assert_eq!(
+            signal_after_start(&mut tui, prompt, "failcmd", signal),
+            code
+        );
+    }
+}
+
+#[test]
+fn tui_error_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     write_config(
         dir.path(),
-        "name: root\ncommands:\n  - name: failcmd\n    cmd: \"exit 1\"\n    auto:\n      always: true\n",
+        "name: root\ncommands:\n  - name: lintcmd\n    cmd: \"true\"\n",
     );
-    let Some(mut tui) = Tui::spawn(dir.path(), &["check"]) else {
+    // fnug's stdout is a pipe to `cat`, the terminal's only writer, so killing `cat` makes
+    // fnug's next draw fail
+    let script =
+        r#"{ "$0" --no-workspace; echo $? > status; } | sh -c 'echo $$ > catpid; exec cat'"#;
+    let fnug = env!("CARGO_BIN_EXE_fnug");
+    let Some(mut tui) = Tui::spawn_program(dir.path(), "sh", &["-c", script, fnug]) else {
         return;
     };
-    tui.wait_for(0, "Open TUI");
-    let prompt = tui.output().len();
-    tui.send(b"y\r");
+    tui.wait_started(0, "lintcmd");
+    let cat = read_pid(&dir.path().join("catpid"));
+    // SAFETY: sends a signal to a process this test started.
+    unsafe { libc::kill(cat, libc::SIGKILL) };
+    assert!(wait_until(Duration::from_secs(5), || !process_alive(cat)));
 
-    let code = signal_after_start(&mut tui, prompt, "failcmd", libc::SIGTERM);
-
-    // The check's failure or the signal's 128+n; main.rs's handoff_exit_code picks which
-    assert!(matches!(code, 1 | 143), "exit code {code}");
+    // The help overlay changes the screen, so it is drawn
+    tui.send(b"?");
+    let status = dir.path().join("status");
+    let mut code = String::new();
+    let exited = wait_until(Duration::from_secs(10), || {
+        code = std::fs::read_to_string(&status).unwrap_or_default();
+        code.ends_with('\n')
+    });
+    assert!(exited, "fnug did not exit:\n{:?}", tui.output());
+    assert_eq!(code.trim(), "2", "{:?}", tui.output());
 }
 
 #[test]

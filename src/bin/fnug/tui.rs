@@ -33,7 +33,8 @@ fn worker_panic_message(thread: Option<&str>, panic: &impl Display) -> Option<St
     }
 }
 
-/// Run the TUI on `loaded`, reloading it with `reload` when its files change.
+/// Run the TUI on `loaded`, reloading it with `reload` when its files change. Returns 128 plus
+/// the number of a signal that ended it, 2 if it failed, and success otherwise.
 pub async fn run(
     loaded: LoadedConfig,
     reload: LoadOptions,
@@ -108,7 +109,7 @@ pub async fn run(
     let code = if result.is_ok() {
         ExitCode::SUCCESS
     } else {
-        ExitCode::FAILURE
+        ExitCode::from(crate::ERROR_EXIT)
     };
     Ok(signals.exit_code().unwrap_or(code))
 }
@@ -259,10 +260,7 @@ async fn run_event_loop(
                         // A divider drag whose release got lost would hold back the PTY resize
                         app.mouse.resizing = false;
                     }
-                    Some(Err(e)) => {
-                        error!("Event error: {e}");
-                        break;
-                    }
+                    Some(Err(e)) => return Err(e.into()),
                     None => break,
                     _ => {}
                 }
