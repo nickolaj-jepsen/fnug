@@ -335,19 +335,19 @@ impl App {
         app
     }
 
-    /// Apply results from a headless check run: mark failed commands as
-    /// selected and auto-start them so the user sees PTY output immediately.
+    /// Apply results from a headless check run: select the commands that failed or were
+    /// skipped, and start them so the user sees PTY output immediately.
     pub fn apply_check_result(
         &mut self,
         result: &crate::check::CheckResult,
         terminal_area: ratatui::layout::Rect,
     ) {
-        // Mark only the failed commands as selected
-        for id in &result.selected_ids {
-            if result.failed_ids.contains(id) {
-                self.selected.insert(id.clone());
+        let rerun = result.report.rerun_ids();
+        for cmd in &result.report.commands {
+            if rerun.contains(&cmd.id) {
+                self.selected.insert(cmd.id.clone());
             } else {
-                self.selected.remove(id);
+                self.selected.remove(&cmd.id);
             }
         }
         self.collapse_inactive_groups();
@@ -357,13 +357,13 @@ impl App {
         if let Some(first_failed) = self
             .visible_nodes
             .iter()
-            .position(|n| result.failed_ids.contains(&n.id))
+            .position(|n| rerun.contains(&n.id))
         {
             self.cursor = first_failed;
         }
 
-        // Auto-start the failed commands (deps are handled by start_command)
-        for id in &result.failed_ids {
+        // In plan order, so dependencies start first (start_command handles the rest)
+        for id in &rerun {
             self.start_command(id, terminal_area, true);
         }
     }

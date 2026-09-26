@@ -91,11 +91,13 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info, and warn on stderr) |
 | `--fail-fast`     | Stop on first failure (`check` only)                            |
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
-| `--mute-success`  | Suppress output for passing commands (`check` only)             |
+| `--mute-success`  | Capture each command's output and print it only if it fails (`check` only) |
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
 | `-V`, `--version` | Print fnug's version                                            |
 
 `-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
+
+`fnug check` prints `PASS`, `FAIL (exit 3)`, `SKIP (build failed)` and so on for each command, then a summary that counts every selected command once: passed, failed, skipped because a dependency failed, and not run after `--fail-fast` stopped the run. Without `--mute-success`, commands share fnug's terminal and their output streams through. With it, each command runs in its own process group with stdout and stderr merged in order. On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands (their whole process group, when output is captured), prints the summary so far, and exits with 128 plus the signal number.
 
 ### Setup
 
@@ -466,3 +468,4 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 - On Linux, `auto.watch` no longer follows symlinked directories below a watch `path` (macOS never did), just as `auto.git` doesn't. To watch a linked directory, add the link's target as its own `path`.
 - Library API: `selectors::watch::watch_commands` returns a `WatchHandle` (`events`, `report`) instead of a tuple, `WatchError` is `#[non_exhaustive]` and has `NothingWatched` instead of `Io`, and `WatchHandle::events` and `tui::app::AppEvent::WatcherTriggered` carry `Vec<WatchMatch>` instead of `Vec<Command>`.
 - MCP `run_lint` reports an error listing the matching ids when a name matches several commands, instead of running the first one. Library API: `check::CheckError` has a `Plan` variant (a `runner::PlanError`) instead of `Selector`.
+- Library API: `check::run` is async and takes a `CheckOptions` and a `CancellationToken`, and `CheckResult` carries a `runner::RunReport` instead of `selected_ids` and `failed_ids` (use `report.rerun_ids()`).

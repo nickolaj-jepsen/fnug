@@ -1635,7 +1635,15 @@ commands:
 ",
     );
     let (config, cwd) = load_config(Some(&path), true).unwrap();
-    let result = fnug::check::run(&config, &cwd, false, true, false).unwrap();
+    let opts = fnug::check::CheckOptions {
+        mute_success: true,
+        ..fnug::check::CheckOptions::default()
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(fnug::check::run(&config, &cwd, &opts, cancel))
+        .unwrap();
     assert_eq!(result.exit_code, 0);
 }
 
