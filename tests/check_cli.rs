@@ -3,6 +3,7 @@
 mod common;
 
 use std::io::{Read, Write};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -410,21 +411,31 @@ commands:
 
 #[test]
 fn jobs_zero_means_one_per_cpu() {
+    if std::thread::available_parallelism().map_or(1, NonZeroUsize::get) < 2 {
+        eprintln!("skipping: with one CPU, `--jobs 0` runs one command at a time");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
+    // Each command marks itself started, then waits for the other; run in turn, `a` fails
     common::write_config(
         dir.path(),
         r"
 name: root
+auto:
+  always: true
 commands:
-  - name: greet
-    cmd: 'echo hello'
-    auto:
-      always: true
+  - name: a
+    cmd: &wait 'touch $MARK; i=0; until [ -e a ] && [ -e b ]; do i=$((i+1)); [ $i -gt 250 ] && exit 1; sleep 0.02; done'
+    env: {MARK: a}
+  - name: b
+    cmd: *wait
+    env: {MARK: b}
 ",
     );
     let output = check(dir.path(), &["--jobs", "0"]);
-    assert!(output.status.success(), "{output:?}");
-    assert!(stderr(&output).contains("[1/1] greet PASS "), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("2 commands: 2 passed ("), "{stderr}");
 }
 
 #[test]
