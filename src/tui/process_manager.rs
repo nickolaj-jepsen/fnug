@@ -1,5 +1,3 @@
-use std::io::Write;
-use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,56 +10,18 @@ use crate::pty::terminal::{Terminal, TerminalOptions, TerminalSize};
 use crate::pty::{format_exit_message, format_start_message};
 use crate::runner::{self, DagNode, NodeState, PlanOptions, Selection};
 
-use super::app::{App, AppEvent, CommandStatus, ProcessInstance, STOP_GRACE};
+use super::app::{App, AppEvent, CommandStatus, Outbound, ProcessInstance, STOP_GRACE};
+use super::clipboard::{self, Backend};
 use super::status::StatusLevel;
 use super::tree_state::find_group_in_group;
 
-/// Copy text to the system clipboard using platform-native commands.
-fn set_clipboard(text: &str) -> Result<(), String> {
-    // Try clipboard commands in order of preference
-    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
-        &[("pbcopy", &[])]
-    } else {
-        &[
-            ("wl-copy", &[]),
-            ("xclip", &["-selection", "clipboard"]),
-            ("xsel", &["--clipboard", "--input"]),
-        ]
-    };
-
-    for (cmd, args) in candidates {
-        let result = StdCommand::new(cmd)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn();
-
-        match result {
-            Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take()
-                    && let Err(e) = stdin.write_all(text.as_bytes())
-                {
-                    return Err(format!("{cmd}: failed to write: {e}"));
-                }
-                match child.wait() {
-                    Ok(status) if status.success() => return Ok(()),
-                    Ok(status) => {
-                        return Err(format!("{cmd}: exited with {status}"));
-                    }
-                    Err(e) => {
-                        return Err(format!("{cmd}: failed to wait: {e}"));
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(format!("{cmd}: {e}"));
-            }
-        }
+/// "Copied 3 lines", naming the way it went when that isn't the usual one
+fn copied_message(lines: usize, via: Option<&str>) -> String {
+    let plural = if lines == 1 { "" } else { "s" };
+    match via {
+        Some(via) => format!("Copied {lines} line{plural} via {via}"),
+        None => format!("Copied {lines} line{plural}"),
     }
-
-    Err("no clipboard command found (tried wl-copy, xclip, xsel)".into())
 }
 
 impl App {
@@ -239,38 +199,64 @@ impl App {
         self.check_batch_complete();
     }
 
-    /// Copy a command's terminal output to the system clipboard
-    pub fn copy_command_output(&self, cmd_id: &str) {
+    /// Copy a command's whole output to the clipboard, and say in the toolbar how it went.
+    pub fn copy_command_output(&mut self, cmd_id: &str) {
         let Some(proc) = self.processes.get(cmd_id) else {
-            info!("No process found for '{cmd_id}', nothing to copy");
+            self.set_status("Nothing to copy: the command hasn't run", StatusLevel::Info);
             return;
         };
-        let mut parser = proc.terminal.parser().lock();
-        let scrollback_len = parser.screen().scrollback_len();
-        let original_scrollback = parser.screen().scrollback();
-        parser.set_scrollback(scrollback_len);
-        let contents = parser.screen().contents();
-        parser.set_scrollback(original_scrollback);
-        drop(parser);
+        let text = clipboard::extract_copy_text(proc.terminal.parser().lock().screen());
+        if text.is_empty() {
+            self.set_status("Nothing to copy: no output", StatusLevel::Info);
+            return;
+        }
+        let text = clipboard::cap_copy_text(text);
+        let lines = text.lines().count();
+        info!(
+            "Copying {} bytes from '{cmd_id}' to the clipboard",
+            text.len()
+        );
 
-        // Strip fnug's own echoed lines (start banner and result status)
-        let contents: String = contents
-            .lines()
-            .filter(|line| !line.contains('❱'))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let contents = contents.trim().to_string();
-
-        let len = contents.len();
-        info!("Copying {len} bytes from '{cmd_id}' to clipboard");
-
+        let backends = clipboard::backends_for_env();
+        if backends.first() == Some(&Backend::Osc52) {
+            self.outbox.push(Outbound::Clipboard(text));
+            self.set_status(copied_message(lines, None), StatusLevel::Info);
+            return;
+        }
+        let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            if let Err(e) = set_clipboard(&contents) {
-                log::error!("Failed to copy to clipboard: {e}");
-            } else {
-                log::info!("Copied to clipboard successfully");
-            }
+            let result = clipboard::copy_with_programs(&text, &backends);
+            let fallback = backends.contains(&Backend::Osc52).then_some(text);
+            let _ = event_tx.blocking_send(AppEvent::ClipboardResult {
+                lines,
+                result,
+                fallback,
+            });
         });
+    }
+
+    /// Report how a copy through a clipboard program went, and fall back to OSC 52 if it failed.
+    pub(super) fn finish_copy(
+        &mut self,
+        lines: usize,
+        result: Result<&'static str, String>,
+        fallback: Option<String>,
+    ) {
+        match (result, fallback) {
+            (Ok(program), _) => {
+                debug!("Copied with {program}");
+                self.set_status(copied_message(lines, None), StatusLevel::Info);
+            }
+            (Err(e), Some(text)) => {
+                info!("No clipboard program worked ({e}); copying with OSC 52");
+                self.outbox.push(Outbound::Clipboard(text));
+                self.set_status(copied_message(lines, Some("OSC 52")), StatusLevel::Info);
+            }
+            (Err(e), None) => {
+                error!("Failed to copy to the clipboard: {e}");
+                self.set_status(format!("Copy failed: {e}"), StatusLevel::Error);
+            }
+        }
     }
 
     /// Clear a command's terminal and error, and drop its queued run or stop its process. The
