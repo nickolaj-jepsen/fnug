@@ -220,6 +220,8 @@ pub struct App {
     pub focus: Focus,
     /// Track which groups are expanded (by group id)
     pub(super) expanded: HashMap<String, bool>,
+    /// Groups the user expanded or collapsed by hand, which selection changes leave alone
+    pub(super) user_expansion: HashSet<String>,
     /// Track which commands are selected (by command id)
     pub(super) selected: HashSet<String>,
     /// Mouse interaction state
@@ -321,6 +323,7 @@ impl App {
             should_quit: false,
             focus: Focus::Tree,
             expanded: HashMap::new(),
+            user_expansion: HashSet::new(),
             selected: HashSet::new(),
             mouse: MouseState::default(),
             toolbar: ToolbarCache::default(),
@@ -360,7 +363,7 @@ impl App {
                 self.selected.remove(&cmd.id);
             }
         }
-        self.collapse_inactive_groups();
+        self.fit_expansion_to_selection(true);
         self.rebuild_visible_nodes();
 
         // Move cursor to the first failed command in the visible tree
@@ -387,7 +390,7 @@ impl App {
             self.selected.insert(cmd.id.clone());
         }
         debug!("Always-selected {} commands", always_cmds.len());
-        self.collapse_inactive_groups();
+        self.fit_expansion_to_selection(true);
         self.rebuild_visible_nodes();
     }
 
@@ -418,9 +421,9 @@ impl App {
         }));
     }
 
-    /// Collapse groups that contain no selected commands and expand groups
-    /// that do, skipping the root.
-    fn collapse_inactive_groups(&mut self) {
+    /// Expand the groups that hold a selected command and, if `collapse`, collapse the others.
+    /// Skips the root and the groups the user expanded or collapsed by hand.
+    fn fit_expansion_to_selection(&mut self, collapse: bool) {
         let mut to_collapse = Vec::new();
         let mut to_expand = Vec::new();
         collect_inactive_groups(
@@ -429,12 +432,34 @@ impl App {
             &mut to_collapse,
             &mut to_expand,
         );
-        for id in to_collapse {
-            self.expanded.insert(id, false);
+        if !collapse {
+            to_collapse.clear();
         }
-        for id in to_expand {
-            self.expanded.insert(id, true);
+        let changes = to_collapse
+            .into_iter()
+            .map(|id| (id, false))
+            .chain(to_expand.into_iter().map(|id| (id, true)));
+        for (id, expanded) in changes {
+            if !self.user_expansion.contains(&id) {
+                self.expanded.insert(id, expanded);
+            }
         }
+    }
+
+    /// Expand or collapse group `id` for the user; selection changes leave it that way.
+    pub(super) fn set_expanded_by_user(&mut self, id: &str, expanded: bool) {
+        self.expanded.insert(id.to_string(), expanded);
+        self.user_expansion.insert(id.to_string());
+        self.mark_tree_dirty();
+    }
+
+    /// Select the always and git-selected commands afresh, and fit every group to that
+    /// selection, whatever the user expanded or collapsed.
+    pub(super) fn git_select(&mut self) {
+        self.selected.clear();
+        self.user_expansion.clear();
+        self.apply_always_selection();
+        self.spawn_git_selection();
     }
 
     /// Mark the tree as needing a rebuild (lazy, happens at next render)
@@ -549,7 +574,8 @@ impl App {
                 for m in matches {
                     self.selected.insert(m.id);
                 }
-                self.collapse_inactive_groups();
+                // Background events never collapse: the cursor or the user may be in there
+                self.fit_expansion_to_selection(false);
                 self.mark_tree_dirty();
             }
             AppEvent::GitSelectionComplete(generation, selected) => {
@@ -559,7 +585,7 @@ impl App {
                         self.selected.insert(cmd.id.clone());
                     }
                     debug!("Git-selected {} commands", selected.len());
-                    self.collapse_inactive_groups();
+                    self.fit_expansion_to_selection(false);
                     self.mark_tree_dirty();
                 }
             }
@@ -653,20 +679,16 @@ impl App {
 
     /// Expand all groups in the tree
     pub fn expand_all(&mut self) {
-        let ids = collect_all_group_ids(&self.config);
-        for id in ids {
-            self.expanded.insert(id, true);
+        for id in collect_all_group_ids(&self.config) {
+            self.set_expanded_by_user(&id, true);
         }
-        self.mark_tree_dirty();
     }
 
     /// Collapse all groups in the tree (except root)
     pub fn collapse_all(&mut self) {
-        let ids = collect_child_group_ids(&self.config);
-        for id in ids {
-            self.expanded.insert(id, false);
+        for id in collect_child_group_ids(&self.config) {
+            self.set_expanded_by_user(&id, false);
         }
-        self.mark_tree_dirty();
     }
 
     /// Send `SIGHUP` to every command's process group and wait until each is reaped, then abort
@@ -797,6 +819,7 @@ impl App {
             match &node.kind {
                 NodeKind::Group { .. } => {
                     if let Some(group) = find_group_in_group(&self.config, &node.id) {
+                        let group_id = group.id.clone();
                         let cmd_ids: Vec<String> =
                             group.all_commands().iter().map(|c| c.id.clone()).collect();
                         let all_selected = cmd_ids.iter().all(|id| self.selected.contains(id));
@@ -809,8 +832,7 @@ impl App {
                             }
                         }
                         // Keep expand/collapse in sync: expand when selecting, collapse when deselecting
-                        self.expanded.insert(node.id.clone(), select);
-                        self.mark_tree_dirty();
+                        self.set_expanded_by_user(&group_id, select);
                     }
                 }
                 NodeKind::Command { selected, .. } => {
@@ -870,12 +892,10 @@ impl App {
 
         match (&menu.target, action) {
             (ContextMenuTarget::Group { id, .. }, ContextMenuAction::Expand) => {
-                self.expanded.insert(id.clone(), true);
-                self.mark_tree_dirty();
+                self.set_expanded_by_user(id, true);
             }
             (ContextMenuTarget::Group { id, .. }, ContextMenuAction::Collapse) => {
-                self.expanded.insert(id.clone(), false);
-                self.mark_tree_dirty();
+                self.set_expanded_by_user(id, false);
             }
             (ContextMenuTarget::Group { id, .. }, ContextMenuAction::SelectAll) => {
                 if let Some(group) = find_group_in_group(&self.config, id) {
@@ -1006,11 +1026,7 @@ impl App {
                     self.copy_command_output(&id);
                 }
             }
-            ToolbarAction::GitSelect => {
-                self.selected.clear();
-                self.apply_always_selection();
-                self.spawn_git_selection();
-            }
+            ToolbarAction::GitSelect => self.git_select(),
             ToolbarAction::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
             }
@@ -1148,5 +1164,91 @@ mod tests {
             "  └─○ recursive",
         ];
         assert_eq!(lines, expected);
+    }
+
+    mod expansion {
+        use crossterm::event::KeyCode;
+
+        use crate::selectors::watch::WatchMatch;
+        use crate::tui::app::{App, AppEvent};
+        use crate::tui::test_util::{command, cursor_node, draw, press, two_groups};
+
+        fn watcher_selects(id: &str) -> AppEvent {
+            AppEvent::WatcherTriggered(vec![WatchMatch {
+                id: id.into(),
+                files: vec![],
+            }])
+        }
+
+        fn expanded(app: &App, id: &str) -> bool {
+            app.expanded.get(id).copied().unwrap_or(true)
+        }
+
+        /// [`two_groups`] as the TUI starts: nothing selected, so both groups collapsed
+        fn started() -> App {
+            let mut app = two_groups();
+            app.apply_always_selection();
+            assert!(!expanded(&app, "alpha") && !expanded(&app, "beta"));
+            app
+        }
+
+        /// Move the cursor to `id` and press `key` there
+        fn press_on(app: &mut App, id: &str, key: KeyCode) {
+            draw(app, 80, 24);
+            while cursor_node(app) != Some(id) {
+                press(app, KeyCode::Char('j'));
+            }
+            press(app, key);
+        }
+
+        #[test]
+        fn git_selection_keeps_group_user_expanded() {
+            let mut app = started();
+            press_on(&mut app, "alpha", KeyCode::Char('l'));
+
+            app.handle_app_event(AppEvent::GitSelectionComplete(0, vec![command("b1")]));
+
+            assert!(
+                expanded(&app, "alpha"),
+                "collapsed a group the user expanded"
+            );
+            assert!(expanded(&app, "beta"));
+        }
+
+        #[test]
+        fn watcher_keeps_group_user_collapsed() {
+            let mut app = two_groups();
+            press_on(&mut app, "beta", KeyCode::Char('h'));
+
+            app.handle_app_event(watcher_selects("b1"));
+
+            assert!(
+                !expanded(&app, "beta"),
+                "expanded a group the user collapsed"
+            );
+        }
+
+        #[test]
+        fn watcher_event_keeps_cursor_node() {
+            let mut app = started();
+            press_on(&mut app, "alpha", KeyCode::Char('l'));
+            press_on(&mut app, "a2", KeyCode::Null);
+
+            app.handle_app_event(watcher_selects("b1"));
+            draw(&mut app, 80, 24);
+
+            assert_eq!(cursor_node(&app), Some("a2"));
+            assert_eq!(app.active_terminal_id.as_deref(), Some("a2"));
+        }
+
+        #[tokio::test]
+        async fn git_select_key_resets_user_expansion() {
+            let mut app = started();
+            press_on(&mut app, "alpha", KeyCode::Char('l'));
+
+            press(&mut app, KeyCode::Char('g'));
+
+            assert!(!expanded(&app, "alpha"));
+        }
     }
 }

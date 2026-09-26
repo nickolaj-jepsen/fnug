@@ -172,8 +172,8 @@ impl App {
                 if let Some(node) = self.visible_nodes.get(self.cursor) {
                     match &node.kind {
                         NodeKind::Group { expanded: true, .. } => {
-                            self.expanded.insert(node.id.clone(), false);
-                            self.mark_tree_dirty();
+                            let id = node.id.clone();
+                            self.set_expanded_by_user(&id, false);
                         }
                         NodeKind::Command { selected: true, .. } => {
                             self.selected.remove(&node.id);
@@ -189,8 +189,8 @@ impl App {
                         NodeKind::Group {
                             expanded: false, ..
                         } => {
-                            self.expanded.insert(node.id.clone(), true);
-                            self.mark_tree_dirty();
+                            let id = node.id.clone();
+                            self.set_expanded_by_user(&id, true);
                         }
                         NodeKind::Command {
                             selected: false, ..
@@ -205,12 +205,7 @@ impl App {
             KeyCode::Char(' ') => {
                 self.toggle_current_node();
             }
-            KeyCode::Char('g') => {
-                // Git auto-select
-                self.selected.clear();
-                self.apply_always_selection();
-                self.spawn_git_selection();
-            }
+            KeyCode::Char('g') => self.git_select(),
             KeyCode::Enter => {
                 self.run_selected(terminal_area);
             }
