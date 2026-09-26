@@ -354,9 +354,12 @@ impl FnugMcp {
         let planned = self.with_config(move |loaded| {
             let plan = runner::plan(&loaded.root, &selection, &PlanOptions::default())
                 .map_err(|e| plan_error(&e, &loaded.root))?;
-            Ok((plan, loaded.cwd))
+            let selectable = commands_with_group_path(&loaded.root)
+                .iter()
+                .any(|(cmd, _)| cmd.auto.git == Some(true) || cmd.auto.always == Some(true));
+            Ok((plan, loaded.cwd, selectable))
         });
-        let (plan, cwd) = match planned.await {
+        let (plan, cwd, selectable) = match planned.await {
             Ok(planned) => planned,
             Err(result) => return Ok(result),
         };
@@ -381,6 +384,7 @@ impl FnugMcp {
             root: &cwd,
             verbose: run.verbose,
             queued,
+            selectable,
         })
         .map_err(mcp_err)
     }

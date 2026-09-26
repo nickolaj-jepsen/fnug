@@ -690,6 +690,21 @@ async fn empty_run_lints_explains_check_false() {
 }
 
 #[tokio::test]
+async fn empty_run_lints_explains_missing_auto_rules() {
+    let (server, dir, _repo) = repo_server("name: root\ncommands:\n  - name: a\n    cmd: 'true'\n");
+    std::fs::write(dir.path().join("notes.txt"), "changed").unwrap();
+    let result = server
+        .run_lints(lints(), CancellationToken::new())
+        .await
+        .unwrap();
+    let message = json(&result)["message"].as_str().unwrap().to_owned();
+    assert!(
+        message.starts_with("No command has auto.git or auto.always set"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
 async fn include_manual_runs_check_false_commands() {
     let (server, dir, _repo) = repo_server(RUST_AND_DOCS);
     std::fs::write(dir.path().join("README.md"), "changed").unwrap();
