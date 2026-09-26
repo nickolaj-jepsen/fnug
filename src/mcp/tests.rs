@@ -5,7 +5,7 @@ use rmcp::model::CallToolResult;
 use tokio_util::sync::CancellationToken;
 
 use super::FnugMcp;
-use super::params::{AutoType, ListLintsParams, RunLintParams, RunParams};
+use super::params::{AutoType, ListLintsParams, RunAllParams, RunLintParams, RunLintsParams};
 use crate::LoadOptions;
 use crate::runner::CancelCause;
 
@@ -26,11 +26,15 @@ fn json(result: &CallToolResult) -> serde_json::Value {
     serde_json::from_str(text).unwrap()
 }
 
-fn fail_fast(fail_fast: bool) -> Parameters<RunParams> {
-    Parameters(RunParams {
+fn all(fail_fast: bool) -> Parameters<RunAllParams> {
+    Parameters(RunAllParams {
         fail_fast: Some(fail_fast),
-        verbose: None,
+        ..RunAllParams::default()
     })
+}
+
+fn lints() -> Parameters<RunLintsParams> {
+    Parameters(RunLintsParams::default())
 }
 
 fn run_lint(command: &str) -> Parameters<RunLintParams> {
@@ -45,6 +49,7 @@ fn list_all() -> Parameters<ListLintsParams> {
         group: None,
         auto_type: None,
         name: None,
+        base: None,
     })
 }
 
@@ -116,7 +121,7 @@ commands:
 ",
     );
     let result = server
-        .run_all(fail_fast(false), CancellationToken::new())
+        .run_all(all(false), CancellationToken::new())
         .await
         .unwrap();
     let result = json(&result);
@@ -287,7 +292,7 @@ commands:
 ",
     );
     let result = server
-        .run_all(fail_fast(false), CancellationToken::new())
+        .run_all(all(false), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
@@ -351,9 +356,9 @@ commands:
     cmd: 'echo hi'
 ",
     );
-    let params = RunParams {
+    let params = RunAllParams {
         verbose: Some(true),
-        ..fail_fast(false).0
+        ..RunAllParams::default()
     };
     let result = server
         .run_all(Parameters(params), CancellationToken::new())
@@ -387,7 +392,7 @@ commands:
 ",
     );
     let result = server
-        .run_all(fail_fast(false), CancellationToken::new())
+        .run_all(all(false), CancellationToken::new())
         .await
         .unwrap();
     let blocks = blocks(&result);
@@ -414,7 +419,7 @@ commands:
 ",
     );
     let result = server
-        .run_all(fail_fast(true), CancellationToken::new())
+        .run_all(all(true), CancellationToken::new())
         .await
         .unwrap();
     let result = json(&result);
@@ -447,6 +452,218 @@ commands:
     let result = json(&result);
     assert_eq!(result["cancelled"], 1);
     assert_eq!(result["commands"][0]["status"], "cancelled");
+}
+
+/// Stage everything in the work tree and commit it.
+fn commit_all(repo: &git2::Repository) -> git2::Oid {
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("test", "test@example.com").unwrap();
+    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    let parents: Vec<&git2::Commit> = parent.iter().collect();
+    repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &parents)
+        .unwrap()
+}
+
+/// A git repo with `yaml` as its committed config.
+fn repo_server(yaml: &str) -> (FnugMcp, tempfile::TempDir, git2::Repository) {
+    let (server, dir) = server(yaml);
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    commit_all(&repo);
+    (server, dir, repo)
+}
+
+const RUST_AND_DOCS: &str = r"
+name: root
+auto:
+  git: true
+  path: [.]
+commands:
+  - name: test
+    cmd: 'true'
+    auto:
+      regex: ['\.rs$']
+  - name: docs
+    cmd: 'true'
+    auto:
+      regex: ['\.md$']
+      check: false
+";
+
+#[tokio::test]
+async fn list_lints_runs_in_check_false_for_manual() {
+    let (server, dir, _repo) = repo_server(RUST_AND_DOCS);
+    std::fs::write(dir.path().join("README.md"), "changed").unwrap();
+    let result = server.list_lints(list_all()).await.unwrap();
+    let lints = json(&result);
+    let docs = &lints[1];
+    assert_eq!(docs["id"], "docs");
+    assert_eq!(docs["runs_in_check"], false);
+    assert_eq!(docs["selected"], true);
+    assert_eq!(docs["reason"], "git");
+    assert_eq!(docs["matched_files"], serde_json::json!(["README.md"]));
+    assert_eq!(lints[0]["runs_in_check"], true);
+    assert_eq!(lints[0]["selected"], false);
+    assert!(lints[0].get("reason").is_none());
+}
+
+#[tokio::test]
+async fn empty_run_lints_explains_check_false() {
+    let (server, dir, _repo) = repo_server(RUST_AND_DOCS);
+    let run_lints = || server.run_lints(lints(), CancellationToken::new());
+
+    let message = |result: &CallToolResult| json(result)["message"].as_str().unwrap().to_owned();
+    let clean = message(&run_lints().await.unwrap());
+    assert!(clean.starts_with("No changed files, so"), "{clean}");
+
+    std::fs::write(dir.path().join("notes.txt"), "changed").unwrap();
+    let unmatched = message(&run_lints().await.unwrap());
+    assert!(
+        unmatched.starts_with("1 changed file, but no command's auto rules match"),
+        "{unmatched}"
+    );
+
+    std::fs::write(dir.path().join("README.md"), "changed").unwrap();
+    let result = run_lints().await.unwrap();
+    let manual = message(&result);
+    assert!(
+        manual.starts_with("2 changed files; the only commands they select have auto.check: false: docs. Set include_manual"),
+        "{manual}"
+    );
+    for hint in [&clean, &unmatched, &manual] {
+        assert!(hint.contains("run_all") && hint.contains("base"), "{hint}");
+    }
+    assert_eq!(json(&result)["changed_files"], 2);
+}
+
+#[tokio::test]
+async fn include_manual_runs_check_false_commands() {
+    let (server, dir, _repo) = repo_server(RUST_AND_DOCS);
+    std::fs::write(dir.path().join("README.md"), "changed").unwrap();
+    let params = RunLintsParams {
+        include_manual: Some(true),
+        ..RunLintsParams::default()
+    };
+    let result = server
+        .run_lints(Parameters(params), CancellationToken::new())
+        .await
+        .unwrap();
+    let summary = json(&result);
+    assert_eq!(summary["commands"][0]["id"], "docs");
+    assert_eq!(summary["commands"][0]["reason"], "git");
+    assert_eq!(
+        summary["commands"][0]["matched_files"],
+        serde_json::json!(["README.md"])
+    );
+
+    let result = server
+        .run_all(all(false), CancellationToken::new())
+        .await
+        .unwrap();
+    let summary = json(&result);
+    assert_eq!(summary["total"], 1);
+    assert_eq!(summary["commands"][0]["reason"], "all");
+    let message = summary["message"].as_str().unwrap();
+    assert!(
+        message.contains("Not run because of auto.check: false: docs"),
+        "{message}"
+    );
+    let params = RunAllParams {
+        include_manual: Some(true),
+        ..RunAllParams::default()
+    };
+    let result = server
+        .run_all(Parameters(params), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(json(&result)["total"], 2);
+}
+
+#[tokio::test]
+async fn base_selects_committed_changes() {
+    let (server, dir, repo) = repo_server(RUST_AND_DOCS);
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("start", &head, false).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "// changed").unwrap();
+    commit_all(&repo);
+
+    // Nothing is uncommitted
+    let result = server
+        .run_lints(lints(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(json(&result)["total"], 0);
+
+    let since = |base: &str| RunLintsParams {
+        base: Some(base.into()),
+        ..RunLintsParams::default()
+    };
+    let result = server
+        .run_lints(Parameters(since("start")), CancellationToken::new())
+        .await
+        .unwrap();
+    let summary = json(&result);
+    assert_eq!(summary["changed_files"], 1);
+    let test = &summary["commands"][0];
+    assert_eq!(
+        (&test["id"], &test["reason"]),
+        (&"test".into(), &"git".into())
+    );
+    assert_eq!(test["matched_files"], serde_json::json!(["src/lib.rs"]));
+    assert_eq!(test["matched_file_count"], 1);
+
+    let listed = ListLintsParams {
+        base: Some("start".into()),
+        ..list_all().0
+    };
+    let result = server.list_lints(Parameters(listed)).await.unwrap();
+    assert_eq!(json(&result)[0]["selected"], true);
+
+    let result = server
+        .run_lints(Parameters(since("no-such-ref")), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        text(&result).starts_with("Git selection failed: "),
+        "{}",
+        text(&result)
+    );
+    assert!(text(&result).contains("no-such-ref"), "{}", text(&result));
+    let listed = ListLintsParams {
+        base: Some("no-such-ref".into()),
+        ..list_all().0
+    };
+    let result = server.list_lints(Parameters(listed)).await.unwrap();
+    assert_eq!(result.is_error, Some(true));
+}
+
+#[tokio::test]
+async fn dependency_reason_names_its_dependents() {
+    let (server, _dir) = server(
+        r"
+name: root
+commands:
+  - name: build
+    cmd: 'true'
+  - name: test
+    cmd: 'true'
+    depends_on: [build]
+",
+    );
+    let result = server
+        .run_lint(run_lint("test"), CancellationToken::new())
+        .await
+        .unwrap();
+    let summary = json(&result);
+    assert_eq!(summary["commands"][0]["reason"], "dependency of test");
+    assert_eq!(summary["commands"][1]["reason"], "requested");
+    assert_eq!(summary["message"], "2 commands passed.");
 }
 
 #[test]

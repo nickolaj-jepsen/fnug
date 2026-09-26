@@ -4,7 +4,6 @@ mod params;
 mod response;
 mod text;
 
-use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,11 +22,11 @@ use crate::runner::{
     self, CancelCause, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions,
     Selection, commands_with_group_path,
 };
-use crate::selectors::{self, SelectOptions};
+use crate::selectors::{self, GitScope, SelectOptions};
 use crate::{LoadOptions, LoadedConfig};
 
-use params::{AutoType, ListLintsParams, RunLintParams, RunParams};
-use response::{AutoRules, LintInfo};
+use params::{AutoType, ListLintsParams, RunAllParams, RunLintParams, RunLintsParams};
+use response::{LintInfo, Run, RunScope};
 
 /// How long shutdown waits for running commands to stop.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -44,6 +43,13 @@ const CAPTURE: CaptureLimits = CaptureLimits {
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
+
+/// How a run tool runs its commands and reports them.
+#[derive(Debug, Clone, Copy)]
+struct RunOptions {
+    fail_fast: bool,
+    verbose: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct FnugMcp {
@@ -95,6 +101,31 @@ fn plan_error(e: &PlanError, config: &CommandGroup) -> CallToolResult {
     tool_error(message)
 }
 
+/// Git selection that compares with `base`, or else looks at uncommitted changes.
+fn select_options(base: Option<&str>) -> SelectOptions {
+    SelectOptions {
+        scope: base.map_or(GitScope::WorkingTree, |base| GitScope::Since(base.into())),
+        index_override: None,
+    }
+}
+
+/// The plan selection for what a run tool asked for.
+fn selection(scope: &RunScope) -> Selection {
+    match scope {
+        RunScope::Changes {
+            base,
+            include_manual,
+        } => Selection::Auto {
+            options: select_options(base.as_deref()),
+            include_manual: *include_manual,
+        },
+        RunScope::All { include_manual } => Selection::All {
+            include_manual: *include_manual,
+        },
+        RunScope::Named(command) => Selection::Targets(vec![command.clone()]),
+    }
+}
+
 /// Check whether a command matches the `list_lints` filter parameters.
 fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParams) -> bool {
     if let Some(ref g) = params.group
@@ -135,8 +166,10 @@ impl FnugMcp {
         commands are currently auto-selected based on git changes. Call this first to \
         understand what checks are available before running them. Each result includes the \
         command's id, name, shell command, working directory, auto-selection rules, \
-        dependencies, group, and whether it is currently selected by git changes. \
-        Use filters to narrow results.",
+        dependencies, group, whether it is currently selected by git changes (and why: \
+        reason and matched_files), and runs_in_check, which is false for commands that \
+        run_lints and run_all skip because of auto.check: false. Use filters to narrow \
+        results, and base to select by the changes since a branch point.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_lints(
@@ -146,29 +179,23 @@ impl FnugMcp {
         let result = self.with_config(move |loaded| {
             let flat = commands_with_group_path(&loaded.root);
             let commands: Vec<&Command> = flat.iter().map(|(cmd, _)| *cmd).collect();
-            let selection = selectors::select(&commands, &SelectOptions::default());
-            for issue in &selection.issues {
+            let selection = selectors::select(&commands, &select_options(params.base.as_deref()));
+            let (fatal, issues): (Vec<_>, Vec<_>) =
+                selection.issues.iter().partition(|i| i.is_fatal());
+            if !fatal.is_empty() {
+                let error = PlanError::Selection(fatal.into_iter().cloned().collect());
+                return Err(plan_error(&error, &loaded.root));
+            }
+            for issue in issues {
                 warn!("{issue}");
             }
-            let selected_ids: HashSet<&str> = selection.ids().collect();
 
             let infos: Vec<LintInfo> = flat
                 .into_iter()
                 .filter(|(cmd, group_path)| matches_lint_filters(cmd, group_path, &params))
-                .map(|(cmd, group_path)| LintInfo {
-                    selected: selected_ids.contains(cmd.id.as_str()),
-                    id: cmd.id.clone(),
-                    name: cmd.name.clone(),
-                    cmd: cmd.cmd.clone(),
-                    cwd: cmd.cwd.display().to_string(),
-                    auto_rules: AutoRules {
-                        git: cmd.auto.git,
-                        watch: cmd.auto.watch,
-                        always: cmd.auto.always,
-                        check: cmd.auto.check,
-                    },
-                    depends_on: cmd.depends_on.clone(),
-                    group: group_path,
+                .map(|(cmd, group_path)| {
+                    let selected = selection.get(&cmd.id);
+                    response::lint_info(cmd, group_path, selected, &loaded.cwd)
                 })
                 .collect();
 
@@ -185,23 +212,30 @@ impl FnugMcp {
         changes. This is the primary tool for verifying code correctness — call it after \
         making edits, before committing, or to validate a fix. Commands are auto-selected \
         based on which files were modified in git. Dependencies between commands are \
-        resolved automatically (e.g. build before test). Returns a compact JSON summary that \
-        lists failures first, then a text block with the output of each command that failed \
-        or timed out: stdout and stderr merged, terminal escapes removed, and cut to about \
-        20 KiB, keeping its start and end. Output of commands that passed is left out unless \
-        verbose is set.",
+        resolved automatically (e.g. build before test). Commands with auto.check: false \
+        are skipped unless include_manual is set, and base (such as \"origin/main\") selects \
+        by everything changed since the merge base with that revision, commits included, \
+        instead of uncommitted changes only. An empty result's message says why nothing was \
+        selected. Returns a compact JSON summary that lists failures first, then a text \
+        block with the output of each command that failed or timed out: stdout and stderr \
+        merged, terminal escapes removed, and cut to about 20 KiB, keeping its start and \
+        end. Output of commands that passed is left out unless verbose is set.",
         annotations(open_world_hint = false)
     )]
     async fn run_lints(
         &self,
-        Parameters(params): Parameters<RunParams>,
+        Parameters(params): Parameters<RunLintsParams>,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let selection = Selection::Auto {
-            options: SelectOptions::default(),
-            include_manual: false,
+        let scope = RunScope::Changes {
+            base: params.base,
+            include_manual: params.include_manual.unwrap_or(false),
         };
-        self.run_and_serialize(selection, &params, ct).await
+        let run = RunOptions {
+            fail_fast: params.fail_fast.unwrap_or(false),
+            verbose: params.verbose.unwrap_or(false),
+        };
+        self.run_and_serialize(scope, run, ct).await
     }
 
     #[tool(
@@ -220,34 +254,39 @@ impl FnugMcp {
         Parameters(params): Parameters<RunLintParams>,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let selection = Selection::Targets(vec![params.command]);
-        let run = RunParams {
-            fail_fast: None,
-            verbose: params.verbose,
+        let run = RunOptions {
+            fail_fast: false,
+            verbose: params.verbose.unwrap_or(false),
         };
-        self.run_and_serialize(selection, &run, ct).await
+        self.run_and_serialize(RunScope::Named(params.command), run, ct)
+            .await
     }
 
     #[tool(
         description = "Run every configured lint/test command regardless of git changes, \
-        except those marked `auto.check: false` (run those by name with run_lint). Use \
-        this for a full sweep before creating a pull request, after large refactors, or when \
-        you want to ensure nothing is broken across the entire project. Dependencies are \
-        resolved automatically. Returns a compact JSON summary that lists failures first, \
-        then a text block with the output of each command that failed or timed out: stdout \
-        and stderr merged, terminal escapes removed, and cut to about 20 KiB, keeping its \
-        start and end. Output of commands that passed is left out unless verbose is set.",
+        except those marked auto.check: false unless include_manual is set (or run one by \
+        name with run_lint). Use this for a full sweep before creating a pull request, after \
+        large refactors, or when you want to ensure nothing is broken across the entire \
+        project. Dependencies are resolved automatically. Returns a compact JSON summary \
+        that lists failures first, then a text block with the output of each command that \
+        failed or timed out: stdout and stderr merged, terminal escapes removed, and cut to \
+        about 20 KiB, keeping its start and end. Output of commands that passed is left out \
+        unless verbose is set.",
         annotations(open_world_hint = false)
     )]
     async fn run_all(
         &self,
-        Parameters(params): Parameters<RunParams>,
+        Parameters(params): Parameters<RunAllParams>,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let selection = Selection::All {
-            include_manual: false,
+        let scope = RunScope::All {
+            include_manual: params.include_manual.unwrap_or(false),
         };
-        self.run_and_serialize(selection, &params, ct).await
+        let run = RunOptions {
+            fail_fast: params.fail_fast.unwrap_or(false),
+            verbose: params.verbose.unwrap_or(false),
+        };
+        self.run_and_serialize(scope, run, ct).await
     }
 }
 
@@ -264,15 +303,16 @@ impl FnugMcp {
             .unwrap_or_else(|e| Err(tool_error(format!("fnug failed: {e}"))))
     }
 
-    /// Plan and run `selection`, one command at a time with captured output. Cancelling `ct`
-    /// kills the running command's process group.
+    /// Plan and run what `scope` asks for, one command at a time with captured output.
+    /// Cancelling `ct` kills the running command's process group.
     async fn run_and_serialize(
         &self,
-        selection: Selection,
-        params: &RunParams,
+        scope: RunScope,
+        run: RunOptions,
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let _running = self.runs.read().await;
+        let selection = selection(&scope);
         let planned = self.with_config(move |loaded| {
             let plan = runner::plan(&loaded.root, &selection, &PlanOptions::default())
                 .map_err(|e| plan_error(&e, &loaded.root))?;
@@ -287,14 +327,21 @@ impl FnugMcp {
         }
 
         let opts = ExecOptions {
-            fail_fast: params.fail_fast.unwrap_or(false),
+            fail_fast: run.fail_fast,
             output: OutputMode::Capture(CAPTURE),
             cancel: ct,
             cancel_cause: self.cancel_cause.clone(),
             ..ExecOptions::default()
         };
         let report = runner::execute(&plan, &cwd, &opts, &NoHook, &mut |_| {}).await;
-        response::run_result(&plan, &report, params.verbose.unwrap_or(false)).map_err(mcp_err)
+        response::run_result(&Run {
+            scope: &scope,
+            plan: &plan,
+            report: &report,
+            root: &cwd,
+            verbose: run.verbose,
+        })
+        .map_err(mcp_err)
     }
 }
 
