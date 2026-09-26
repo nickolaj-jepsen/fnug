@@ -126,6 +126,26 @@ fn detect_node_package_manager_field_and_missing_scripts() {
 }
 
 #[test]
+fn detect_node_skips_npm_placeholder_test() {
+    let dir = tempfile::tempdir().unwrap();
+    // What `npm init -y` writes, which always fails
+    let placeholder = r#""test": "echo \"Error: no test specified\" && exit 1""#;
+    write(
+        dir.path(),
+        "package.json",
+        &format!(r#"{{"scripts": {{"lint": "eslint .", {placeholder}}}}}"#),
+    );
+    assert_eq!(cmds(&only(dir.path())), [("lint", "npm run lint")]);
+
+    write(
+        dir.path(),
+        "package.json",
+        &format!(r#"{{"scripts": {{{placeholder}}}}}"#),
+    );
+    assert!(detect(dir.path()).is_empty());
+}
+
+#[test]
 fn detect_python_ruff_uv() {
     let dir = tempfile::tempdir().unwrap();
     write(
