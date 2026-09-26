@@ -182,10 +182,48 @@ commands:
     let output = check(dir.path(), &["--fail-fast"]);
     assert_eq!(output.status.code(), Some(1));
     let stderr = stderr(&output);
+    assert!(stderr.contains("[2/3] second NOT RUN\n"), "{stderr}");
+    assert!(stderr.contains("[3/3] third NOT RUN\n"), "{stderr}");
     assert!(
         stderr.contains("3 commands: 1 failed, 2 not run ("),
         "{stderr}"
     );
+}
+
+#[test]
+fn parallel_fail_fast_numbers_every_command() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+auto:
+  always: true
+commands:
+  - name: slow
+    cmd: 'echo $$ > pid; exec sleep 30'
+  - name: fail
+    cmd: 'i=0; until [ -e pid ]; do i=$((i+1)); [ $i -gt 250 ] && exit 9; sleep 0.02; done; exit 4'
+  - name: third
+    cmd: 'true'
+",
+    );
+    let mut child = fnug_command(dir.path(), &["-j", "2", "--fail-fast", "--mute-success"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let slow = KillOnDrop(common::read_pid(&dir.path().join("pid")));
+    let status = wait(&mut child);
+    let stderr = stderr(&child.wait_with_output().unwrap());
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("[1/3] fail FAIL (exit 4) "), "{stderr}");
+    assert!(stderr.contains("[2/3] third NOT RUN\n"), "{stderr}");
+    assert!(stderr.contains("[3/3] slow CANCELLED "), "{stderr}");
+    assert!(
+        stderr.contains("3 commands: 1 failed, 1 cancelled, 1 not run ("),
+        "{stderr}"
+    );
+    assert!(!common::process_alive(slow.0), "{stderr}");
 }
 
 #[test]
