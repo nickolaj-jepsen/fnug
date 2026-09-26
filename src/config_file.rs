@@ -23,7 +23,9 @@ use crate::trust::{TrustPolicy, Untrusted};
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ConfigError {
-    #[error("No config file found in current directory or its parents: {0}")]
+    #[error(
+        "No config file found in current directory or its parents: {0}\n  hint: run `fnug init` to create one"
+    )]
     ConfigNotFound(PathBuf),
     #[error("Config file not found: {0}")]
     ConfigFileMissing(PathBuf),

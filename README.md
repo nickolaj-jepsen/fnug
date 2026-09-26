@@ -14,6 +14,8 @@ Fnug is a TUI command runner that automatically selects and executes lint and te
 - **File watching** — monitor the file system and re-select commands when files change
 - **Terminal emulation with scrollback** — full PTY support for interactive commands and long output
 - **Headless mode** (`fnug check`) — run selected commands without the TUI, in a pre-commit hook or in CI
+- **Headless mode** (`fnug check`) — run selected commands without the TUI, useful for CI
+- **Config scaffolding** (`fnug init`) — write a starter `.fnug.yaml` for the Rust, Python, Node, Go or Nix tooling it finds
 - **Setup wizard** (`fnug setup`) — install a pre-commit hook that runs `fnug check` and add the MCP server to your editor
 - **Command dependencies** — define `depends_on` to control execution order
 - **Environment variables** — set per-command or per-group env vars
@@ -68,7 +70,7 @@ cargo install --path .
 
 ## Usage
 
-Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c path/to/config.yaml`).
+Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c path/to/config.yaml`). `fnug init` creates one.
 
 ### Subcommands
 
@@ -76,6 +78,8 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | ------------- | --------------------------------------------------------------- |
 | `fnug`        | Launch the TUI                                                  |
 | `fnug check`  | Run selected commands headlessly; see [What `fnug check` runs](#what-fnug-check-runs) |
+| `fnug check`  | Run selected commands headlessly (exit code reflects pass/fail) |
+| `fnug init [dir]` | Create a `.fnug.yaml` for the project's tooling             |
 | `fnug setup`  | Interactive wizard: git pre-commit hook and editor MCP config   |
 | `fnug mcp`    | Run an MCP server over stdio                                    |
 | `fnug schema` | Print the config file's JSON Schema                             |
@@ -100,6 +104,8 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--allow-modifications` | Don't fail commands that change tracked files (`check` only) |
 | `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
 | `-j`, `--jobs <n>` | Run up to `<n>` commands at once, each after its dependencies; `0` means one per CPU (default `1`, `check` only) |
+| `--force`         | Replace the directory's config (`init` only)                    |
+| `-y`, `--yes`     | Include everything detected without asking (`init` only)        |
 | `-V`, `--version` | Print fnug's version                                            |
 
 `-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
@@ -157,6 +163,21 @@ If the checkout belongs to another user than the one running fnug, as in some co
 - When a command changed a file that also has unstaged changes, as a formatter can, fnug discards the command's changes to that file to put yours back, and says so. Its changes to other files stay. The command has already failed for changing files.
 - fnug deletes the patch once the files it changes hold exactly your changes again. Otherwise it keeps the patch and prints its path.
 - A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that repository puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Until then, other `fnug check` runs warn that changes are still set aside. Only one such run works on a repository at a time; another one exits with 2.
+### Init
+
+`fnug init` writes a `.fnug.yaml` in the current directory, or in the directory you pass, with a group of commands for each kind of tooling it finds there:
+
+| Found                                   | Commands                                                                 |
+| --------------------------------------- | ------------------------------------------------------------------------ |
+| `Cargo.toml`                            | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
+| `pyproject.toml`, `ruff.toml`           | `ruff check .`, `ruff format --check .`, and `mypy .` and `pytest` if `pyproject.toml` configures or depends on them (or `mypy.ini`, `pytest.ini` or `conftest.py` exists); prefixed with `uv run`, `poetry run` or `pdm run` when that tool's lockfile exists |
+| `package.json`                          | Its `format:check`, `lint`, `typecheck` and `test` scripts, run with pnpm, yarn, bun or npm to match the lockfile; `test` gets `CI=true` so test runners don't start in watch mode |
+| `go.mod`                                | A `gofmt -l` check that fails if gofmt fails or lists any file, `go vet ./...`, `go test ./...` |
+| `flake.nix`                             | `alejandra --check .`, `statix check .` and `deadnix --fail .`, each only if it is on `PATH` |
+
+Each group's commands are selected by uncommitted changes to the files they check (`auto.git`) and by edits to them while fnug runs (`auto.watch`). `fnug init` asks which groups to include; `--yes`, or a stdin that isn't a terminal, includes them all. If it finds nothing, the config has an example command to replace. The file starts with a comment that points the YAML language server at the schema for your fnug version (see [Editor support](#editor-support)) and sets `fnug_version`.
+
+It never replaces an existing config unless you pass `--force`, which rewrites the config fnug loads from that directory in its own format. Run it in a workspace package's directory to give that package a config of its own.
 
 ### Setup
 
