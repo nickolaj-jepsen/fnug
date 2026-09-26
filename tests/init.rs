@@ -566,6 +566,39 @@ fn init_cli_writes_the_config_file() {
 }
 
 #[test]
+fn init_warns_when_it_shadows_a_parent_config() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        ".fnug.yaml",
+        "name: root\ncommands:\n  - {name: a, cmd: 'true'}\n",
+    );
+    write(dir.path(), "sub/go.mod", "module demo\n");
+
+    let output = fnug(dir.path(), &["init", "--yes", "sub"]);
+
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parent = dir.path().canonicalize().unwrap().join(".fnug.yaml");
+    assert!(
+        stderr.contains(&format!("{} isn't a workspace root", parent.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("workspace: true"), "{stderr}");
+
+    // A workspace root takes the new config in as a package instead
+    write(
+        dir.path(),
+        ".fnug.yaml",
+        "name: root\nworkspace: true\ncommands:\n  - {name: a, cmd: 'true'}\n",
+    );
+    let output = fnug(dir.path(), &["init", "--yes", "--force", "sub"]);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("workspace root"), "{stderr}");
+}
+
+#[test]
 fn init_warns_below_the_repository_root() {
     let dir = tempfile::tempdir().unwrap();
     git2::Repository::init(dir.path()).unwrap();
