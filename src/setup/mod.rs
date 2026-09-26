@@ -15,7 +15,7 @@ use hooks::{
     ForeignPolicy, HookError, HookInvocation, HookPlan, HookStatus, HookTarget, InstallOptions,
     InstallOutcome,
 };
-use mcp::{Editor, FileChange};
+use mcp::{Editor, FileChange, McpStatus};
 
 #[derive(Error, Debug)]
 pub enum SetupError {
@@ -89,8 +89,18 @@ struct Detected {
     cwd: PathBuf,
     root_hook: Option<RepoHook>,
     sub_repo_hooks: Vec<RepoHook>,
-    /// The editors whose config could be read, and whether it runs fnug.
-    editors: Vec<(Editor, bool)>,
+    /// What the editors' fnug entry passes to `fnug`; see [`mcp_server_args`].
+    mcp_args: Vec<String>,
+    /// The editors whose config could be read, and whether it runs fnug with `mcp_args`.
+    editors: Vec<(Editor, McpStatus)>,
+}
+
+impl Detected {
+    fn mcp_installed(&self) -> impl Iterator<Item = bool> + '_ {
+        self.editors
+            .iter()
+            .map(|(_, status)| *status != McpStatus::NotInstalled)
+    }
 }
 
 /// What the user picked.
@@ -131,7 +141,7 @@ fn default_features(detected: &Detected) -> Vec<usize> {
         .root_hook
         .as_ref()
         .is_some_and(RepoHook::is_installed);
-    let mcp_installed = detected.editors.iter().any(|(_, installed)| *installed);
+    let mcp_installed = detected.mcp_installed().any(|installed| installed);
     let mut defaults = Vec::new();
     if hook_installed || (detected.has_config && !mcp_installed) {
         defaults.push(0);
@@ -145,10 +155,23 @@ fn default_features(detected: &Detected) -> Vec<usize> {
 /// A change setup can make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
-    InstallHook { hook: RepoHook },
-    RemoveHook { hook: RepoHook },
-    InstallMcp { editor: Editor, cwd: PathBuf },
-    RemoveMcp { editor: Editor, cwd: PathBuf },
+    InstallHook {
+        hook: RepoHook,
+    },
+    RemoveHook {
+        hook: RepoHook,
+    },
+    InstallMcp {
+        editor: Editor,
+        cwd: PathBuf,
+        args: Vec<String>,
+        /// Replaces an entry with other arguments.
+        update: bool,
+    },
+    RemoveMcp {
+        editor: Editor,
+        cwd: PathBuf,
+    },
 }
 
 /// The hook's path, and the file it links to, which is the one that changes.
@@ -178,9 +201,15 @@ impl fmt::Display for Action {
             Self::RemoveHook { hook } => {
                 write!(f, "- Remove pre-commit hook ({})", hook_file(&hook.target))
             }
-            Self::InstallMcp { editor, cwd } => write!(
+            Self::InstallMcp {
+                editor,
+                cwd,
+                update,
+                ..
+            } => write!(
                 f,
-                "+ Configure MCP for {editor} ({})",
+                "{} MCP for {editor} ({})",
+                if *update { "~ Update" } else { "+ Configure" },
                 editor.config_path(cwd).display()
             ),
             Self::RemoveMcp { editor, cwd } => write!(
@@ -212,11 +241,20 @@ fn plan_actions(detected: &Detected, choice: &Choice) -> Vec<Action> {
         }
     }
 
-    for &(editor, installed) in &detected.editors {
+    for &(editor, status) in &detected.editors {
         let cwd = detected.cwd.clone();
-        match (installed, wants_mcp && choice.editors.contains(&editor)) {
-            (false, true) => actions.push(Action::InstallMcp { editor, cwd }),
-            (true, false) => actions.push(Action::RemoveMcp { editor, cwd }),
+        match (status, wants_mcp && choice.editors.contains(&editor)) {
+            (McpStatus::NotInstalled | McpStatus::Outdated, true) => {
+                actions.push(Action::InstallMcp {
+                    editor,
+                    cwd,
+                    args: detected.mcp_args.clone(),
+                    update: status == McpStatus::Outdated,
+                });
+            }
+            (McpStatus::Installed | McpStatus::Outdated, false) => {
+                actions.push(Action::RemoveMcp { editor, cwd });
+            }
             _ => {}
         }
     }
@@ -266,8 +304,10 @@ impl Action {
                 Change::Hook(plan)
             }
             Self::RemoveHook { hook } => Change::Hook(hooks::plan_remove(&hook.target)?),
-            Self::InstallMcp { editor, cwd } => {
-                let Some(content) = editor.plan_install(cwd, &["mcp".to_string()])? else {
+            Self::InstallMcp {
+                editor, cwd, args, ..
+            } => {
+                let Some(content) = editor.plan_install(cwd, args)? else {
                     return Ok(None);
                 };
                 // The entry runs plain `fnug`: the file is shared, so no machine's path goes in
@@ -405,10 +445,11 @@ fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Dete
         .into_iter()
         .filter_map(|sub| repo_hook(sub.name, &sub.path, &|_| sub_opts.clone()))
         .collect();
+    let mcp_args = mcp_server_args(config, load, cwd);
     let editors = Editor::ALL
         .into_iter()
-        .filter_map(|editor| match editor.status(cwd) {
-            Ok(installed) => Some((editor, installed)),
+        .filter_map(|editor| match editor.status_with(cwd, &mcp_args) {
+            Ok(status) => Some((editor, status)),
             Err(e) => {
                 log::warn!("leaving {editor}'s MCP config alone: {e}");
                 None
@@ -420,7 +461,46 @@ fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Dete
         cwd: cwd.to_path_buf(),
         root_hook,
         sub_repo_hooks,
+        mcp_args,
         editors,
+    }
+}
+
+/// What the MCP entry `fnug setup` writes into `dir` passes to `fnug`: the `-c`, `--root` and
+/// `--no-workspace` that `config` was loaded with (`load`), then `mcp`. Editors start the server
+/// from `dir`, and the file is usually committed, so paths are relative to `dir`.
+#[must_use]
+pub fn mcp_server_args(
+    config: Option<&LoadedConfig>,
+    load: &LoadOptions,
+    dir: &Path,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(c) = config {
+        if load.config.is_some() {
+            args.push("-c".to_string());
+            args.push(relative_to(&c.config_path, dir).display().to_string());
+        }
+        if load.root_dir.is_some() {
+            args.push("--root".to_string());
+            args.push(path_arg(&c.cwd, dir).display().to_string());
+        }
+    }
+    if load.no_workspace {
+        args.push("--no-workspace".to_string());
+    }
+    args.push("mcp".to_string());
+    args
+}
+
+/// `path` relative to `base`, both canonical, as a command-line argument: `.` when they are the
+/// same directory.
+fn path_arg(path: &Path, base: &Path) -> PathBuf {
+    let relative = relative_to(path, base);
+    if relative.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        relative
     }
 }
 
@@ -431,7 +511,7 @@ fn prompt(detected: &Detected) -> Result<Choice, SetupError> {
 
     let editors = if features.contains(&Feature::McpServer) && !detected.editors.is_empty() {
         let options = detected.editors.iter().map(|(e, _)| *e).collect();
-        let installed = indices(detected.editors.iter().map(|(_, i)| *i));
+        let installed = indices(detected.mcp_installed());
         MultiSelect::new("Which editors?", options)
             .with_default(&installed)
             .prompt()?
@@ -594,12 +674,20 @@ mod tests {
     }
 
     fn detected(hook_status: HookStatus, editors: &[(Editor, bool)]) -> Detected {
+        let status = |installed| {
+            if installed {
+                McpStatus::Installed
+            } else {
+                McpStatus::NotInstalled
+            }
+        };
         Detected {
             has_config: true,
             cwd: PathBuf::from("/repo"),
             root_hook: Some(hook("", hook_status)),
             sub_repo_hooks: Vec::new(),
-            editors: editors.to_vec(),
+            mcp_args: vec!["mcp".to_string()],
+            editors: editors.iter().map(|&(e, i)| (e, status(i))).collect(),
         }
     }
 
@@ -687,7 +775,9 @@ mod tests {
                 },
                 Action::InstallMcp {
                     editor: Editor::Cursor,
-                    cwd: PathBuf::from("/repo")
+                    cwd: PathBuf::from("/repo"),
+                    args: vec!["mcp".to_string()],
+                    update: false,
                 },
             ]
         );
@@ -713,6 +803,8 @@ mod tests {
         let action = Action::InstallMcp {
             editor: Editor::VsCode,
             cwd: dir.path().to_path_buf(),
+            args: vec!["mcp".to_string()],
+            update: false,
         };
 
         let prepared = prepare_all(std::slice::from_ref(&action))
@@ -953,6 +1045,95 @@ mod tests {
         assert_eq!(hook.status, HookStatus::Outdated);
         assert_eq!(actions, [Action::InstallHook { hook }]);
         assert!(actions[0].to_string().starts_with("~ Update"));
+    }
+
+    /// The `fnug` arguments in the Claude Code entry that setup writes when run from `dir`.
+    fn mcp_entry_args(dir: &Path, load: &LoadOptions) -> Vec<String> {
+        let load = LoadOptions {
+            start_dir: Some(dir.to_path_buf()),
+            ..load.clone()
+        };
+        let loaded = crate::load(&load).unwrap();
+        let detected = detect(&loaded.cwd, Some(&loaded), &load);
+        let choice = Choice {
+            features: vec![Feature::McpServer],
+            editors: vec![Editor::ClaudeCode],
+            ..Choice::default()
+        };
+        for ready in prepare_all(&plan_actions(&detected, &choice)).unwrap() {
+            ready.apply().unwrap();
+        }
+        let path = Editor::ClaudeCode.config_path(&loaded.cwd);
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        serde_json::from_value(json["mcpServers"]["fnug"]["args"].clone()).unwrap()
+    }
+
+    #[test]
+    fn mcp_entry_loads_the_config_like_setup_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("cfg")).unwrap();
+        std::fs::create_dir_all(base.join("proj")).unwrap();
+        std::fs::write(base.join("cfg/ci.yaml"), "name: ci\ncommands: []\n").unwrap();
+        let proj = base.join("proj");
+
+        let pinned = LoadOptions {
+            config: Some("../cfg/ci.yaml".into()),
+            root_dir: Some(".".into()),
+            no_workspace: true,
+            ..LoadOptions::default()
+        };
+        let args = mcp_entry_args(&proj, &pinned);
+        assert_eq!(
+            args,
+            [
+                "-c",
+                "../cfg/ci.yaml",
+                "--root",
+                ".",
+                "--no-workspace",
+                "mcp"
+            ]
+        );
+
+        // Run again with other flags, and the entry is updated to match
+        let workspace = LoadOptions {
+            no_workspace: false,
+            ..pinned.clone()
+        };
+        let loaded = crate::load(&LoadOptions {
+            start_dir: Some(proj.clone()),
+            ..workspace.clone()
+        })
+        .unwrap();
+        let detected = detect(&loaded.cwd, Some(&loaded), &workspace);
+        assert_eq!(
+            detected.editors[0],
+            (Editor::ClaudeCode, McpStatus::Outdated)
+        );
+        let actions = plan_actions(
+            &detected,
+            &Choice {
+                features: indices_of(&default_features(&detected)),
+                editors: vec![Editor::ClaudeCode],
+                ..Choice::default()
+            },
+        );
+        let update = actions
+            .iter()
+            .find(|a| matches!(a, Action::InstallMcp { .. }))
+            .unwrap();
+        assert!(
+            update
+                .to_string()
+                .starts_with("~ Update MCP for Claude Code"),
+            "{update}"
+        );
+        assert_eq!(
+            mcp_entry_args(&proj, &workspace),
+            ["-c", "../cfg/ci.yaml", "--root", ".", "mcp"]
+        );
     }
 
     #[test]

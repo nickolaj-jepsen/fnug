@@ -9,7 +9,7 @@ use std::sync::{Once, OnceLock};
 use fnug::setup::hooks::{
     self, ForeignPolicy, HookError, HookLocation, HookStatus, InstallOptions, InstallOutcome,
 };
-use fnug::setup::mcp::{Editor, McpError};
+use fnug::setup::mcp::{Editor, FileChange, McpError, McpStatus};
 use git2::{IndexAddOption, Repository, RepositoryInitOptions, Signature};
 
 /// Keep the developer's global and system git config (a global `core.hooksPath`, say) out of the
@@ -1074,6 +1074,40 @@ fn installing_twice_changes_nothing() {
     );
     Editor::VsCode.install(dir.path()).unwrap();
     assert_eq!(read(&path), once);
+}
+
+#[test]
+fn entry_with_other_args_is_outdated_and_updated_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        Editor::ClaudeCode,
+        dir.path(),
+        r#"{"mcpServers": {"fnug": {"command": "/opt/fnug", "args": ["mcp"], "env": {"A": "1"}}}}"#,
+    );
+    let args: Vec<String> = ["--no-workspace", "mcp"].map(String::from).to_vec();
+    let status = |args: &[String]| Editor::ClaudeCode.status_with(dir.path(), args).unwrap();
+    assert_eq!(status(&["mcp".to_string()]), McpStatus::Installed);
+    assert_eq!(status(&args), McpStatus::Outdated);
+
+    let content = Editor::ClaudeCode
+        .plan_install(dir.path(), &args)
+        .unwrap()
+        .unwrap();
+    Editor::ClaudeCode
+        .apply(dir.path(), &FileChange::Write(content))
+        .unwrap();
+
+    assert_eq!(status(&args), McpStatus::Installed);
+    let written: serde_json::Value = serde_json::from_str(&read(&path)).unwrap();
+    assert_eq!(
+        written["mcpServers"]["fnug"],
+        serde_json::json!({"command": "/opt/fnug", "args": ["--no-workspace", "mcp"], "env": {"A": "1"}}),
+        "only the args change"
+    );
+    assert_eq!(
+        Editor::ClaudeCode.plan_install(dir.path(), &args).unwrap(),
+        None
+    );
 }
 
 #[test]

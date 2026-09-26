@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use jsonc_parser::ParseOptions;
-use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
+use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstObjectProp, CstRootNode};
 use thiserror::Error;
 
 use super::fsutil::write_atomic;
@@ -20,6 +20,16 @@ pub enum McpError {
 
     #[error("invalid MCP config {}: {what} is not a JSON object", path.display())]
     NotAnObject { path: PathBuf, what: String },
+}
+
+/// Whether an editor's config runs fnug, and with which arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpStatus {
+    NotInstalled,
+    /// A fnug entry with the arguments asked for.
+    Installed,
+    /// A fnug entry with other arguments, which installing replaces.
+    Outdated,
 }
 
 /// A change to an editor's config file.
@@ -78,19 +88,43 @@ impl Editor {
     /// Returns `McpError::Io` if the file can't be read, `McpError::Parse` if it isn't valid
     /// JSONC, and `McpError::NotAnObject` if it doesn't hold an object.
     pub fn status(self, cwd: &Path) -> Result<bool, McpError> {
+        Ok(self.with_entry(cwd, |_| ())?.is_some())
+    }
+
+    /// Whether the config in `cwd` has a fnug entry, and whether it runs `fnug <args>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Editor::status`].
+    pub fn status_with(self, cwd: &Path, args: &[String]) -> Result<McpStatus, McpError> {
+        let same_args = |entry: &CstObjectProp| entry_args(entry).as_deref() == Some(args);
+        Ok(match self.with_entry(cwd, same_args)? {
+            None => McpStatus::NotInstalled,
+            Some(true) => McpStatus::Installed,
+            Some(false) => McpStatus::Outdated,
+        })
+    }
+
+    /// `f` of the config's fnug entry, or `None` if it has none.
+    fn with_entry<T>(
+        self,
+        cwd: &Path,
+        f: impl FnOnce(&CstObjectProp) -> T,
+    ) -> Result<Option<T>, McpError> {
         let path = self.config_path(cwd);
         let Some(root) = parse(&path)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(value) = root.value() else {
-            return Ok(false);
+            return Ok(None);
         };
         let object = value
             .as_object()
             .ok_or_else(|| not_an_object(&path, None))?;
         Ok(object
             .object_value(self.servers_key())
-            .is_some_and(|servers| servers.get("fnug").is_some()))
+            .and_then(|servers| servers.get("fnug"))
+            .map(|entry| f(&entry)))
     }
 
     /// Like [`Editor::status`], but a file that can't be read counts as not configured.
@@ -100,8 +134,8 @@ impl Editor {
     }
 
     /// The config file's new contents with a fnug entry running `fnug <args>`, or `None` if it
-    /// already has one. An entry under the key older fnug versions wrote for this editor is
-    /// removed.
+    /// already has one. A fnug entry with other arguments gets these, and keeps its other keys.
+    /// An entry under the key older fnug versions wrote for this editor is removed.
     ///
     /// # Errors
     ///
@@ -124,9 +158,24 @@ impl Editor {
         let servers = object
             .object_value_or_create(key)
             .ok_or_else(|| not_an_object(&path, Some(key)))?;
-        if servers.get("fnug").is_none() {
-            servers.append("fnug", server_entry(args));
-            changed = true;
+        match servers.get("fnug") {
+            None => {
+                servers.append("fnug", server_entry(args));
+                changed = true;
+            }
+            Some(entry) if entry_args(&entry).as_deref() != Some(args) => {
+                match entry.value().and_then(|value| value.as_object()) {
+                    Some(fields) => match fields.get("args") {
+                        Some(prop) => prop.set_value(args_value(args)),
+                        None => {
+                            fields.append("args", args_value(args));
+                        }
+                    },
+                    None => entry.set_value(server_entry(args)),
+                }
+                changed = true;
+            }
+            Some(_) => {}
         }
         if !changed {
             return Ok(None);
@@ -264,11 +313,26 @@ fn server_entry(args: &[String]) -> CstInputValue {
     CstInputValue::Object(vec![
         ("type".to_string(), "stdio".into()),
         ("command".to_string(), "fnug".into()),
-        (
-            "args".to_string(),
-            CstInputValue::Array(args.iter().map(|arg| arg.as_str().into()).collect()),
-        ),
+        ("args".to_string(), args_value(args)),
     ])
+}
+
+fn args_value(args: &[String]) -> CstInputValue {
+    CstInputValue::Array(args.iter().map(|arg| arg.as_str().into()).collect())
+}
+
+/// A server entry's `args`, or `None` if they aren't a list of strings.
+fn entry_args(entry: &CstObjectProp) -> Option<Vec<String>> {
+    let args = entry
+        .value()?
+        .as_object()?
+        .get("args")?
+        .value()?
+        .as_array()?;
+    args.elements()
+        .iter()
+        .map(|arg| arg.as_string_lit()?.decoded_value().ok())
+        .collect()
 }
 
 /// Remove `root[key].fnug`, and `root[key]` too if that leaves it empty.
