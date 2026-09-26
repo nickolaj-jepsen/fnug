@@ -10,7 +10,7 @@ use inquire::{Confirm, MultiSelect};
 use thiserror::Error;
 
 use crate::config_file::find_config_in_dir;
-use crate::init::{self, InitError, NewConfig, Proposal};
+use crate::init::{self, InitError, NewConfig, Proposal, Proposals};
 use crate::selectors::relative_to;
 use crate::{LoadOptions, LoadedConfig};
 use hooks::{
@@ -53,9 +53,27 @@ const FEATURES: [Feature; 2] = [Feature::GitHooks, Feature::McpServer];
 impl Feature {
     fn label(self, detected: &Detected) -> String {
         match self {
-            Self::CreateConfig => match detected.config_proposals.as_deref() {
-                Some(proposals) if !proposals.is_empty() => {
-                    let found: Vec<_> = proposals.iter().map(|p| p.label.as_str()).collect();
+            Self::CreateConfig => match &detected.config_proposals {
+                Some(found) if found.workspace && found.proposals.is_empty() => {
+                    let packages: Vec<_> = found
+                        .configured
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    format!(
+                        "Create .fnug.yaml as a workspace root for {}",
+                        packages.join(", ")
+                    )
+                }
+                Some(found) if found.workspace => {
+                    let found: Vec<_> = found.proposals.iter().map(package_label).collect();
+                    format!(
+                        "Create .fnug.yaml as a workspace root, with package configs (detected: {})",
+                        found.join(", ")
+                    )
+                }
+                Some(found) if !found.proposals.is_empty() => {
+                    let found: Vec<_> = found.proposals.iter().map(|p| p.label.as_str()).collect();
                     format!("Create .fnug.yaml (detected: {})", found.join(", "))
                 }
                 _ => "Create .fnug.yaml with an example command (no tooling detected)".into(),
@@ -64,6 +82,16 @@ impl Feature {
             Self::McpServer => "MCP server for editors".into(),
         }
     }
+}
+
+/// A package's proposal as `Rust in crates/core`.
+fn package_label(proposal: &Proposal) -> String {
+    format!("{} in {}", proposal.label, proposal.dir.display())
+}
+
+/// What identifies a proposal again once it is detected anew: its package and key.
+fn pick(proposal: &Proposal) -> (PathBuf, &'static str) {
+    (proposal.dir.clone(), proposal.key)
 }
 
 /// The features to offer: creating a config when there is none, then [`FEATURES`].
@@ -108,9 +136,9 @@ impl RepoHook {
 #[derive(Debug, Default)]
 struct Detected {
     has_config: bool,
-    /// What `fnug init` would put in a config in `cwd`, when neither `cwd` nor a parent has a
-    /// config file.
-    config_proposals: Option<Vec<Proposal>>,
+    /// What `fnug init` would propose for `cwd`, when neither `cwd` nor a parent has a config
+    /// file.
+    config_proposals: Option<Proposals>,
     /// Where the editors' MCP configs go, and a new config.
     cwd: PathBuf,
     root_hook: Option<RepoHook>,
@@ -133,8 +161,8 @@ impl Detected {
 #[derive(Debug, Default)]
 struct Choice {
     features: Vec<Feature>,
-    /// The [`Proposal::key`]s of the groups a new config gets.
-    config_keys: Vec<&'static str>,
+    /// The groups a new config gets, as [`pick`]s.
+    config_picks: Vec<(PathBuf, &'static str)>,
     editors: Vec<Editor>,
     /// Indices into [`Detected::sub_repo_hooks`].
     sub_repos: Vec<usize>,
@@ -189,11 +217,13 @@ fn default_features(detected: &Detected) -> Vec<usize> {
 /// A change setup can make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
-    /// Write the config `fnug init` would, with the proposals for `dir` that have `keys`.
+    /// Write the config `fnug init` would, with the proposals for `dir` that are `picks`: as a
+    /// workspace root with the package configs they are for, if `workspace`.
     CreateConfig {
         dir: PathBuf,
-        keys: Vec<&'static str>,
+        picks: Vec<(PathBuf, &'static str)>,
         labels: Vec<String>,
+        workspace: bool,
     },
     InstallHook {
         hook: RepoHook,
@@ -225,12 +255,25 @@ fn hook_file(target: &HookTarget) -> String {
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CreateConfig { dir, labels, .. } => {
+            Self::CreateConfig {
+                dir,
+                labels,
+                workspace,
+                ..
+            } => {
                 let path = dir.join(".fnug.yaml");
-                if labels.is_empty() {
-                    write!(f, "+ Create {} with an example command", path.display())
-                } else {
-                    write!(f, "+ Create {} with {}", path.display(), labels.join(", "))
+                let labels = labels.join(", ");
+                match (workspace, labels.is_empty()) {
+                    (true, true) => write!(f, "+ Create {} as a workspace root", path.display()),
+                    (true, false) => write!(
+                        f,
+                        "+ Create {} as a workspace root, and package configs with {labels}",
+                        path.display()
+                    ),
+                    (false, true) => {
+                        write!(f, "+ Create {} with an example command", path.display())
+                    }
+                    (false, false) => write!(f, "+ Create {} with {labels}", path.display()),
                 }
             }
             Self::InstallHook { hook } if hook.status == HookStatus::Outdated => {
@@ -276,18 +319,27 @@ fn plan_actions(detected: &Detected, choice: &Choice) -> Vec<Action> {
     let wants_mcp = choice.features.contains(&Feature::McpServer);
     let mut actions = Vec::new();
 
-    if let Some(proposals) = &detected.config_proposals
+    if let Some(found) = &detected.config_proposals
         && choice.features.contains(&Feature::CreateConfig)
     {
-        let chosen = || {
-            proposals
-                .iter()
-                .filter(|p| choice.config_keys.contains(&p.key))
+        let chosen: Vec<&Proposal> = found
+            .proposals
+            .iter()
+            .filter(|p| choice.config_picks.contains(&pick(p)))
+            .collect();
+        let workspace = found.makes_workspace(chosen.len());
+        let label = |p: &&Proposal| {
+            if workspace {
+                package_label(p)
+            } else {
+                p.label.clone()
+            }
         };
         actions.push(Action::CreateConfig {
             dir: detected.cwd.clone(),
-            keys: chosen().map(|p| p.key).collect(),
-            labels: chosen().map(|p| p.label.clone()).collect(),
+            picks: chosen.iter().map(|p| pick(p)).collect(),
+            labels: chosen.iter().map(label).collect(),
+            workspace,
         });
     }
 
@@ -333,7 +385,8 @@ struct Prepared {
 }
 
 enum Change {
-    Config(NewConfig),
+    /// In the order to write them.
+    Config(Vec<NewConfig>),
     Hook(HookPlan),
     Mcp {
         editor: Editor,
@@ -347,13 +400,23 @@ impl Action {
     fn prepare(&self, foreign: ForeignPolicy) -> Result<Option<Prepared>, SetupError> {
         let mut notes = Vec::new();
         let change = match self {
-            Self::CreateConfig { dir, keys, .. } => {
-                let groups = init::detect(dir)
+            Self::CreateConfig {
+                dir,
+                picks,
+                workspace,
+                ..
+            } => {
+                let chosen: Vec<Proposal> = init::propose(dir)
+                    .proposals
                     .into_iter()
-                    .filter(|p| keys.contains(&p.key))
-                    .map(|p| p.group)
+                    .filter(|p| picks.contains(&pick(p)))
                     .collect();
-                Change::Config(init::prepare(dir, false, groups, None)?)
+                Change::Config(if *workspace {
+                    init::prepare_workspace(dir, chosen)?
+                } else {
+                    let groups = chosen.into_iter().map(|p| p.group).collect();
+                    vec![init::prepare(dir, false, groups, None)?]
+                })
             }
             Self::InstallHook { hook } => {
                 let opts = InstallOptions {
@@ -457,7 +520,11 @@ fn hook_binary_note(
 impl Prepared {
     fn apply(&self) -> Result<(), SetupError> {
         match &self.change {
-            Change::Config(config) => config.write()?,
+            Change::Config(configs) => {
+                for config in configs {
+                    config.write()?;
+                }
+            }
             Change::Hook(plan) => plan.apply()?,
             Change::Mcp {
                 editor,
@@ -592,7 +659,7 @@ fn detect(cwd: &Path, config: Option<&LoadedConfig>, load: &LoadOptions) -> Dete
     // Not over a config that failed to load, nor one in a parent that `cwd` would then shadow
     let config_proposals = (config.is_none()
         && !cwd.ancestors().any(|dir| find_config_in_dir(dir).is_some()))
-    .then(|| init::detect(cwd));
+    .then(|| init::propose(cwd));
     let detected = Detected {
         has_config: config.is_some(),
         config_proposals,
@@ -656,14 +723,17 @@ fn prompt(detected: &Detected) -> Result<Choice, SetupError> {
         .map(|option| offered[option.index])
         .collect();
 
-    let proposals = detected.config_proposals.as_deref().unwrap_or_default();
-    let config_keys = if features.contains(&Feature::CreateConfig) && proposals.len() > 1 {
+    let proposals = detected
+        .config_proposals
+        .as_ref()
+        .map_or(&[][..], |found| &found.proposals);
+    let config_picks = if features.contains(&Feature::CreateConfig) && proposals.len() > 1 {
         init::prompt(proposals)?
             .into_iter()
-            .map(|i| proposals[i].key)
+            .map(|i| pick(&proposals[i]))
             .collect()
     } else {
-        proposals.iter().map(|p| p.key).collect()
+        proposals.iter().map(pick).collect()
     };
 
     let editors = if features.contains(&Feature::McpServer) && !detected.editors.is_empty() {
@@ -721,7 +791,7 @@ fn prompt(detected: &Detected) -> Result<Choice, SetupError> {
 
     Ok(Choice {
         features,
-        config_keys,
+        config_picks,
         editors,
         sub_repos,
         repoint,
@@ -880,7 +950,7 @@ mod tests {
     fn default_features_without_config() {
         let without = Detected {
             has_config: false,
-            config_proposals: Some(Vec::new()),
+            config_proposals: Some(Proposals::default()),
             ..detected(HookStatus::NotInstalled, &[(Editor::VsCode, false)])
         };
         assert_eq!(
@@ -1060,7 +1130,7 @@ mod tests {
     #[test]
     fn missing_config_warned_only_without_an_offer() {
         let offered = Detected {
-            config_proposals: Some(Vec::new()),
+            config_proposals: Some(Proposals::default()),
             ..Detected::default()
         };
         assert_eq!(no_config_warning(&offered), None);
@@ -1322,7 +1392,7 @@ mod tests {
         let keys: Vec<_> = detected
             .config_proposals
             .iter()
-            .flatten()
+            .flat_map(|found| &found.proposals)
             .map(|p| p.key)
             .collect();
         assert_eq!(keys, ["rust", "go"]);
@@ -1332,7 +1402,7 @@ mod tests {
         );
         let choice = Choice {
             features: offered_features(&detected),
-            config_keys: vec!["go"],
+            config_picks: vec![(PathBuf::new(), "go")],
             editors: vec![Editor::ClaudeCode],
             ..Choice::default()
         };
@@ -1370,6 +1440,71 @@ mod tests {
     }
 
     #[test]
+    fn created_config_is_a_workspace_root_in_a_monorepo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        init_repo(&root);
+        for (package, file, content) in
+            [("api", "Cargo.toml", ""), ("web", "go.mod", "module web\n")]
+        {
+            std::fs::create_dir(root.join(package)).unwrap();
+            std::fs::write(root.join(package).join(file), content).unwrap();
+        }
+
+        let detected = detect(&root, None, &LoadOptions::default());
+        assert_eq!(
+            Feature::CreateConfig.label(&detected),
+            "Create .fnug.yaml as a workspace root, with package configs (detected: Rust in api, \
+             Go in web)"
+        );
+        let choice = Choice {
+            features: vec![Feature::CreateConfig],
+            config_picks: vec![(PathBuf::from("web"), "go")],
+            ..Choice::default()
+        };
+        let actions = plan_actions(&detected, &choice);
+        let path = root.join(".fnug.yaml");
+        assert_eq!(
+            actions.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [format!(
+                "+ Create {} as a workspace root, and package configs with Go in web",
+                path.display()
+            )]
+        );
+
+        for ready in prepare_all(&actions).unwrap() {
+            ready.apply().unwrap();
+        }
+        assert!(!root.join("api/.fnug.yaml").exists());
+        let loaded = crate::load(&LoadOptions {
+            start_dir: Some(root.clone()),
+            ..LoadOptions::default()
+        })
+        .unwrap();
+        assert_eq!(loaded.config_path, path);
+        let ids: Vec<_> = loaded
+            .root
+            .all_commands()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(ids, ["web/gofmt", "web/vet", "web/test"]);
+
+        // With nothing picked and no package configured, the example config is all there is
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(root.join("web/.fnug.yaml")).unwrap();
+        let choice = Choice {
+            features: vec![Feature::CreateConfig],
+            ..Choice::default()
+        };
+        let actions = plan_actions(&detected, &choice);
+        assert_eq!(
+            actions[0].to_string(),
+            format!("+ Create {} with an example command", path.display())
+        );
+    }
+
+    #[test]
     fn create_config_only_without_any_config() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -1391,21 +1526,24 @@ mod tests {
 
     #[test]
     fn create_config_never_replaces_a_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let action = Action::CreateConfig {
-            dir: dir.path().to_path_buf(),
-            keys: Vec::new(),
-            labels: Vec::new(),
-        };
-        // Written between the prompt and preparing
-        std::fs::write(dir.path().join(".fnug.yml"), "keep").unwrap();
+        for workspace in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let action = Action::CreateConfig {
+                dir: dir.path().to_path_buf(),
+                picks: Vec::new(),
+                labels: Vec::new(),
+                workspace,
+            };
+            // Written between the prompt and preparing
+            std::fs::write(dir.path().join(".fnug.yml"), "keep").unwrap();
 
-        assert!(matches!(
-            action.prepare(ForeignPolicy::Refuse),
-            Err(SetupError::Init(InitError::Exists(_)))
-        ));
-        assert!(prepare_all(&[action]).unwrap().is_empty());
-        assert!(!dir.path().join(".fnug.yaml").exists());
+            assert!(matches!(
+                action.prepare(ForeignPolicy::Refuse),
+                Err(SetupError::Init(InitError::Exists(_)))
+            ));
+            assert!(prepare_all(&[action]).unwrap().is_empty());
+            assert!(!dir.path().join(".fnug.yaml").exists());
+        }
     }
 
     /// The `fnug` arguments in the Claude Code entry that setup writes when run from `dir`.
