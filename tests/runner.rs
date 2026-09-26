@@ -269,7 +269,7 @@ async fn inherit_mode_runs_one_at_a_time() {
 name: root
 commands:
   - name: a
-    cmd: &alone 'test ! -e running && touch running && sleep 0.2 && rm running'
+    cmd: &alone 'mkdir running && sleep 0.2 && rmdir running'
   - name: b
     cmd: *alone
 ",
