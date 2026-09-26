@@ -537,6 +537,35 @@ fn stash_sigkill_then_edit_is_left_to_the_user() {
     assert!(dir.join(".git/fnug-stash.lock").exists());
 }
 
+/// A lock as a run that died, with nothing set aside yet, leaves it.
+fn write_dead_lock(dir: &Path) {
+    let mut dead = Command::new("true").spawn().unwrap();
+    dead.wait().unwrap();
+    let lock = format!("fnug-stash-lock 1\0pid\0{}\0", dead.id());
+    std::fs::write(dir.join(".git/fnug-stash.lock"), lock).unwrap();
+}
+
+#[test]
+fn stale_lock_warning_only_when_changes_are_set_aside() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    if !slow_repo(dir) {
+        return;
+    }
+    write_dead_lock(dir);
+    let output = fnug(dir, &[]).output().unwrap();
+    let err = stderr(&output);
+    assert!(output.status.success(), "{err}");
+    assert!(!err.contains("set aside"), "{err}");
+
+    // Killed while its changes were set aside
+    std::fs::remove_file(dir.join(".git/fnug-stash.lock")).unwrap();
+    kill_while_running(dir);
+    let output = fnug(dir, &[]).output().unwrap();
+    let err = stderr(&output);
+    assert!(err.contains("left unstaged changes set aside"), "{err}");
+}
+
 #[test]
 fn stash_concurrent_lock_exits_2() {
     let tmp = tempfile::tempdir().unwrap();
