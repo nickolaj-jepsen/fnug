@@ -83,15 +83,17 @@ impl CapturedOutput {
     /// dropped.
     #[must_use]
     pub fn text(&self) -> String {
-        let mut text = String::from_utf8_lossy(&self.head).into_owned();
-        let omitted = self.omitted_bytes();
-        if omitted > 0 {
-            if !text.ends_with('\n') {
-                text.push('\n');
-            }
-            let _ = writeln!(text, "… {omitted} bytes omitted …");
-        }
         let (a, b) = self.tail.as_slices();
+        let omitted = self.omitted_bytes();
+        if omitted == 0 {
+            // Contiguous, so a character split between head and tail decodes whole
+            return String::from_utf8_lossy(&[&self.head, a, b].concat()).into_owned();
+        }
+        let mut text = String::from_utf8_lossy(&self.head).into_owned();
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        let _ = writeln!(text, "… {omitted} bytes omitted …");
         text.push_str(&String::from_utf8_lossy(&[a, b].concat()));
         text
     }
@@ -124,6 +126,14 @@ mod tests {
         assert_eq!(output.total_bytes(), 14);
         assert_eq!(output.omitted_bytes(), 6);
         assert_eq!(output.text(), "abcd\n… 6 bytes omitted …\nklmn");
+    }
+
+    #[test]
+    fn character_across_head_and_tail_stays_whole() {
+        // "é" is two bytes, split between the head and the tail
+        let output = captured(SMALL, &["abcé".as_bytes(), b"fg"]);
+        assert_eq!(output.omitted_bytes(), 0);
+        assert_eq!(output.text(), "abcéfg");
     }
 
     #[test]
