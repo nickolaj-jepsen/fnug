@@ -1225,3 +1225,43 @@ fn oversize_list_falls_back() {
     assert_eq!(out(&root, "here"), "unset");
     assert_eq!(out(&root, "quoted"), "[src]\n");
 }
+
+#[test]
+fn streamed_cleanup_output_comes_before_not_run_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+auto:
+  always: true
+commands:
+  - name: first
+    cmd: 'trap ''sleep 0.3; echo CLEANUP >&2; exit 1'' TERM; echo $$ > pid; while :; do sleep 0.05; done'
+  - name: second
+    cmd: 'true'
+",
+    );
+    let mut child = fnug_command(dir.path(), &[])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let shell = KillOnDrop(common::read_pid(&dir.path().join("pid")));
+
+    // SAFETY: plain syscall on our own child.
+    unsafe { libc::kill(child.id().cast_signed(), libc::SIGTERM) };
+    let status = wait(&mut child);
+    let stderr = stderr(&child.wait_with_output().unwrap());
+    assert_eq!(status.code(), Some(143), "{stderr}");
+    let at = |text: &str| {
+        stderr
+            .find(text)
+            .unwrap_or_else(|| panic!("no {text:?} in:\n{stderr}"))
+    };
+    assert!(at("CLEANUP") < at("[1/2] first CANCELLED"), "{stderr}");
+    assert!(
+        at("[1/2] first CANCELLED") < at("[2/2] second NOT RUN"),
+        "{stderr}"
+    );
+    drop(shell);
+}

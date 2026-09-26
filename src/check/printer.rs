@@ -64,10 +64,11 @@ fn format_duration(d: Duration) -> String {
 /// Prints [`RunEvent`]s as they arrive.
 ///
 /// With streamed output, a command's header goes on its own line before the command writes
-/// anything, and its result follows its output. With captured output, a command's result is
-/// followed by its output unless it passed and passing output is muted. One command at a time,
-/// the header is printed when the command starts and the result ends the same line; with
-/// several, the whole line is printed when the command ends.
+/// anything, and its result follows its output; results of commands that never start wait for
+/// the running command's result, since it may still be writing. With captured output, a
+/// command's result is followed by its output unless it passed and passing output is muted. One
+/// command at a time, the header is printed when the command starts and the result ends the same
+/// line; with several, the whole line is printed when the command ends.
 pub(super) struct Printer {
     sty: Style,
     streaming: bool,
@@ -75,6 +76,10 @@ pub(super) struct Printer {
     inline: bool,
     /// The `seq` of the command whose line waits for its result.
     open: Option<usize>,
+    /// The `seq` of the streamed command that is running.
+    running: Option<usize>,
+    /// Result lines held back until the running command's result.
+    deferred: Vec<String>,
     mute_success: bool,
     names: HashMap<String, String>,
 }
@@ -87,6 +92,8 @@ impl Printer {
             streaming,
             inline: !streaming && serial,
             open: None,
+            running: None,
+            deferred: Vec::new(),
             mute_success,
             names: plan
                 .commands
@@ -152,6 +159,7 @@ impl Printer {
                 );
                 if self.streaming {
                     eprintln!("{header}");
+                    self.running = Some(seq);
                 } else if self.inline {
                     eprint!("{header} ");
                     self.open = Some(seq);
@@ -165,6 +173,12 @@ impl Printer {
                 ..
             } => {
                 let status = self.status(report);
+                if self.running.is_some_and(|running| running != seq) {
+                    let counter = self.sty.dim(&counter(seq, total));
+                    self.deferred
+                        .push(format!("{counter} {} {status}", report.name));
+                    return;
+                }
                 match self.open.take() {
                     Some(open) if open == seq => eprintln!("{status}"),
                     open => {
@@ -185,6 +199,12 @@ impl Printer {
                     }
                 }
                 self.print_output(report);
+                if self.running == Some(seq) {
+                    self.running = None;
+                    for line in self.deferred.drain(..) {
+                        eprintln!("{line}");
+                    }
+                }
             }
         }
     }
