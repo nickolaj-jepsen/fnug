@@ -147,7 +147,7 @@ impl App {
                                     NodeKind::Command { .. } => {
                                         self.cursor = row;
                                         self.update_active_terminal();
-                                        self.start_command(&node.id, terminal_area, true);
+                                        self.run_command(&node.id, terminal_area);
                                     }
                                     NodeKind::Group { expanded, .. } => {
                                         self.expanded.insert(node.id.clone(), !expanded);

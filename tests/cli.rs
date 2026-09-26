@@ -269,7 +269,17 @@ fn mcp_stdout_is_pure_jsonrpc() {
         .recv_timeout(Duration::from_secs(30))
         .expect("no reply to initialize");
     drop(stdin);
-    let status = child.wait().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("fnug mcp did not exit after stdin closed");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
 
     let mut lines = vec![first];
     lines.extend(rx.try_iter());

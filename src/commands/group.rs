@@ -2,6 +2,7 @@ use crate::commands::auto::Auto;
 use crate::commands::command::Command;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Hierarchical grouping of related commands
 #[derive(Debug, Clone, Default)]
@@ -13,6 +14,10 @@ pub struct CommandGroup {
     pub commands: Vec<Command>,
     pub children: Vec<CommandGroup>,
     pub env: HashMap<String, String>,
+    /// Default [`Command::timeout`] for the group's commands.
+    pub timeout: Option<Duration>,
+    /// Default [`Command::exclusive`] for the group's commands.
+    pub exclusive: Option<bool>,
     /// The config file this group is the root of. A child with a source is a workspace package,
     /// which inherits nothing from its parent.
     pub source: Option<PathBuf>,

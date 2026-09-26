@@ -91,11 +91,21 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--log-level`     | Log level: off, error, warn, info, debug, trace (default: info, and warn on stderr) |
 | `--fail-fast`     | Stop on first failure (`check` only)                            |
 | `--no-tui`        | Never prompt to open TUI on failure (`check` only)              |
-| `--mute-success`  | Suppress output for passing commands (`check` only)             |
+| `--mute-success`  | Capture each command's output and print it only if it fails (`check` only) |
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
+| `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
+| `-j`, `--jobs <n>` | Run up to `<n>` commands at once, each after its dependencies; `0` means one per CPU (default `1`, `check` only) |
 | `-V`, `--version` | Print fnug's version                                            |
 
 `-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
+
+`fnug check` prints a line for each command, such as `PASS`, `FAIL (exit 3)`, `TIMEOUT after 5m`, `SKIP (build failed)`, `CANCELLED` or `NOT RUN`, then a summary that counts every selected command once: passed, failed, timed out, skipped because a dependency failed, cancelled, and not run. When `--fail-fast` stops a run, commands still running are stopped and counted as cancelled, and commands not yet started as not run. Without `--mute-success`, commands share fnug's terminal and their output streams through. With it, fnug prints `[i/N] name` when a command starts and its result when it ends, followed by the command's output, captured with stdout and stderr merged in order, if it didn't pass. `--jobs` above 1 captures output the same way and prints each command's result line and output, unless it passed and `--mute-success` is set, as soon as the command finishes. Commands still start in config order once their dependencies pass, and an `exclusive` one waits until nothing else runs and holds back the rest until it ends.
+
+Captured commands, from `--mute-success`, `--jobs` above 1, the pre-commit hook or an MCP run, have no terminal. Their stdin is `/dev/null`, and each runs in a session of its own, so opening `/dev/tty`, as password and host-key prompts do, fails at once instead of waiting for input that never comes. When a captured command's shell exits, fnug stops whatever the command left running in its process group, since such a process would keep the output pipe open; start a process that should keep running in a session of its own, for example with `setsid`. Captured output keeps the first 256 KiB and the last 1 MiB of what a command writes, with `… N bytes omitted …` in between.
+
+When none of fnug's stdin, stdout and stderr is a terminal, as in CI or behind a pipe, streamed commands run in a session of their own too, and fnug stops what they leave running in the same way. From a terminal, a streamed command stays in fnug's process group so it can use the terminal, and fnug signals only the command's own process: a process it started, such as a test binary under `cargo test`, can outlive a timeout or a signal and keep writing to the terminal. Use `--mute-success` or `--jobs` for timeouts that stop the whole process tree.
+
+On SIGINT, SIGTERM or SIGHUP, `fnug check` stops the running commands, prints the summary so far, marked `Interrupted.`, and exits with 128 plus the signal number. On Ctrl+C (SIGINT), a command that shares fnug's terminal has already got the terminal's SIGINT, so fnug gives it 3 s to finish before sending SIGTERM, while a command in a session of its own gets SIGINT from fnug. On SIGTERM or SIGHUP, commands get the same signal. A timeout, `--fail-fast` and an MCP client's cancellation send SIGTERM. Whichever signal a command gets, it gets SIGKILL if it is still running 3 s later. Signals reach the whole process group of a command in a session of its own, but only the process of a command that shares fnug's terminal.
 
 ### Setup
 
@@ -200,7 +210,7 @@ commands:
 
 ### Nested groups with inheritance
 
-Groups inherit `cwd`, `auto`, and `env` settings from their parent. Each `auto` field is inherited on its own, so a group's `check: false` applies to every command below it unless a command sets `check` itself.
+Groups inherit `cwd`, `auto`, `env`, `timeout` and `exclusive` from their parent. Each `auto` field is inherited on its own, so a group's `check: false` applies to every command below it unless a command sets `check` itself.
 
 ```yaml
 fnug_version: 0.1.0
@@ -323,7 +333,7 @@ workspace:
     - "./apps/*/"
 ```
 
-Each package behaves the same as when fnug runs inside it on its own: its `cwd` and `auto.path` are relative to the package directory, and it inherits no `cwd`, `auto` or `env` from the root config. Package ids are prefixed with the package's id, which defaults to its `name`, so a `build` command in a package named `api` has the id `api/build`. Package ids must be unique across the workspace and must not match a root group's id. Inside a package, `depends_on: [build]` means the package's own `build`; reference another package's command by its full id (`api/build`) and a root command by its id.
+Each package behaves the same as when fnug runs inside it on its own: its `cwd` and `auto.path` are relative to the package directory, and it inherits none of the root config's `cwd`, `auto`, `env`, `timeout` or `exclusive`. Package ids are prefixed with the package's id, which defaults to its `name`, so a `build` command in a package named `api` has the id `api/build`. Package ids must be unique across the workspace and must not match a root group's id. Inside a package, `depends_on: [build]` means the package's own `build`; reference another package's command by its full id (`api/build`) and a root command by its id.
 
 When fnug finds a config by searching upward (no `-c`), it loads a parent workspace root instead if that root's own discovery includes the config. A config the root doesn't discover, for example in a gitignored or hidden directory, below `max_depth`, or not matched by `paths`, is loaded on its own. Parent configs that fail to parse, or whose discovery fails, are skipped with a warning. `-c` always loads the given file as the root. Use `--no-workspace` to never look for a parent workspace root.
 
@@ -363,6 +373,8 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `cwd`          | string            | Working directory (inherited by children)                         |
 | `env`          | map               | Environment variables (inherited by children, `$VAR` expanded)    |
 | `auto`         | object            | Default auto rules (inherited by children)                        |
+| `timeout`      | integer / string  | Default command `timeout` (inherited by children)                 |
+| `exclusive`    | bool              | Default command `exclusive` (inherited by children)               |
 | `$schema`      | string            | JSON Schema URL for editors (mainly for `.fnug.json`); ignored    |
 
 `fnug_version` compares only the `major.minor.patch` numbers, so `0.1.0` matches `0.1.0-alpha.13`. fnug warns when the config needs a newer fnug, when it was written for an older release series (a different minor version before 1.0, a different major version after), or when the version can't be parsed.
@@ -379,6 +391,12 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `auto`       | object            | Auto-selection rules (see below)                                    |
 | `depends_on` | list of strings   | Commands that must finish first, by id or unique name               |
 | `scrollback` | integer           | PTY scrollback buffer size (number of lines)                        |
+| `timeout`    | integer / string  | Time limit in `fnug check` and MCP runs (see below)                 |
+| `exclusive`  | bool              | Never run alongside another command in `fnug check --jobs` runs     |
+
+`timeout` is whole seconds or a duration with units, such as `90s`, `5m` or `1h 30m`. A command that runs longer in `fnug check` or an MCP run gets `SIGTERM`, then `SIGKILL` 3 s later, and is reported as `TIMEOUT`. The signals reach every process in the command's process group, unless the command streams to fnug's terminal: then only its own process gets them (see `fnug check` above). `0` means no limit, overriding an inherited value and `fnug check --timeout`. There is no limit by default, and the TUI ignores `timeout`.
+
+`exclusive: true` suits commands that rewrite files, such as formatters, so that nothing reads the files while they change. It matters only when `fnug check --jobs` runs several commands at once; the TUI ignores it.
 
 #### Group fields
 
@@ -389,6 +407,8 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `cwd`      | string            | Working directory (inherited by children)                             |
 | `env`      | map               | Environment variables (inherited by children, `$VAR` expanded)        |
 | `auto`     | object            | Default auto rules (inherited by children)                            |
+| `timeout`  | integer / string  | Default command `timeout` (inherited by children)                     |
+| `exclusive` | bool             | Default command `exclusive` (inherited by children)                   |
 | `commands` | list              | Commands in this group                                                |
 | `children` | list              | Nested child groups                                                   |
 
@@ -465,3 +485,12 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 - `auto.watch` ignores changes that git ignores (through `.gitignore`, `.git/info/exclude` or `core.excludesFile`), even to a tracked file that an ignore rule matches, and anything inside a `.git` directory, so build output and git's own writes no longer select commands. To watch generated or ignored files, add their ignored directory as a watch `path` (e.g. `./target/doc`): every change below such a path counts.
 - On Linux, `auto.watch` no longer follows symlinked directories below a watch `path` (macOS never did), just as `auto.git` doesn't. To watch a linked directory, add the link's target as its own `path`.
 - Library API: `selectors::watch::watch_commands` returns a `WatchHandle` (`events`, `report`) instead of a tuple, `WatchError` is `#[non_exhaustive]` and has `NothingWatched` instead of `Io`, and `WatchHandle::events` and `tui::app::AppEvent::WatcherTriggered` carry `Vec<WatchMatch>` instead of `Vec<Command>`.
+- MCP `run_lint` reports an error listing the matching ids when a name matches several commands, instead of running the first one. Library API: `check::CheckError` has a `Plan` variant (a `runner::PlanError`) instead of `Selector`.
+- Library API: `check::run` is async and takes a `CheckOptions` and a `CancellationToken`, and `CheckResult` carries a `runner::RunReport` instead of `selected_ids` and `failed_ids` (use `report.rerun_ids()`).
+- MCP `run_lints`, `run_lint` and `run_all` results have one `output` field, with stdout and stderr merged in order, instead of `stdout` and `stderr`. They list every planned command, including ones `fail_fast` kept from running, with the statuses `passed`, `failed`, `timeout`, `skipped`, `cancelled` and `not_run`, and count `timed_out`, `cancelled` and `not_run` too. Cancelling a tool call, closing the server's stdin or sending it SIGTERM stops the running command's whole process group. Library API: `mcp::run` takes a `CancellationToken` that shuts the server down.
+- Library API: `selectors::get_selected_commands` and `selectors::SelectorError` are removed; use `selectors::select`, or `runner::plan` for a run's commands in order. `RunnableSelector::split_active_commands` returns the split instead of a `Result`.
+- In the TUI, a run waits for every dependency that runs with it, even one that passed before, and starts each command once. Rerunning a command stops its previous run right away, also when the rerun has to wait for a dependency first. Library API: `tui::app::App::start_command` is replaced by `App::run_commands` and `App::run_command`.
+- Commands run by `fnug check --mute-success`, `fnug check --jobs` above 1 and the pre-commit hook have no terminal, so a command that prompts on `/dev/tty`, such as an ssh passphrase or host-key prompt or `sudo`, fails at once instead of prompting. Run such a command without `--mute-success`, or set it up so it doesn't need to prompt, for example with an ssh agent.
+- `fnug check --mute-success`, `--jobs` above 1 and the pre-commit hook stop the processes a command leaves running in its process group once its shell exits, and keep only the first 256 KiB and the last 1 MiB of each command's output. Start a process that must outlive its command in a session of its own, for example with `setsid`.
+- Without a terminal, as in CI or behind a pipe, `fnug check` runs each streamed command in a session of its own, as it does captured ones. A timeout or signal then stops every process the command started, the command can't open `/dev/tty`, and processes it leaves running are stopped when it exits.
+- Library API: `tui::app::AppEvent::GitSelectionComplete` carries the selected commands instead of a `Result`, since selection no longer fails as a whole.

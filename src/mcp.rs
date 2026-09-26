@@ -1,16 +1,27 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
+use log::warn;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router, transport::stdio};
 use serde::Serialize;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
-use crate::check::{execute_command, expand_dependencies, topo_sort};
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
-use crate::selectors;
+use crate::runner::{
+    self, CaptureLimits, CommandReport, ExecOptions, Failure, NoHook, Outcome, OutputMode,
+    PlanError, PlanOptions, RunReport, Selection, commands_with_group_path,
+};
+use crate::selectors::{self, SelectOptions};
+
+/// How long shutdown waits for running commands to stop.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Parameter structs
@@ -75,7 +86,10 @@ struct RunResult {
     total: usize,
     passed: usize,
     failed: usize,
+    timed_out: usize,
     skipped: usize,
+    cancelled: usize,
+    not_run: usize,
     duration_ms: u128,
     commands: Vec<CommandRunResult>,
 }
@@ -84,11 +98,61 @@ struct RunResult {
 struct CommandRunResult {
     name: String,
     id: String,
-    status: String,
+    /// `passed`, `failed`, `timeout`, `skipped`, `cancelled` or `not_run`.
+    status: &'static str,
     exit_code: Option<i32>,
     duration_ms: u128,
-    stdout: String,
-    stderr: String,
+    /// stdout and stderr, merged in the order they were written.
+    output: String,
+}
+
+impl From<&RunReport> for RunResult {
+    fn from(report: &RunReport) -> Self {
+        let counts = report.counts();
+        Self {
+            total: counts.total,
+            passed: counts.passed,
+            failed: counts.failed,
+            timed_out: counts.timed_out,
+            skipped: counts.skipped,
+            cancelled: counts.cancelled,
+            not_run: counts.not_run,
+            duration_ms: report.duration.as_millis(),
+            commands: report.commands.iter().map(CommandRunResult::from).collect(),
+        }
+    }
+}
+
+impl From<&CommandReport> for CommandRunResult {
+    fn from(report: &CommandReport) -> Self {
+        let captured = report
+            .output
+            .as_ref()
+            .map(runner::CapturedOutput::text)
+            .unwrap_or_default();
+        let (status, exit_code, output) = match &report.outcome {
+            Outcome::Passed => ("passed", Some(0), captured),
+            Outcome::Failed(Failure::Exit(code)) => ("failed", Some(*code), captured),
+            Outcome::Failed(Failure::Spawn(message)) => ("failed", None, message.clone()),
+            Outcome::Failed(_) => ("failed", None, captured),
+            Outcome::TimedOut(_) => ("timeout", None, captured),
+            Outcome::Skipped { cause } => (
+                "skipped",
+                None,
+                format!("Skipped: dependency '{cause}' failed"),
+            ),
+            Outcome::Cancelled => ("cancelled", None, captured),
+            Outcome::NotRun => ("not_run", None, captured),
+        };
+        Self {
+            name: report.name.clone(),
+            id: report.id.clone(),
+            status,
+            exit_code,
+            duration_ms: report.duration.unwrap_or_default().as_millis(),
+            output,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,12 +163,19 @@ struct CommandRunResult {
 pub struct FnugMcp {
     config: CommandGroup,
     cwd: PathBuf,
+    /// Held for reading by every run; shutdown takes it for writing to wait for them.
+    runs: Arc<RwLock<()>>,
     tool_router: ToolRouter<Self>,
 }
 
 /// Convert any `Display` error into an MCP internal error.
 fn mcp_err(e: impl std::fmt::Display) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(e.to_string(), None)
+}
+
+/// Report an unknown or ambiguous command, or unusable selection, as invalid parameters.
+fn plan_err(e: &PlanError) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(e.to_string(), None)
 }
 
 /// Check whether a command matches the `list_lints` filter parameters.
@@ -139,26 +210,13 @@ fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParam
     true
 }
 
-/// Walk the command tree, collecting (command, `group_path`) pairs.
-fn flatten_commands<'a>(group: &'a CommandGroup, path: &str) -> Vec<(&'a Command, String)> {
-    let own = group.commands.iter().map(|cmd| (cmd, path.to_string()));
-    let nested = group.children.iter().flat_map(|child| {
-        let child_path = if path.is_empty() {
-            child.name.clone()
-        } else {
-            format!("{path} > {}", child.name)
-        };
-        flatten_commands(child, &child_path)
-    });
-    own.chain(nested).collect()
-}
-
 #[tool_router]
 impl FnugMcp {
     fn new(config: CommandGroup, cwd: PathBuf) -> Self {
         Self {
             config,
             cwd,
+            runs: Arc::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -177,11 +235,13 @@ impl FnugMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let config = self.config.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
-            let selected = selectors::get_selected_commands(all_commands).map_err(mcp_err)?;
-            let selected_ids: HashSet<&str> = selected.iter().map(|c| c.id.as_str()).collect();
-
-            let flat = flatten_commands(&config, &config.name);
+            let flat = commands_with_group_path(&config);
+            let commands: Vec<&Command> = flat.iter().map(|(cmd, _)| *cmd).collect();
+            let selection = selectors::select(&commands, &SelectOptions::default());
+            for issue in &selection.issues {
+                warn!("{issue}");
+            }
+            let selected_ids: HashSet<&str> = selection.ids().collect();
 
             let infos: Vec<LintInfo> = flat
                 .into_iter()
@@ -217,30 +277,35 @@ impl FnugMcp {
         making edits, before committing, or to validate a fix. Commands are auto-selected \
         based on which files were modified in git. Dependencies between commands are \
         resolved automatically (e.g. build before test). Returns per-command results with \
-        pass/fail status, exit codes, stdout, stderr, and timing."
+        status, exit code, output (stdout and stderr merged), and timing."
     )]
     async fn run_lints(
         &self,
         Parameters(params): Parameters<FailFastParams>,
+        ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let selection = Selection::Auto {
+            options: SelectOptions::default(),
+            include_manual: false,
+        };
         let fail_fast = params.fail_fast.unwrap_or(false);
-        self.run_and_serialize(CommandSelection::GitSelected, fail_fast)
-            .await
+        self.run_and_serialize(selection, fail_fast, ct).await
     }
 
     #[tool(
         description = "Run a single lint/test command by name or id. Use this to re-run a \
         specific failing check after fixing it, or to run a check that wasn't auto-selected. \
         Use list_lints to discover available command names and ids. Dependencies are resolved \
-        and run first automatically. Returns per-command results with pass/fail status, exit \
-        codes, stdout, stderr, and timing."
+        and run first automatically. Returns per-command results with status, exit code, \
+        output (stdout and stderr merged), and timing."
     )]
     async fn run_lint(
         &self,
         Parameters(params): Parameters<RunLintParams>,
+        ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        self.run_and_serialize(CommandSelection::Single(params.command), false)
-            .await
+        let selection = Selection::Targets(vec![params.command]);
+        self.run_and_serialize(selection, false, ct).await
     }
 
     #[tool(
@@ -248,34 +313,51 @@ impl FnugMcp {
         except those marked `auto.check: false` (run those by name with run_lint). Use \
         this for a full sweep before creating a pull request, after large refactors, or when \
         you want to ensure nothing is broken across the entire project. Dependencies are \
-        resolved automatically. Returns per-command results with pass/fail status, exit \
-        codes, stdout, stderr, and timing."
+        resolved automatically. Returns per-command results with status, exit code, output \
+        (stdout and stderr merged), and timing."
     )]
     async fn run_all(
         &self,
         Parameters(params): Parameters<FailFastParams>,
+        ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let selection = Selection::All {
+            include_manual: false,
+        };
         let fail_fast = params.fail_fast.unwrap_or(false);
-        self.run_and_serialize(CommandSelection::All, fail_fast)
-            .await
+        self.run_and_serialize(selection, fail_fast, ct).await
     }
 }
 
 impl FnugMcp {
+    /// Plan and run `selection`, one command at a time with captured output. Cancelling `ct`
+    /// kills the running command's process group.
     async fn run_and_serialize(
         &self,
-        selection: CommandSelection,
+        selection: Selection,
         fail_fast: bool,
+        ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _running = self.runs.read().await;
         let config = self.config.clone();
-        let cwd = self.cwd.clone();
+        let plan = tokio::task::spawn_blocking(move || {
+            runner::plan(&config, &selection, &PlanOptions::default())
+        })
+        .await
+        .map_err(mcp_err)?
+        .map_err(|e| plan_err(&e))?;
+        for warning in &plan.warnings {
+            warn!("{warning}");
+        }
 
-        let result =
-            tokio::task::spawn_blocking(move || run_commands(&config, &cwd, fail_fast, &selection))
-                .await
-                .map_err(mcp_err)??;
-
-        let json = serde_json::to_string_pretty(&result).map_err(mcp_err)?;
+        let opts = ExecOptions {
+            fail_fast,
+            output: OutputMode::Capture(CaptureLimits::DEFAULT),
+            cancel: ct,
+            ..ExecOptions::default()
+        };
+        let report = runner::execute(&plan, &self.cwd, &opts, &NoHook, &mut |_| {}).await;
+        let json = serde_json::to_string_pretty(&RunResult::from(&report)).map_err(mcp_err)?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
@@ -303,139 +385,38 @@ impl ServerHandler for FnugMcp {
 }
 
 // ---------------------------------------------------------------------------
-// Shared execution logic
-// ---------------------------------------------------------------------------
-
-enum CommandSelection {
-    /// Select commands based on git changes and always rules.
-    GitSelected,
-    /// Run a single command by name or id.
-    Single(String),
-    /// Run every configured command except those with `auto.check: false`.
-    All,
-}
-
-fn run_commands(
-    config: &CommandGroup,
-    cwd: &std::path::Path,
-    fail_fast: bool,
-    selection: &CommandSelection,
-) -> Result<RunResult, rmcp::ErrorData> {
-    let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
-
-    // Hoisted so references in the GitSelected branch live long enough.
-    let mut git_selected;
-
-    let selected: Vec<&Command> = match *selection {
-        CommandSelection::Single(ref target) => {
-            let found = all_commands
-                .iter()
-                .find(|c| c.id == *target || c.name.eq_ignore_ascii_case(target))
-                .ok_or_else(|| {
-                    rmcp::ErrorData::invalid_params(format!("Command not found: {target}"), None)
-                })?;
-            vec![found]
-        }
-        CommandSelection::All => all_commands
-            .iter()
-            .filter(|cmd| cmd.auto.check != Some(false))
-            .collect(),
-        CommandSelection::GitSelected => {
-            git_selected =
-                selectors::get_selected_commands(all_commands.clone()).map_err(mcp_err)?;
-            git_selected.retain(|cmd| cmd.auto.check != Some(false));
-            if git_selected.is_empty() {
-                return Ok(RunResult {
-                    total: 0,
-                    passed: 0,
-                    failed: 0,
-                    skipped: 0,
-                    duration_ms: 0,
-                    commands: vec![],
-                });
-            }
-            git_selected.iter().collect()
-        }
-    };
-
-    let commands_to_run = expand_dependencies(&selected, &all_commands);
-    let ordered = topo_sort(&commands_to_run);
-
-    let total_start = std::time::Instant::now();
-    let mut passed = 0usize;
-    let mut failed_count = 0usize;
-    let mut skipped = 0usize;
-    let mut failed_ids: HashSet<String> = HashSet::new();
-    let mut cmd_results = Vec::new();
-
-    for cmd in &ordered {
-        let dep_failed = cmd
-            .depends_on
-            .iter()
-            .any(|dep| failed_ids.contains(dep.as_str()));
-
-        if dep_failed {
-            failed_ids.insert(cmd.id.clone());
-            skipped += 1;
-            cmd_results.push(CommandRunResult {
-                name: cmd.name.clone(),
-                id: cmd.id.clone(),
-                status: "skipped".to_string(),
-                exit_code: None,
-                duration_ms: 0,
-                stdout: String::new(),
-                stderr: "Skipped: dependency failed".to_string(),
-            });
-            continue;
-        }
-
-        let result = execute_command(cmd, cwd);
-
-        let status = if result.success { "passed" } else { "failed" };
-        cmd_results.push(CommandRunResult {
-            name: cmd.name.clone(),
-            id: cmd.id.clone(),
-            status: status.to_string(),
-            exit_code: result.exit_code,
-            duration_ms: result.duration.as_millis(),
-            stdout: result.stdout,
-            stderr: result.stderr,
-        });
-
-        if result.success {
-            passed += 1;
-        } else {
-            failed_ids.insert(cmd.id.clone());
-            failed_count += 1;
-            if fail_fast {
-                break;
-            }
-        }
-    }
-
-    Ok(RunResult {
-        total: ordered.len(),
-        passed,
-        failed: failed_count,
-        skipped,
-        duration_ms: total_start.elapsed().as_millis(),
-        commands: cmd_results,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Start the MCP server over stdio.
+/// Serve MCP over stdio until the client closes stdin or `shutdown` is cancelled.
+///
+/// Either way, running tool calls are cancelled, which stops their commands, and the server
+/// waits up to 10 s for them before returning.
 ///
 /// # Errors
 ///
 /// Returns an error if the MCP transport fails.
-pub async fn run(config: CommandGroup, cwd: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    config: CommandGroup,
+    cwd: PathBuf,
+    shutdown: CancellationToken,
+) -> Result<(), Box<dyn std::error::Error>> {
     let server = FnugMcp::new(config, cwd);
+    let runs = server.runs.clone();
     let service = server.serve(stdio()).await?;
-    service.waiting().await?;
+    // Dropping the service, whichever branch wins, cancels every request's token
+    tokio::select! {
+        quit = service.waiting() => {
+            quit?;
+        }
+        () = shutdown.cancelled() => {}
+    }
+    if tokio::time::timeout(SHUTDOWN_GRACE, runs.write())
+        .await
+        .is_err()
+    {
+        warn!("Commands still running after {SHUTDOWN_GRACE:?}; exiting anyway");
+    }
     Ok(())
 }
 
@@ -443,14 +424,35 @@ pub async fn run(config: CommandGroup, cwd: PathBuf) -> Result<(), Box<dyn std::
 mod tests {
     use super::*;
 
-    #[test]
-    fn run_all_skips_check_false_commands() {
+    fn server(yaml: &str) -> (FnugMcp, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".fnug.yaml");
-        std::fs::write(
-            &path,
+        std::fs::write(&path, yaml).unwrap();
+        let (config, cwd) = crate::load_config(path.to_str(), true).unwrap();
+        (FnugMcp::new(config, cwd), dir)
+    }
+
+    fn json(result: &CallToolResult) -> serde_json::Value {
+        let text = &result.content[0].as_text().unwrap().text;
+        serde_json::from_str(text).unwrap()
+    }
+
+    fn fail_fast(fail_fast: bool) -> Parameters<FailFastParams> {
+        Parameters(FailFastParams {
+            fail_fast: Some(fail_fast),
+        })
+    }
+
+    fn run_lint(command: &str) -> Parameters<RunLintParams> {
+        Parameters(RunLintParams {
+            command: command.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn run_all_skips_check_false_commands() {
+        let (server, _dir) = server(
             r"
-fnug_version: 0.1.0
 name: root
 commands:
   - name: lint
@@ -460,13 +462,117 @@ commands:
     auto:
       check: false
 ",
-        )
-        .unwrap();
-        let (config, cwd) = crate::load_config(path.to_str(), true).unwrap();
+        );
+        let result = server
+            .run_all(fail_fast(false), CancellationToken::new())
+            .await
+            .unwrap();
+        let result = json(&result);
+        assert_eq!(result["commands"].as_array().unwrap().len(), 1);
+        assert_eq!(result["commands"][0]["name"], "lint");
+        assert_eq!(result["failed"], 0);
+    }
 
-        let result = run_commands(&config, &cwd, false, &CommandSelection::All).unwrap();
-        let names: Vec<&str> = result.commands.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["lint"]);
-        assert_eq!(result.failed, 0);
+    #[tokio::test]
+    async fn run_lint_ambiguous_name_is_error() {
+        let (server, _dir) = server(
+            r"
+name: root
+children:
+  - name: backend
+    commands:
+      - name: test
+        cmd: 'true'
+  - name: frontend
+    commands:
+      - name: test
+        cmd: 'true'
+",
+        );
+        let Err(err) = server
+            .run_lint(run_lint("test"), CancellationToken::new())
+            .await
+        else {
+            panic!("an ambiguous name ran a command");
+        };
+        assert!(err.message.contains("backend/test"), "{err:?}");
+        assert!(err.message.contains("frontend/test"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn run_lint_reports_merged_output_and_exit_code() {
+        let (server, _dir) = server(
+            r"
+name: root
+commands:
+  - name: mixed
+    cmd: 'echo o1; echo e1 >&2; echo o2; exit 3'
+  - name: after
+    cmd: 'true'
+    depends_on: [mixed]
+",
+        );
+        let result = server
+            .run_lint(run_lint("after"), CancellationToken::new())
+            .await
+            .unwrap();
+        let result = json(&result);
+        let mixed = &result["commands"][0];
+        assert_eq!(mixed["status"], "failed");
+        assert_eq!(mixed["exit_code"], 3);
+        assert_eq!(mixed["output"], "o1\ne1\no2\n");
+        assert_eq!(result["commands"][1]["status"], "skipped");
+        assert_eq!(
+            (&result["failed"], &result["skipped"]),
+            (&1.into(), &1.into())
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_fast_lists_not_run_commands() {
+        let (server, _dir) = server(
+            r"
+name: root
+commands:
+  - name: first
+    cmd: 'exit 1'
+  - name: second
+    cmd: 'true'
+",
+        );
+        let result = server
+            .run_all(fail_fast(true), CancellationToken::new())
+            .await
+            .unwrap();
+        let result = json(&result);
+        assert_eq!(result["total"], 2);
+        assert_eq!(result["not_run"], 1);
+        assert_eq!(result["commands"][1]["status"], "not_run");
+    }
+
+    #[tokio::test]
+    async fn cancelled_run_reports_cancelled() {
+        let (server, dir) = server(
+            r"
+name: root
+commands:
+  - name: hang
+    cmd: 'touch started; exec sleep 30'
+",
+        );
+        let ct = CancellationToken::new();
+        let started = dir.path().join("started");
+        let cancel = ct.clone();
+        tokio::task::spawn_blocking(move || {
+            assert!(crate::pty::test_util::wait_until(
+                Duration::from_secs(10),
+                || { started.exists() }
+            ));
+            cancel.cancel();
+        });
+        let result = server.run_lint(run_lint("hang"), ct).await.unwrap();
+        let result = json(&result);
+        assert_eq!(result["cancelled"], 1);
+        assert_eq!(result["commands"][0]["status"], "cancelled");
     }
 }

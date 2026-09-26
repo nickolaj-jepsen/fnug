@@ -7,6 +7,7 @@ use log::warn;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 #[must_use]
 pub fn inherit_path(parent: &Path, child: PathBuf) -> PathBuf {
@@ -25,6 +26,8 @@ pub struct Inheritance {
     auto: Auto,
     entry_path: Vec<String>,
     env: HashMap<String, String>,
+    timeout: Option<Duration>,
+    exclusive: Option<bool>,
 }
 
 /// A configured path that could not be resolved.
@@ -184,6 +187,8 @@ impl Inheritable for Auto {
             auto,
             entry_path: inheritance.merge_entry_path("auto"),
             env: inheritance.env.clone(),
+            timeout: inheritance.timeout,
+            exclusive: inheritance.exclusive,
         })
     }
 
@@ -231,23 +236,31 @@ fn calculate_common_inheritance(
         auto: auto.merge(&inheritance.auto),
         entry_path,
         env: merged_env,
+        timeout: inheritance.timeout,
+        exclusive: inheritance.exclusive,
     }
 }
 
 impl Inheritable for Command {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        Ok(calculate_common_inheritance(
-            &self.name,
-            &self.cwd,
-            &self.auto,
-            &self.env,
-            inheritance,
-        ))
+        Ok(Inheritance {
+            timeout: self.timeout.or(inheritance.timeout),
+            exclusive: self.exclusive.or(inheritance.exclusive),
+            ..calculate_common_inheritance(
+                &self.name,
+                &self.cwd,
+                &self.auto,
+                &self.env,
+                inheritance,
+            )
+        })
     }
 
     fn apply_inheritance(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
         self.cwd.clone_from(&inheritance.cwd);
         self.env.clone_from(&inheritance.env);
+        self.timeout = inheritance.timeout;
+        self.exclusive = inheritance.exclusive;
         self.auto.inherit(inheritance)?;
         Ok(())
     }
@@ -255,18 +268,24 @@ impl Inheritable for Command {
 
 impl Inheritable for CommandGroup {
     fn calculate_inheritance(&self, inheritance: &Inheritance) -> Result<Inheritance, ConfigError> {
-        Ok(calculate_common_inheritance(
-            &self.name,
-            &self.cwd,
-            &self.auto,
-            &self.env,
-            inheritance,
-        ))
+        Ok(Inheritance {
+            timeout: self.timeout.or(inheritance.timeout),
+            exclusive: self.exclusive.or(inheritance.exclusive),
+            ..calculate_common_inheritance(
+                &self.name,
+                &self.cwd,
+                &self.auto,
+                &self.env,
+                inheritance,
+            )
+        })
     }
 
     fn apply_inheritance(&mut self, inheritance: &Inheritance) -> Result<(), ConfigError> {
         self.cwd.clone_from(&inheritance.cwd);
         self.env.clone_from(&inheritance.env);
+        self.timeout = inheritance.timeout;
+        self.exclusive = inheritance.exclusive;
         self.auto.inherit(inheritance)?;
         for command in &mut self.commands {
             command.inherit(inheritance)?;

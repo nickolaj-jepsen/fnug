@@ -430,6 +430,17 @@ fn lockfile_repo() -> (tempfile::TempDir, String) {
     (dir, path)
 }
 
+/// Names of the commands git selection picks from the working tree.
+fn select_working_tree(config: &CommandGroup) -> Vec<String> {
+    let commands = config.all_commands();
+    let output = fnug::selectors::select(&commands, &fnug::selectors::SelectOptions::default());
+    commands
+        .iter()
+        .filter(|c| output.contains(&c.id))
+        .map(|c| c.name.clone())
+        .collect()
+}
+
 #[test]
 fn regex_empty_list_clears_inherited() {
     let (dir, path) = lockfile_repo();
@@ -437,12 +448,7 @@ fn regex_empty_list_clears_inherited() {
     assert!(command(&config, "lockfile").auto.regexes().is_empty());
 
     std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-    let commands = config.all_commands().into_iter().cloned().collect();
-    let selected: Vec<String> = fnug::selectors::get_selected_commands(commands)
-        .unwrap()
-        .into_iter()
-        .map(|c| c.name)
-        .collect();
+    let selected = select_working_tree(&config);
     assert_eq!(selected, ["lockfile"]);
 }
 
@@ -1213,12 +1219,7 @@ fn workspace_root_auto_does_not_leak() {
     assert_eq!(config.children[0].auto.git, None);
 
     std::fs::write(dir.path().join("packages/a/lib/mod.py"), "x = 1\n").unwrap();
-    let commands = config.all_commands().into_iter().cloned().collect();
-    let selected: Vec<String> = fnug::selectors::get_selected_commands(commands)
-        .unwrap()
-        .into_iter()
-        .map(|c| c.name)
-        .collect();
+    let selected = select_working_tree(&config);
     assert_eq!(selected, ["a-lint"]);
 }
 
@@ -1635,7 +1636,15 @@ commands:
 ",
     );
     let (config, cwd) = load_config(Some(&path), true).unwrap();
-    let result = fnug::check::run(&config, &cwd, false, true, false).unwrap();
+    let opts = fnug::check::CheckOptions {
+        mute_success: true,
+        ..fnug::check::CheckOptions::default()
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(fnug::check::run(&config, &cwd, &opts, cancel))
+        .unwrap();
     assert_eq!(result.exit_code, 0);
 }
 

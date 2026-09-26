@@ -59,6 +59,13 @@
         "type": "string"
       }
     },
+    "exclusive": {
+      "description": "Default `exclusive` for every command.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "fnug_version": {
       "description": "fnug version the config is written for. fnug warns if it needs a newer fnug or targets\nan older release series.",
       "type": [
@@ -76,6 +83,17 @@
     "name": {
       "description": "Display name for the root group.",
       "type": "string"
+    },
+    "timeout": {
+      "description": "Default `timeout` for every command.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Duration"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "workspace": {
       "description": "Discover and merge package configs from subdirectories.",
@@ -195,6 +213,13 @@
             "type": "string"
           }
         },
+        "exclusive": {
+          "description": "In parallel runs, such as `fnug check --jobs 4`, never run alongside another command;\nmeant for fixers that rewrite files. The TUI ignores it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "id": {
           "description": "Identifier used by `depends_on` and the MCP tools. Defaults to the name; must not\ncontain `/`.",
           "type": [
@@ -214,6 +239,17 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "timeout": {
+          "description": "In `fnug check` and MCP runs, kill the command once it has run this long. `0` means no\nlimit, overriding the parent group's value and `fnug check --timeout`. The TUI ignores\nit.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -274,6 +310,13 @@
             "type": "string"
           }
         },
+        "exclusive": {
+          "description": "Default `exclusive` for everything in the group.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "id": {
           "description": "Identifier for the group. Defaults to the name; must not contain `/`.",
           "type": [
@@ -284,11 +327,34 @@
         "name": {
           "description": "Display name.",
           "type": "string"
+        },
+        "timeout": {
+          "description": "Default `timeout` for everything in the group.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
         "name"
+      ]
+    },
+    "Duration": {
+      "description": "Whole seconds, or a duration such as `90s`, `5m` or `1h 30m`.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "WorkspaceConfig": {
