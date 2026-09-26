@@ -70,22 +70,11 @@ def run(*args: str) -> subprocess.CompletedProcess[bytes]:
 def _config_tempfile(config: Config) -> Iterator[str]:
     """Write a Config to a temporary JSON file, yield its path, and delete it after.
 
-    fnug resolves the root ``cwd`` against the config file's directory, so the
-    written copy pins it to the caller's working directory: an unset ``cwd`` becomes
-    that directory and a relative one is resolved against it. ``config`` itself is
-    not modified.
-
-    Raises:
-        ValueError: If ``config.workspace`` is enabled. Workspace discovery would
-            search the temporary directory.
+    The written copy pins the root ``cwd`` to the caller's working directory: an
+    unset ``cwd`` becomes that directory and a relative one is resolved against it.
+    ``config`` itself is not modified. Workspace discovery needs fnug's ``--root``,
+    since it searches the config's directory otherwise.
     """
-    if config.workspace:
-        msg = (
-            "A Config with 'workspace' set can't be passed directly: fnug would "
-            "look for workspace packages next to its temporary file. Write it with "
-            "Config.write() and pass config_path instead."
-        )
-        raise ValueError(msg)
     data = config.to_dict()
     data["cwd"] = str((Path.cwd() / data.get("cwd", ".")).resolve())
     # Outside the project, so the file itself never counts as a changed file.
@@ -152,8 +141,9 @@ def start(
     """Launch the fnug TUI.
 
     Args:
-        config: A Config to use. It is written to a temporary file, and its root
-            ``cwd`` is resolved against the caller's working directory (the default).
+        config: A Config to use. It is written to a temporary file, and its paths
+            and workspace discovery are resolved against the caller's working
+            directory.
         config_path: Path to an existing .fnug.yaml file.
         log_file: Path for file logging.
         no_workspace: Don't resolve upward to a parent workspace root.
@@ -162,8 +152,7 @@ def start(
         The completed process result.
 
     Raises:
-        ValueError: If both config and config_path are provided, or config has
-            ``workspace`` enabled.
+        ValueError: If both config and config_path are provided.
     """
     args = _global_args(
         config,
@@ -200,8 +189,9 @@ def check(  # noqa: PLR0913
     check failed, and 2 that fnug couldn't run them.
 
     Args:
-        config: A Config to use. It is written to a temporary file, and its root
-            ``cwd`` is resolved against the caller's working directory (the default).
+        config: A Config to use. It is written to a temporary file, and its paths
+            and workspace discovery are resolved against the caller's working
+            directory.
         config_path: Path to an existing .fnug.yaml file.
         targets: Run these commands, by id or name, after their dependencies.
         all_: Run every command, except those with ``auto.check: false`` unless
@@ -225,8 +215,7 @@ def check(  # noqa: PLR0913
         The completed process result.
 
     Raises:
-        ValueError: If both config and config_path are provided, or config has
-            ``workspace`` enabled.
+        ValueError: If both config and config_path are provided.
     """
     args = _global_args(
         config,

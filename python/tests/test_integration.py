@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import fnug
-from fnug import Auto, Command, CommandGroup, Config
+from fnug import Auto, Command, CommandGroup, Config, WorkspaceOptions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -95,6 +95,31 @@ def test_integration_git_selection_from_caller_repo(git_repo, monkeypatch, capfd
     output = capfd.readouterr()
     assert result.returncode == 0, output
     assert str(git_repo) in output.out + output.err
+
+
+@pytest.mark.parametrize(
+    "workspace", [True, WorkspaceOptions(paths=["packages/*"])], ids=["walk", "paths"]
+)
+@pytest.mark.usefixtures("real_fnug")
+def test_integration_workspace_config_object(tmp_path, monkeypatch, capfd, workspace):
+    package = tmp_path / "packages" / "api"
+    package.mkdir(parents=True)
+    (package / ".fnug.yaml").write_text(
+        "name: api\ncommands:\n  - name: hello\n    cmd: echo hello from $PWD\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    config = Config(
+        name="root",
+        workspace=workspace,
+        commands=[Command(name="where", cmd="echo root at $PWD")],
+    )
+
+    result = fnug.check(config, all_=True, no_tui=True)
+
+    output = capfd.readouterr()
+    assert result.returncode == 0, output
+    assert f"hello from {package.resolve()}" in output.out, output
+    assert f"root at {tmp_path.resolve()}" in output.out, output
 
 
 def test_integration_default_fnug_version_is_the_binarys(real_fnug):

@@ -144,12 +144,20 @@ def test_absolute_cwd_kept(fake_fnug, tmp_path, monkeypatch):
     assert fake_fnug.last_config()["cwd"] == str(project.resolve())
 
 
-@pytest.mark.parametrize("workspace", [True, WorkspaceOptions(paths=["crates/*"])])
-def test_workspace_with_config_object_raises(fake_fnug, workspace):
-    with pytest.raises(ValueError, match="workspace"):
-        fnug.check(demo_config(workspace=workspace))
+@pytest.mark.parametrize(
+    ("workspace", "written"),
+    [(True, True), (WorkspaceOptions(paths=["crates/*"]), {"paths": ["crates/*"]})],
+)
+@pytest.mark.parametrize("launch", [fnug.check, fnug.start])
+def test_workspace_config_object_discovers_from_caller_cwd(  # noqa: PLR0913
+    fake_fnug, tmp_path, monkeypatch, launch, workspace, written
+):
+    monkeypatch.chdir(tmp_path)
 
-    assert fake_fnug.calls() == []
+    launch(demo_config(workspace=workspace))
+
+    assert fake_fnug.last()["argv"][2:4] == ["--root", str(tmp_path.resolve())]
+    assert fake_fnug.last_config()["workspace"] == written
 
 
 def test_disabled_workspace_is_allowed(fake_fnug):
