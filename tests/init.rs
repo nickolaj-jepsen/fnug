@@ -1,11 +1,13 @@
 //! Tests for `fnug init`: tooling detection and the config it writes.
 
+use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use fnug::config_file::ConfigCommand;
-use fnug::init::{Proposal, detect};
+use fnug::commands::group::CommandGroup;
+use fnug::config_file::{Config, ConfigCommand, WorkspaceConfig};
+use fnug::init::{InitError, InitOptions, Proposal, detect};
 
 fn write(dir: &Path, file: &str, content: &str) {
     let path = dir.join(file);
@@ -247,4 +249,269 @@ fn detect_orders_groups_and_ignores_unknown_projects() {
     );
     let keys: Vec<_> = detect(dir.path()).iter().map(|p| p.key).collect();
     assert_eq!(keys, ["rust", "python", "node", "go"]);
+}
+
+fn fnug(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(dir)
+        .args(args)
+        .env_remove("FNUG_LOG")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn not_found_suggests_init() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = fnug(dir.path(), &["check", "--no-tui"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No config file found"), "{stderr}");
+    assert!(stderr.contains("run `fnug init`"), "{stderr}");
+}
+
+fn init(dir: &Path, force: bool) -> Result<PathBuf, InitError> {
+    fnug::init::run(
+        &InitOptions {
+            dir: dir.to_path_buf(),
+            force,
+            yes: true,
+        },
+        |_| panic!("--yes doesn't ask"),
+    )
+}
+
+/// Every command id in `group` and below.
+fn command_ids(group: &CommandGroup) -> Vec<String> {
+    let mut ids: Vec<_> = group.commands.iter().map(|c| c.id.clone()).collect();
+    ids.extend(group.children.iter().flat_map(command_ids));
+    ids
+}
+
+/// Load the config at `path` on its own, and return its command ids.
+fn load_ids(path: &Path) -> Vec<String> {
+    let (root, _) = fnug::load_config(path.to_str(), true).unwrap();
+    command_ids(&root)
+}
+
+fn assert_header(content: &str) {
+    let header = format!(
+        "# yaml-language-server: $schema={}",
+        fnug::schema::schema_url_for_version()
+    );
+    assert_eq!(content.lines().next(), Some(header.as_str()), "{content}");
+}
+
+#[test]
+fn init_round_trips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("my-app");
+    write(&dir, "Cargo.toml", "");
+    write(&dir, "pyproject.toml", "[tool.pytest.ini_options]\n");
+    write(&dir, "uv.lock", "");
+    write(
+        &dir,
+        "package.json",
+        r#"{"scripts": {"lint": "eslint .", "test": "vitest"}}"#,
+    );
+    write(&dir, "pnpm-lock.yaml", "");
+    write(&dir, "go.mod", "module demo\n");
+
+    let path = init(&dir, false).unwrap();
+
+    assert_eq!(path, dir.canonicalize().unwrap().join(".fnug.yaml"));
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_header(&content);
+    assert!(!content.contains("null"), "{content}");
+    let config = Config::from_file(&path).unwrap();
+    assert_eq!(config.name, "my-app");
+    assert_eq!(
+        config.fnug_version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+
+    let ids = load_ids(&path);
+    let unique: HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    for id in ["rust/test", "node/test", "go/test", "fmt", "pytest", "lint"] {
+        assert!(ids.iter().any(|i| i == id), "{id} not in {ids:?}");
+    }
+}
+
+#[test]
+fn init_includes_what_choose_picks() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Cargo.toml", "");
+    write(dir.path(), "go.mod", "module demo\n");
+    let run = |choice: Vec<usize>| {
+        let opts = InitOptions {
+            dir: dir.path().to_path_buf(),
+            force: true,
+            yes: false,
+        };
+        fnug::init::run(&opts, |proposals| {
+            let keys: Vec<_> = proposals.iter().map(|p| p.key).collect();
+            assert_eq!(keys, ["rust", "go"]);
+            Ok(choice)
+        })
+        .unwrap()
+    };
+
+    let path = run(vec![1]);
+    assert_eq!(load_ids(&path), ["gofmt", "vet", "test"]);
+
+    // Nothing picked: an example command to replace
+    let path = run(vec![]);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_header(&content);
+    assert!(content.contains("Replace the example command"), "{content}");
+    assert_eq!(load_ids(&path), ["example"]);
+}
+
+#[test]
+fn prepare_writes_a_workspace_root_and_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = dir.path().join("api");
+    write(&api, "go.mod", "module api\n");
+    let groups = detect(&api).into_iter().map(|p| p.group).collect();
+    fnug::init::prepare(&api, false, groups, None)
+        .unwrap()
+        .write()
+        .unwrap();
+    let root = fnug::init::prepare(
+        dir.path(),
+        false,
+        Vec::new(),
+        Some(WorkspaceConfig::Enabled(true)),
+    )
+    .unwrap();
+
+    // No example command in a root that only gathers its packages
+    assert!(!root.content.contains("example"), "{}", root.content);
+    root.write().unwrap();
+    let (loaded, _) = fnug::load_config(root.path.to_str(), false).unwrap();
+    assert_eq!(command_ids(&loaded), ["api/gofmt", "api/vet", "api/test"]);
+}
+
+#[test]
+fn init_refuses_existing() {
+    for file in [".fnug.yaml", ".fnug.yml", ".fnug.json"] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "Cargo.toml", "");
+        write(dir.path(), file, "keep me");
+
+        let err = fnug::init::run(
+            &InitOptions {
+                dir: dir.path().to_path_buf(),
+                ..InitOptions::default()
+            },
+            |_| panic!("asked before refusing"),
+        )
+        .unwrap_err();
+
+        let InitError::Exists(existing) = &err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(existing.file_name().unwrap(), file);
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(file)).unwrap(),
+            "keep me"
+        );
+    }
+}
+
+#[test]
+fn init_force_overwrites() {
+    // The file fnug loads is replaced, in its own format
+    for (file, other, json) in [
+        (".fnug.yaml", None, false),
+        (".fnug.json", Some(".fnug.yml"), true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "Cargo.toml", "");
+        write(dir.path(), file, "old: [");
+        if let Some(other) = other {
+            write(dir.path(), other, "also old");
+        }
+
+        let path = init(dir.path(), true).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), file);
+        assert_eq!(load_ids(&path), ["fmt", "clippy", "test"]);
+        if json {
+            let config = Config::from_file(&path).unwrap();
+            let schema = fnug::schema::schema_url_for_version();
+            assert_eq!(config.schema, Some(schema));
+        }
+        if let Some(other) = other {
+            let untouched = std::fs::read_to_string(dir.path().join(other)).unwrap();
+            assert_eq!(untouched, "also old");
+        }
+    }
+}
+
+#[test]
+fn init_cli_proposes_nix_tools_on_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    write(&project, "flake.nix", "{}");
+    let bin = dir.path().join("bin");
+    for tool in ["alejandra", "deadnix"] {
+        write_script(&bin.join(tool), "#!/bin/sh\n");
+    }
+
+    // Without a terminal, `fnug init` includes everything it found
+    let output = Command::new(env!("CARGO_BIN_EXE_fnug"))
+        .current_dir(dir.path())
+        .args(["init", "project"])
+        .env("PATH", &bin)
+        .env_remove("FNUG_LOG")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let path = project.canonicalize().unwrap().join(".fnug.yaml");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("Created {}", path.display())),
+        "{stdout}"
+    );
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("alejandra --check ."), "{content}");
+    assert!(content.contains("deadnix --fail ."), "{content}");
+    assert!(!content.contains("statix"), "{content}");
+
+    let again = fnug(dir.path(), &["init", "project"]);
+    assert!(!again.status.success(), "{again:?}");
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(stderr.contains("already exists"), "{stderr}");
+}
+
+#[test]
+fn init_warns_below_the_repository_root() {
+    let dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(dir.path()).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+
+    let output = fnug(dir.path(), &["init", "--yes", "docs"]);
+
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("isn't the top of its git repository"),
+        "{stderr}"
+    );
+    let root = dir.path().canonicalize().unwrap();
+    assert!(
+        stderr.contains(&format!("fnug init {}", root.display())),
+        "{stderr}"
+    );
+    assert!(dir.path().join("docs/.fnug.yaml").is_file());
+
+    // At the root, it only says nothing was found
+    let output = fnug(dir.path(), &["init"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("found no tooling"), "{stderr}");
+    assert!(!stderr.contains("isn't the top"), "{stderr}");
 }

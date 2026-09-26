@@ -1,4 +1,5 @@
 mod check;
+mod init;
 mod mcp;
 mod setup;
 mod signals;
@@ -59,6 +60,13 @@ enum Commands {
     Check(check::CheckArgs),
     /// Interactive setup wizard for git hooks and MCP server configuration
     Setup(setup::SetupArgs),
+    /// Create a .fnug.yaml with lint and test commands for the project's tooling
+    ///
+    /// Looks for Rust (Cargo.toml), Python (pyproject.toml or ruff.toml; run with uv, poetry or
+    /// pdm when locked), Node (the package.json scripts format:check, lint, typecheck and test,
+    /// run with the lockfile's package manager), Go (go.mod) and Nix (flake.nix, with alejandra,
+    /// statix and deadnix when they are on PATH).
+    Init(init::InitArgs),
     /// Start an MCP server over stdio
     Mcp,
     /// Print the config file's JSON Schema
@@ -124,6 +132,7 @@ async fn run(cli: Cli, logger: LoggerHandle) -> Result<ExitCode, Box<dyn std::er
         Some(Commands::Setup(ref args)) => return setup::run(args, &load_opts),
         // Loads the config on every tool call
         Some(Commands::Mcp) => return mcp::run(load_opts).await,
+        Some(Commands::Init(ref args)) => return init::run(args),
         // Commands that need one
         Some(Commands::Check(ref args)) => {
             let loaded = fnug::load(&load_opts)?;
