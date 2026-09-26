@@ -6,9 +6,11 @@ use std::time::Instant;
 use log::{debug, error, info, warn};
 use ratatui::layout::Rect;
 
+use crate::commands::command::Command;
 use crate::process::StopSignal;
 use crate::pty::terminal::{Terminal, TerminalOptions, TerminalSize};
 use crate::pty::{format_exit_message, format_start_message};
+use crate::runner::{self, NodeState, PlanOptions, Selection};
 
 use super::app::{App, AppEvent, CommandStatus, ProcessInstance, STOP_GRACE};
 use super::tree_state::find_group_in_group;
@@ -99,128 +101,129 @@ impl App {
         })
     }
 
-    /// Start a command process (checks dependencies first).
+    /// Run `ids` and the commands they depend on, each once and after its dependencies. The
+    /// terminal pane switches to `focus`, if given.
     ///
-    /// When `set_active` is true the terminal pane switches to this command.
-    /// Pass `false` for background starts (dependency resolution, watcher
-    /// triggers) so the user's current view is not disrupted.
-    pub fn start_command(&mut self, cmd_id: &str, terminal_area: Rect, set_active: bool) {
+    /// Every id in `ids` starts anew, stopping a run still going, and waits for the dependencies
+    /// in `ids`. A dependency outside `ids` is reused if it passed earlier in the session or is
+    /// still queued or running; otherwise it runs too.
+    pub fn run_commands(&mut self, ids: &[String], terminal_area: Rect, focus: Option<&str>) {
         self.last_terminal_area = terminal_area;
-
-        let Some(mut cmd) = self.find_command(cmd_id) else {
-            return;
+        let dag = &self.dag;
+        let reuse = |dep: &Command| {
+            dag.state(&dep.id) == Some(&NodeState::Passed) || dag.is_active(&dep.id)
         };
-        cmd.cwd = cmd.effective_cwd(&self.cwd).to_path_buf();
-        self.error_messages.remove(cmd_id);
-
-        // Check dependencies
-        if !cmd.depends_on.is_empty() {
-            let mut unresolved = Vec::new();
-            for dep_id in &cmd.depends_on {
-                match self.processes.get(dep_id).map(|p| &p.status) {
-                    Some(CommandStatus::Success) => {} // dep satisfied
-                    _ => unresolved.push(dep_id.clone()),
-                }
-            }
-            if !unresolved.is_empty() {
-                info!(
-                    "Command '{}' waiting for {} dependencies",
-                    cmd.name,
-                    unresolved.len()
-                );
-                // Queued first, so a dependency that fails to start fails this command too
-                self.pending_deps
-                    .insert(cmd_id.to_string(), unresolved.clone());
-                // Start unresolved deps that aren't running or pending
-                for dep_id in &unresolved {
-                    if !self
-                        .processes
-                        .get(dep_id)
-                        .is_some_and(|p| matches!(p.status, CommandStatus::Running))
-                        && !self.pending_deps.contains_key(dep_id)
-                    {
-                        self.start_command(dep_id, terminal_area, false);
-                    }
-                }
-                if set_active {
-                    self.active_terminal_id = Some(cmd_id.to_string());
-                }
-                self.mark_tree_dirty();
+        let opts = PlanOptions {
+            reuse_dep: Some(&reuse),
+        };
+        let plan = match runner::plan(&self.config, &Selection::Ids(ids.to_vec()), &opts) {
+            Ok(plan) => plan,
+            Err(e) => {
+                error!("Can't run {ids:?}: {e}");
                 return;
             }
-        }
+        };
 
+        for id in plan.ids() {
+            self.error_messages.remove(id);
+        }
+        for id in self.dag.submit(&plan) {
+            // No exit event comes for the replaced run, and none is expected
+            if let Some(proc) = self.processes.remove(&id) {
+                proc.stop_and_abort(&id, StopSignal::Interrupt);
+            }
+        }
+        if let Some(id) = focus {
+            self.active_terminal_id = Some(id.to_string());
+        }
+        self.start_ready();
+        self.mark_tree_dirty();
+        self.check_batch_complete();
+    }
+
+    /// Run one command, after its dependencies, and show its terminal.
+    pub fn run_command(&mut self, cmd_id: &str, terminal_area: Rect) {
+        self.run_commands(&[cmd_id.to_string()], terminal_area, Some(cmd_id));
+    }
+
+    /// Start every command whose dependencies have passed. A command that fails to start fails
+    /// the commands waiting on it.
+    pub(super) fn start_ready(&mut self) {
+        while let Some(id) = self.dag.pop_ready(usize::MAX) {
+            if let Err(msg) = self.spawn_pty(&id) {
+                error!("{msg}");
+                self.error_messages.insert(id.clone(), msg);
+                self.finish_failed(&id);
+            }
+        }
+    }
+
+    /// Start `cmd_id` in a new terminal, stopping its previous run. Returns the message to show
+    /// when it can't start.
+    fn spawn_pty(&mut self, cmd_id: &str) -> Result<(), String> {
+        let Some(mut cmd) = self.find_command(cmd_id) else {
+            return Err(format!("Unknown command '{cmd_id}'"));
+        };
+        cmd.cwd = cmd.effective_cwd(&self.cwd).to_path_buf();
         info!("Starting command '{}'", cmd.name);
 
-        // Stop the previous run and abort its tasks
         if let Some(proc) = self.processes.remove(cmd_id) {
             proc.stop_and_abort(cmd_id, StopSignal::Interrupt);
         }
 
-        let cols = terminal_area.width.max(2);
-        let rows = terminal_area.height.max(2);
+        let size = TerminalSize::new(
+            self.last_terminal_area.width.max(2),
+            self.last_terminal_area.height.max(2),
+        );
         let opts = TerminalOptions {
             scrollback: cmd
                 .scrollback
                 .unwrap_or_else(Terminal::default_scrollback_size),
             output_notify: None,
         };
-
-        match Terminal::new(&cmd, TerminalSize::new(cols, rows), opts) {
-            Ok(terminal) => {
-                if let Err(e) = terminal.echo(format_start_message(&cmd.cmd)) {
-                    warn!("Failed to echo start message: {e}");
-                }
-
-                self.next_generation += 1;
-                let generation = self.next_generation;
-                let term_ref = Arc::new(terminal);
-                let exit_handle =
-                    Self::spawn_exit_watcher(&term_ref, cmd_id, generation, &self.event_tx);
-
-                self.processes.insert(
-                    cmd_id.to_string(),
-                    ProcessInstance {
-                        terminal: term_ref,
-                        status: CommandStatus::Running,
-                        task_handles: vec![exit_handle],
-                        started_at: Instant::now(),
-                        finished_at: None,
-                        exit: None,
-                        generation,
-                    },
-                );
-
-                if set_active {
-                    self.active_terminal_id = Some(cmd_id.to_string());
-                }
-            }
-            Err(e) => {
-                let msg = format!("Failed to start '{}': {}", cmd.name, e);
-                error!("{msg}");
-                self.error_messages.insert(cmd_id.to_string(), msg);
-                self.fail_dependents(cmd_id);
-                if set_active {
-                    self.active_terminal_id = Some(cmd_id.to_string());
-                }
-            }
+        let terminal = Terminal::new(&cmd, size, opts)
+            .map_err(|e| format!("Failed to start '{}': {e}", cmd.name))?;
+        if let Err(e) = terminal.echo(format_start_message(&cmd.cmd)) {
+            warn!("Failed to echo start message: {e}");
         }
-        self.mark_tree_dirty();
+
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let term_ref = Arc::new(terminal);
+        let exit_handle = Self::spawn_exit_watcher(&term_ref, cmd_id, generation, &self.event_tx);
+        self.processes.insert(
+            cmd_id.to_string(),
+            ProcessInstance {
+                terminal: term_ref,
+                status: CommandStatus::Running,
+                task_handles: vec![exit_handle],
+                started_at: Instant::now(),
+                finished_at: None,
+                exit: None,
+                generation,
+            },
+        );
+        Ok(())
     }
 
-    /// Stop a command process and drop its queued run (and its dependents'), if any
+    /// Stop a command: drop its queued run, or interrupt its process. Either way, the commands
+    /// queued behind it are cancelled.
     pub fn stop_command(&mut self, cmd_id: &str) {
         info!("Stopping command '{cmd_id}'");
-        if self.pending_deps.remove(cmd_id).is_some() {
-            self.cancel_dependents(cmd_id);
+        if matches!(
+            self.dag.state(cmd_id),
+            Some(NodeState::Waiting(_) | NodeState::Ready)
+        ) {
+            self.mark_stopped(cmd_id);
         }
-        // A queued rerun can wait behind a previous run that is still going
+        // A running command's dependents are cancelled once it exits
         if let Some(proc) = self.processes.get(cmd_id)
             && let Err(e) = proc.terminal.stop(StopSignal::Interrupt, STOP_GRACE)
         {
             warn!("Failed to stop process '{cmd_id}': {e}");
         }
         self.mark_tree_dirty();
+        self.check_batch_complete();
     }
 
     /// Copy a command's terminal output to the system clipboard
@@ -257,52 +260,48 @@ impl App {
         });
     }
 
-    /// Clear a command's terminal, error and queued run, and kill the process if running
+    /// Clear a command's terminal and error, and drop its queued run or stop its process. The
+    /// commands queued behind it won't run.
     pub fn clear_command(&mut self, cmd_id: &str) {
         if let Some(proc) = self.processes.remove(cmd_id) {
             proc.stop_and_abort(cmd_id, StopSignal::Interrupt);
         }
         self.error_messages.remove(cmd_id);
-        if self.pending_deps.remove(cmd_id).is_some() {
-            self.cancel_dependents(cmd_id);
+        for (dependent, _) in self.dag.abort(cmd_id) {
+            info!("Dropped '{dependent}', which was waiting on '{cmd_id}'");
         }
         self.mark_tree_dirty();
+        self.check_batch_complete();
     }
 
-    /// Start all selected commands (deps are handled by `start_command`)
+    /// Run the selected commands, and focus the first failure once they have all finished.
     pub fn run_selected(&mut self, terminal_area: Rect) {
-        let selected_ids: Vec<String> = self.selected.iter().cloned().collect();
-
-        // Track batch for auto-focus on failure
-        self.batch_run_ids = Some(selected_ids.iter().cloned().collect());
-
-        info!("Running {} selected commands", selected_ids.len());
-        for id in &selected_ids {
-            self.start_command(id, terminal_area, false);
-        }
-        // Set active terminal to the command at the cursor, or the first
-        // started command if the cursor isn't on a started command.
-        if self.current_command_id().is_some_and(|id| {
-            self.processes.contains_key(&id) || self.pending_deps.contains_key(&id)
-        }) {
-            self.update_active_terminal();
-        } else if let Some(first) = selected_ids.first() {
-            self.active_terminal_id = Some(first.clone());
-        }
+        let ids: Vec<String> = self
+            .config
+            .all_commands()
+            .into_iter()
+            .filter(|c| self.selected.contains(&c.id))
+            .map(|c| c.id.clone())
+            .collect();
+        info!("Running {} selected commands", ids.len());
+        // Stay on the command at the cursor if it has output to show
+        let focus = self
+            .current_command_id()
+            .filter(|id| ids.contains(id) || self.processes.contains_key(id))
+            .or_else(|| ids.first().cloned());
+        self.batch_run_ids = Some(ids.iter().cloned().collect());
+        self.run_commands(&ids, terminal_area, focus.as_deref());
     }
 
-    /// Start all commands in a group (and nested subgroups).
+    /// Run all commands in a group (and nested subgroups).
     pub fn run_group(&mut self, group_id: &str, terminal_area: Rect) {
         let Some(group) = find_group_in_group(&self.config, group_id) else {
             return;
         };
-        let cmd_ids: Vec<String> = group.all_commands().iter().map(|c| c.id.clone()).collect();
-        info!("Running {} commands in group '{group_id}'", cmd_ids.len());
-        let mut first = true;
-        for id in &cmd_ids {
-            self.start_command(id, terminal_area, first);
-            first = false;
-        }
+        let ids: Vec<String> = group.all_commands().iter().map(|c| c.id.clone()).collect();
+        info!("Running {} commands in group '{group_id}'", ids.len());
+        let focus = ids.first().cloned();
+        self.run_commands(&ids, terminal_area, focus.as_deref());
     }
 
     /// Resize all active terminals
@@ -330,6 +329,7 @@ mod tests {
     use crate::commands::group::CommandGroup;
     use crate::process::ExitInfo;
     use crate::pty::test_util::{pty_available, wait_until};
+    use crate::runner::NodeState;
     use crate::tui::app::{App, AppEvent, CommandStatus};
     use crate::tui::log_state::LogBuffer;
     use crate::tui::tree_widget::NodeKind;
@@ -380,6 +380,26 @@ mod tests {
         }
     }
 
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(ToString::to_string).collect()
+    }
+
+    /// Whether `id` is queued behind its dependencies
+    fn waits(app: &App, id: &str) -> bool {
+        matches!(app.dag.state(id), Some(NodeState::Waiting(_)))
+    }
+
+    fn running_ids(app: &App) -> Vec<&str> {
+        let mut running: Vec<&str> = app
+            .processes
+            .iter()
+            .filter(|(_, p)| p.status == CommandStatus::Running)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        running.sort_unstable();
+        running
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn sticky_dep_error_cleared_on_rerun() {
         if !pty_available() {
@@ -388,14 +408,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = dep_app(dir.path());
 
-        app.start_command("test", AREA, true);
+        app.run_command("test", AREA);
         app.handle_app_event(exited(&app, "build", 1));
         assert_eq!(
             node_status(&mut app, "test"),
             CommandStatus::Error("Dependency 'build' failed".into())
         );
 
-        app.start_command("test", AREA, true);
+        app.run_command("test", AREA);
         app.handle_app_event(exited(&app, "build", 0));
         app.handle_app_event(exited(&app, "test", 0));
 
@@ -405,23 +425,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn clear_command_drops_error_and_pending_deps() {
+    async fn clear_command_drops_error_and_queued_run() {
         if !pty_available() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
         let mut app = dep_app(dir.path());
 
-        app.start_command("test", AREA, true);
+        app.run_command("test", AREA);
         app.handle_app_event(exited(&app, "build", 1));
         app.clear_command("test");
         assert!(!app.error_messages.contains_key("test"));
         assert_eq!(node_status(&mut app, "test"), CommandStatus::Pending);
 
-        app.start_command("test", AREA, true);
-        assert!(app.pending_deps.contains_key("test"));
+        app.run_command("test", AREA);
+        assert!(waits(&app, "test"));
         app.clear_command("test");
-        assert!(!app.pending_deps.contains_key("test"));
+        assert!(!waits(&app, "test"));
 
         // A cleared command must not be started when its dependency finishes
         app.handle_app_event(exited(&app, "build", 0));
@@ -455,12 +475,12 @@ mod tests {
         };
         let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
 
-        app.start_command("c", AREA, true);
-        assert!(app.pending_deps.contains_key("b"));
-        assert!(app.pending_deps.contains_key("c"));
+        app.run_command("c", AREA);
+        assert!(waits(&app, "b"));
+        assert!(waits(&app, "c"));
 
         app.clear_command("b");
-        assert!(!app.pending_deps.contains_key("c"), "c still waits on b");
+        assert!(!waits(&app, "c"), "c still waits on b");
         assert!(!app.error_messages.contains_key("c"));
 
         app.handle_app_event(exited(&app, "a", 0));
@@ -494,7 +514,7 @@ mod tests {
         let gone = dir.path().join("gone");
         let mut app = single_command_app(dir.path(), "true", gone);
 
-        app.start_command("a", AREA, true);
+        app.run_command("a", AREA);
         assert!(!app.processes.contains_key("a"));
         let msg = app.error_messages.get("a").expect("no error shown");
         assert!(msg.contains("does not exist"), "{msg}");
@@ -530,11 +550,11 @@ mod tests {
         };
         let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
 
-        app.start_command("dependent", AREA, true);
+        app.run_command("dependent", AREA);
 
         assert!(app.error_messages.contains_key("gone"));
         assert!(
-            !app.pending_deps.contains_key("dependent"),
+            !waits(&app, "dependent"),
             "dependent waits for a dependency that never started"
         );
         assert_eq!(
@@ -551,7 +571,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = single_command_app(dir.path(), "touch marker", PathBuf::new());
 
-        app.start_command("a", AREA, true);
+        app.run_command("a", AREA);
         assert_eq!(app.error_messages.get("a"), None);
         assert!(wait_until(Duration::from_secs(5), || dir
             .path()
@@ -596,8 +616,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = sleeper_app(dir.path());
 
-        app.start_command("b", AREA, true);
-        assert!(app.pending_deps.contains_key("b"));
+        app.run_command("b", AREA);
+        assert!(waits(&app, "b"));
         assert!(wait_until(Duration::from_secs(5), || dir
             .path()
             .join("ready")
@@ -609,7 +629,7 @@ mod tests {
 
         assert_eq!(node_status(&mut app, "a"), CommandStatus::Stopped);
         assert!(app.processes["a"].exit.as_ref().unwrap().stop_requested);
-        assert!(!app.pending_deps.contains_key("b"), "b still waits on a");
+        assert!(!waits(&app, "b"), "b still waits on a");
         assert_eq!(app.error_messages.get("b"), None);
         assert!(!app.processes.contains_key("b"));
         app.shutdown().await;
@@ -623,10 +643,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = sleeper_app(dir.path());
 
-        app.start_command("b", AREA, true);
+        app.run_command("b", AREA);
         app.stop_command("b");
 
-        assert!(!app.pending_deps.contains_key("b"));
+        assert!(!waits(&app, "b"));
         assert!(
             app.processes["a"].terminal.is_running(),
             "stopped the dependency"
@@ -635,7 +655,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stop_reaches_run_still_going_behind_queued_rerun() {
+    async fn queued_rerun_stops_previous_run() {
         if !pty_available() {
             return;
         }
@@ -658,25 +678,144 @@ mod tests {
             ..Default::default()
         };
         let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
-        app.start_command("b", AREA, true);
+        app.run_command("b", AREA);
         app.handle_app_event(exited(&app, "a", 0));
         assert!(wait_until(Duration::from_secs(5), || dir
             .path()
             .join("ready")
             .exists()));
-        // Restarting the dependency queues the rerun of `b` while its first run keeps going
-        app.start_command("a", AREA, false);
-        app.start_command("b", AREA, true);
-        assert!(app.pending_deps.contains_key("b"));
         let first_run = std::sync::Arc::clone(&app.processes["b"].terminal);
 
-        app.stop_command("b");
-
-        assert!(!app.pending_deps.contains_key("b"));
+        // The rerun of `b` waits for the rerun of `a`; its first run must not keep going
+        app.run_commands(&ids(&["a", "b"]), AREA, Some("b"));
+        assert!(waits(&app, "b"));
         let exit = tokio::time::timeout(Duration::from_secs(3), first_run.wait()).await;
-        let exit = exit.expect("running instance was not stopped").unwrap();
+        let exit = exit.expect("previous run was not stopped").unwrap();
         assert!(exit.stop_requested);
+
+        app.stop_command("b");
+        assert!(!waits(&app, "b"));
         app.shutdown().await;
+    }
+
+    /// `a` <- `b` <- `c`, each running `true` in `dir`.
+    fn chain_app(dir: &Path) -> App {
+        let command = |id: &str, depends_on: &[&str]| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: "true".into(),
+            cwd: dir.to_path_buf(),
+            depends_on: ids(depends_on),
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![
+                command("a", &[]),
+                command("b", &["a"]),
+                command("c", &["b"]),
+            ],
+            ..Default::default()
+        };
+        App::new(config, dir.to_path_buf(), LogBuffer::new())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rerun_chain_respects_depends_on() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = chain_app(dir.path());
+        let chain = ids(&["a", "b", "c"]);
+
+        app.run_commands(&chain, AREA, None);
+        for id in ["a", "b", "c"] {
+            assert_eq!(running_ids(&app), [id]);
+            app.handle_app_event(exited(&app, id, 0));
+        }
+
+        // Every command passed before, but each still waits for its dependency's rerun
+        app.run_commands(&chain, AREA, None);
+        assert_eq!(running_ids(&app), ["a"]);
+        assert!(waits(&app, "b") && waits(&app, "c"));
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_spawns_dependency_once() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = dep_app(dir.path());
+
+        app.run_commands(&ids(&["test", "build"]), AREA, None);
+
+        assert_eq!(app.next_generation, 1, "build was spawned more than once");
+        assert_eq!(running_ids(&app), ["build"]);
+        assert!(waits(&app, "test"));
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clearing_running_dependency_resolves_dependents() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sleeper_app(dir.path());
+        app.run_commands(&ids(&["b"]), AREA, Some("b"));
+        assert!(waits(&app, "b"));
+
+        app.clear_command("a");
+
+        assert!(!waits(&app, "b"), "b still waits on a cleared dependency");
+        assert!(!app.processes.contains_key("b"));
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waiting_command_shows_as_waiting() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sleeper_app(dir.path());
+
+        app.run_commands(&ids(&["b"]), AREA, Some("b"));
+
+        assert_eq!(node_status(&mut app, "b"), CommandStatus::WaitingForDeps);
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_completes_when_every_command_fails_to_spawn() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let command = |id: &str| Command {
+            id: id.into(),
+            name: id.into(),
+            cmd: "true".into(),
+            cwd: dir.path().join("gone"),
+            ..Default::default()
+        };
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: vec![command("x"), command("y")],
+            ..Default::default()
+        };
+        let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
+        app.selected.extend(ids(&["x", "y"]));
+
+        app.run_selected(AREA);
+
+        assert!(app.batch_run_ids.is_none(), "the batch never completed");
+        assert_eq!(app.active_terminal_id.as_deref(), Some("x"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -687,9 +826,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = single_command_app(dir.path(), "exec sleep 30", dir.path().to_path_buf());
 
-        app.start_command("a", AREA, true);
+        app.run_command("a", AREA);
         let stale = exited(&app, "a", 1);
-        app.start_command("a", AREA, true);
+        app.run_command("a", AREA);
         // Exit of the first run, already queued when the restart happened
         app.handle_app_event(stale);
 
@@ -707,7 +846,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cmd = "trap '' HUP; touch ready; exec sleep 30";
         let mut app = single_command_app(dir.path(), cmd, dir.path().to_path_buf());
-        app.start_command("a", AREA, true);
+        app.run_command("a", AREA);
         assert!(wait_until(Duration::from_secs(5), || dir
             .path()
             .join("ready")
@@ -757,8 +896,8 @@ mod tests {
             ..Default::default()
         };
         let mut app = App::new(config, dir.path().to_path_buf(), LogBuffer::new());
-        app.start_command("finished", AREA, false);
-        app.start_command("running", AREA, false);
+        app.run_commands(&ids(&["finished"]), AREA, None);
+        app.run_commands(&ids(&["running"]), AREA, None);
         let finished = std::sync::Arc::clone(&app.processes["finished"].terminal);
         let running = std::sync::Arc::clone(&app.processes["running"].terminal);
         let has_pid =

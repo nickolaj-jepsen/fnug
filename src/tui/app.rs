@@ -12,6 +12,7 @@ use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
 use crate::process::{ExitInfo, StopSignal};
 use crate::pty::terminal::Terminal;
+use crate::runner::DagState;
 use crate::selectors::watch::WatchMatch;
 use crate::selectors::{self, SelectOptions};
 
@@ -235,11 +236,11 @@ pub struct App {
     pub log_scroll: usize,
     /// Search / filter bar state
     pub search: SearchState,
-    /// Commands waiting for dependencies: `cmd_id` -> remaining dep IDs
-    pub(super) pending_deps: HashMap<String, Vec<String>>,
+    /// Which commands wait on which, and how each command's last run in this session ended
+    pub(super) dag: DagState,
     /// Active context menu (right-click)
     pub context_menu: Option<ContextMenu>,
-    /// Last known terminal area for dependency resolution
+    /// Last known terminal area, which sizes commands started once their dependencies pass
     pub last_terminal_area: Rect,
     /// Handle for in-flight async git selection task
     git_selection_handle: Option<JoinHandle<()>>,
@@ -322,7 +323,7 @@ impl App {
             log_buffer,
             log_scroll: 0,
             search: SearchState::Inactive,
-            pending_deps: HashMap::new(),
+            dag: DagState::new(),
             context_menu: None,
             last_terminal_area: Rect::default(),
             git_selection_handle: None,
@@ -362,10 +363,8 @@ impl App {
             self.cursor = first_failed;
         }
 
-        // In plan order, so dependencies start first (start_command handles the rest)
-        for id in &rerun {
-            self.start_command(id, terminal_area, true);
-        }
+        let focus = self.current_command_id();
+        self.run_commands(&rerun, terminal_area, focus.as_deref());
     }
 
     /// Synchronously apply always-selected commands (no I/O, instant)
@@ -443,6 +442,7 @@ impl App {
             selected: &self.selected,
             processes: &self.processes,
             error_messages: &self.error_messages,
+            dag: &self.dag,
             nodes: &mut self.visible_nodes,
             filter: self.search.query(),
         };
@@ -479,15 +479,15 @@ impl App {
                 match proc.status {
                     CommandStatus::Stopped => {
                         info!("Command '{id}' stopped");
-                        self.cancel_dependents(&id);
+                        self.mark_stopped(&id);
                     }
                     CommandStatus::Success => {
                         self.selected.remove(&id);
-                        // Check pending deps - start commands whose deps are now satisfied
-                        self.resolve_dependency(&id);
+                        self.dag.finish(&id, true);
                     }
-                    _ => self.fail_dependents(&id),
+                    _ => self.finish_failed(&id),
                 }
+                self.start_ready();
                 self.mark_tree_dirty();
                 self.check_batch_complete();
             }
@@ -503,8 +503,9 @@ impl App {
                 proc.finished_at = Some(Instant::now());
                 proc.status = CommandStatus::Error(message.clone());
                 self.error_messages.insert(id.clone(), message);
-                self.fail_dependents(&id);
+                self.finish_failed(&id);
                 self.mark_tree_dirty();
+                self.check_batch_complete();
             }
             AppEvent::WatcherTriggered(matches) => {
                 for m in matches {
@@ -549,75 +550,37 @@ impl App {
         proc
     }
 
-    /// Remove a satisfied dependency and start commands whose deps are all clear
-    fn resolve_dependency(&mut self, completed_id: &str) {
-        let mut ready = Vec::new();
-        for (cmd_id, deps) in &mut self.pending_deps {
-            deps.retain(|d| d != completed_id);
-            if deps.is_empty() {
-                ready.push(cmd_id.clone());
-            }
+    /// Record that the running command `failed_id` failed, and show why the commands waiting on
+    /// it, directly or not, won't run.
+    pub(super) fn finish_failed(&mut self, failed_id: &str) {
+        let skipped = self.dag.finish(failed_id, false);
+        if skipped.is_empty() {
+            return;
         }
-        for cmd_id in ready {
-            self.pending_deps.remove(&cmd_id);
-            self.start_command(&cmd_id, self.last_terminal_area, false);
-        }
-    }
-
-    /// Propagate failure to commands waiting on a failed dependency (recursive)
-    pub(super) fn fail_dependents(&mut self, failed_id: &str) {
-        let failed_id_owned = failed_id.to_string();
-        let dependents: Vec<String> = self
-            .pending_deps
-            .keys()
-            .filter(|cmd_id| {
-                self.pending_deps
-                    .get(*cmd_id)
-                    .is_some_and(|deps| deps.contains(&failed_id_owned))
-            })
-            .cloned()
-            .collect();
-        for cmd_id in dependents {
-            self.pending_deps.remove(&cmd_id);
-            let failed_name = self
-                .find_command(failed_id)
-                .map_or_else(|| failed_id.to_string(), |c| c.name.clone());
+        let failed_name = self
+            .find_command(failed_id)
+            .map_or_else(|| failed_id.to_string(), |c| c.name);
+        for (cmd_id, _) in skipped {
             let msg = format!("Dependency '{failed_name}' failed");
-            self.error_messages.insert(cmd_id.clone(), msg);
-            // Recursively fail any commands that depend on this one
-            self.fail_dependents(&cmd_id);
+            self.error_messages.insert(cmd_id, msg);
         }
     }
 
-    /// Drop queued runs that wait on `cancelled_id`, without marking them failed (recursive)
-    pub(super) fn cancel_dependents(&mut self, cancelled_id: &str) {
-        let dependents: Vec<String> = self
-            .pending_deps
-            .iter()
-            .filter(|(_, deps)| deps.iter().any(|d| d == cancelled_id))
-            .map(|(cmd_id, _)| cmd_id.clone())
-            .collect();
-        for cmd_id in dependents {
-            info!("Cancelled '{cmd_id}', which was waiting on '{cancelled_id}'");
-            self.pending_deps.remove(&cmd_id);
-            self.cancel_dependents(&cmd_id);
+    /// Record that the user stopped `stopped_id`: the commands waiting on it, directly or not,
+    /// won't run, and that is no failure.
+    pub(super) fn mark_stopped(&mut self, stopped_id: &str) {
+        for cmd_id in self.dag.stop(stopped_id) {
+            info!("Cancelled '{cmd_id}', which was waiting on '{stopped_id}'");
         }
     }
 
     /// Check if a batch run is complete and auto-focus first failure
-    fn check_batch_complete(&mut self) {
+    pub(super) fn check_batch_complete(&mut self) {
         let Some(ref batch_ids) = self.batch_run_ids else {
             return;
         };
 
-        // Check if all batch commands have finished (not running, not waiting)
-        let all_done = batch_ids.iter().all(|id| {
-            !self.pending_deps.contains_key(id)
-                && self
-                    .processes
-                    .get(id)
-                    .is_none_or(|p| !matches!(p.status, CommandStatus::Running))
-        });
+        let all_done = batch_ids.iter().all(|id| !self.dag.is_active(id));
 
         if !all_done {
             return;
@@ -916,12 +879,8 @@ impl App {
                         .filter(|c| self.selected.contains(&c.id))
                         .map(|c| c.id.clone())
                         .collect();
-                    for cmd_id in &selected_ids {
-                        self.start_command(cmd_id, terminal_area, false);
-                    }
-                    if let Some(first) = selected_ids.first() {
-                        self.active_terminal_id = Some(first.clone());
-                    }
+                    let focus = selected_ids.first().cloned();
+                    self.run_commands(&selected_ids, terminal_area, focus.as_deref());
                 }
             }
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Select) => {
@@ -936,7 +895,7 @@ impl App {
                 ContextMenuTarget::Command { id, .. },
                 ContextMenuAction::Run | ContextMenuAction::Restart,
             ) => {
-                self.start_command(id, terminal_area, true);
+                self.run_command(id, terminal_area);
             }
             (ContextMenuTarget::Command { id, .. }, ContextMenuAction::Stop) => {
                 self.stop_command(id);
@@ -967,7 +926,7 @@ impl App {
             }
             (ContextMenuTarget::Terminal, ContextMenuAction::Run | ContextMenuAction::Restart) => {
                 if let Some(id) = self.active_terminal_id.clone() {
-                    self.start_command(&id, terminal_area, true);
+                    self.run_command(&id, terminal_area);
                 }
             }
             (ContextMenuTarget::Terminal, ContextMenuAction::Stop) => {
@@ -1002,7 +961,7 @@ impl App {
             }
             ToolbarAction::Run => {
                 if let Some(id) = self.current_command_id() {
-                    self.start_command(&id, terminal_area, true);
+                    self.run_command(&id, terminal_area);
                 } else if let Some(id) = self.current_group_id() {
                     self.run_group(&id, terminal_area);
                 }

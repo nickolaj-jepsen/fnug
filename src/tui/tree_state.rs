@@ -1,5 +1,6 @@
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
+use crate::runner::{DagState, NodeState};
 use std::collections::{HashMap, HashSet};
 
 use super::app::{CommandStatus, ProcessInstance};
@@ -11,6 +12,7 @@ pub(super) struct TreeContext<'a> {
     pub selected: &'a HashSet<String>,
     pub processes: &'a HashMap<String, ProcessInstance>,
     pub error_messages: &'a HashMap<String, String>,
+    pub dag: &'a DagState,
     pub nodes: &'a mut Vec<VisibleNode>,
     pub filter: Option<&'a str>,
 }
@@ -57,7 +59,7 @@ pub(super) fn flatten_group(
 
     // Compute summary for group
     let total_count = count_commands(group);
-    let counts = count_status(group, ctx.selected, ctx.processes, ctx.error_messages);
+    let counts = count_status(group, ctx);
 
     ctx.nodes.push(VisibleNode {
         id: group.id.clone(),
@@ -121,6 +123,8 @@ pub(super) fn flatten_group(
             let is_selected = ctx.selected.contains(&cmd.id);
             let (status, duration) = if let Some(msg) = ctx.error_messages.get(&cmd.id) {
                 (CommandStatus::Error(msg.clone()), None)
+            } else if is_queued(ctx.dag, &cmd.id) {
+                (CommandStatus::WaitingForDeps, None)
             } else if let Some(proc) = ctx.processes.get(&cmd.id) {
                 let dur = proc
                     .finished_at
@@ -163,20 +167,25 @@ impl StatusCounts {
     }
 }
 
-fn count_status(
-    group: &CommandGroup,
-    selected_map: &HashSet<String>,
-    processes: &HashMap<String, ProcessInstance>,
-    error_messages: &HashMap<String, String>,
-) -> StatusCounts {
+/// Whether `id` is queued to run, such as behind its dependencies, but hasn't started.
+fn is_queued(dag: &DagState, id: &str) -> bool {
+    matches!(
+        dag.state(id),
+        Some(NodeState::Waiting(_) | NodeState::Ready)
+    )
+}
+
+fn count_status(group: &CommandGroup, ctx: &TreeContext<'_>) -> StatusCounts {
     let mut counts = StatusCounts::default();
     for cmd in &group.commands {
-        if selected_map.contains(&cmd.id) {
+        if ctx.selected.contains(&cmd.id) {
             counts.selected += 1;
         }
-        if error_messages.contains_key(&cmd.id) {
+        if ctx.error_messages.contains_key(&cmd.id) {
             counts.failure += 1;
-        } else if let Some(proc) = processes.get(&cmd.id) {
+        } else if is_queued(ctx.dag, &cmd.id) {
+            counts.running += 1;
+        } else if let Some(proc) = ctx.processes.get(&cmd.id) {
             match proc.status {
                 CommandStatus::Success => counts.success += 1,
                 CommandStatus::Running | CommandStatus::WaitingForDeps => counts.running += 1,
@@ -186,12 +195,7 @@ fn count_status(
         }
     }
     for child in &group.children {
-        counts.merge(&count_status(
-            child,
-            selected_map,
-            processes,
-            error_messages,
-        ));
+        counts.merge(&count_status(child, ctx));
     }
     counts
 }
