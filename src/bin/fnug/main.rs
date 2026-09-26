@@ -75,7 +75,7 @@ enum Commands {
 
 /// Exit code for a fnug error, such as a bad config or an unknown target, as opposed to a failed
 /// check (1). clap exits with it on usage errors too.
-const ERROR_EXIT: u8 = 2;
+pub(crate) const ERROR_EXIT: u8 = 2;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -149,12 +149,15 @@ async fn run(cli: Cli, logger: LoggerHandle) -> Result<ExitCode, Box<dyn std::er
     Ok(handoff_exit_code(check_failed, tui_code))
 }
 
+/// The exit code after the TUI closes: the TUI's own when it didn't end normally, as on a signal
+/// (128+n) or an error (2), otherwise the check's failure, so `fnug check && git push` stops.
 fn handoff_exit_code(check_failed: bool, tui_code: ExitCode) -> ExitCode {
-    // Keep the check's failure after the TUI closes, so `fnug check && git push` stops.
-    if check_failed {
+    if tui_code != ExitCode::SUCCESS {
+        tui_code
+    } else if check_failed {
         ExitCode::FAILURE
     } else {
-        tui_code
+        ExitCode::SUCCESS
     }
 }
 
@@ -259,6 +262,16 @@ mod tests {
             handoff_exit_code(false, ExitCode::FAILURE),
             ExitCode::FAILURE
         );
+    }
+
+    #[test]
+    fn handoff_signal_and_error_win_over_check_failure() {
+        for code in [143, 129, ERROR_EXIT] {
+            assert_eq!(
+                handoff_exit_code(true, ExitCode::from(code)),
+                ExitCode::from(code)
+            );
+        }
     }
 
     // Hooks installed by 0.1.0-alpha.11..13 put the flag after the subcommand.
