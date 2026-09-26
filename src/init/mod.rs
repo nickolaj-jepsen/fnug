@@ -11,7 +11,7 @@ use inquire::list_option::ListOption;
 use log::warn;
 use thiserror::Error;
 
-use crate::config_file::{ConfigCommandGroup, WorkspaceConfig, find_config_in_dir};
+use crate::config_file::{Config, ConfigCommandGroup, WorkspaceConfig, find_config_in_dir};
 use crate::setup::fsutil;
 
 pub use detect::{Proposal, detect};
@@ -203,7 +203,33 @@ pub fn run(
     // Again, in case a config appeared while `choose` asked
     let config = prepare_at(target_for(opts, &dir)?, &dir, groups, None)?;
     config.write()?;
+    warn_if_shadowing(&config.path);
     Ok(config.path)
+}
+
+/// Warn if `created`, a config fnug finds by searching, hides the one in a parent directory
+/// that isn't a workspace root, which fnug run there or below then no longer loads.
+fn warn_if_shadowing(created: &Path) {
+    let Some(dir) = created.parent() else {
+        return;
+    };
+    if find_config_in_dir(dir).as_deref() != Some(created) {
+        return;
+    }
+    let Some(parent) = dir.ancestors().skip(1).find_map(find_config_in_dir) else {
+        return;
+    };
+    let is_root = |ws: &WorkspaceConfig| !matches!(ws, WorkspaceConfig::Enabled(false));
+    match Config::from_file(&parent) {
+        Ok(config) if !config.workspace.as_ref().is_some_and(is_root) => warn!(
+            "{} isn't a workspace root, so fnug run in {} or below now loads only {}; add \
+             `workspace: true` to it to load both",
+            parent.display(),
+            dir.display(),
+            created.display()
+        ),
+        _ => {}
+    }
 }
 
 fn warn_nothing_detected(dir: &Path) {
