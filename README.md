@@ -95,7 +95,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--all`           | Include commands with `auto.check: false` (`check` only)        |
 | `-V`, `--version` | Print fnug's version                                            |
 
-`-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. Warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable also lowers the stderr threshold. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
+`-c`, `--no-workspace`, `--root`, `--log-file` and `--log-level` work with every subcommand. By default, warnings and errors, such as a config that needs a newer fnug, go to stderr in every mode, except while the TUI is open; then they show in its log panel (`L`). `--log-level` or the `FNUG_LOG` environment variable sets the stderr level too: `info` or `debug` shows more, and `error` or `off` hides warnings. fnug never logs to stdout, which `fnug mcp` uses for the protocol.
 
 ### Setup
 
