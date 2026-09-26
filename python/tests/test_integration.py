@@ -42,6 +42,58 @@ def git_repo(tmp_path):
     return repo.resolve()
 
 
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True)  # noqa: S607
+
+
+@pytest.fixture
+def isolated_git(monkeypatch):
+    """Ignore the user's git config, and commit as a fixed identity."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "test")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "test@example.com")
+    for var in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.usefixtures("real_fnug", "isolated_git")
+def test_integration_base_and_stash_with_config_object(git_repo, monkeypatch, capfd):
+    src = git_repo / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("ok\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "init")
+    monkeypatch.chdir(git_repo)
+    config = Config(
+        name="demo",
+        commands=[
+            Command(
+                name="lint",
+                cmd="! grep -rn BAD src/",
+                auto=Auto(git=True, path=["src"]),
+            ),
+        ],
+    )
+
+    (src / "a.txt").write_text("ok\nfine\n")
+    result = fnug.check(config, base="HEAD", no_tui=True)
+    output = capfd.readouterr()
+    assert result.returncode == 0, output
+    assert "lint PASS" in output.err
+
+    # BAD is staged, and gone from the work tree
+    (src / "a.txt").write_text("ok\nBAD\n")
+    _git(git_repo, "add", "src/a.txt")
+    (src / "a.txt").write_text("ok\n")
+    result = fnug.check(config, staged=True, stash=True, no_tui=True)
+    output = capfd.readouterr()
+    assert result.returncode == 1, output
+    assert "src/a.txt:2:BAD" in output.err
+    assert (src / "a.txt").read_text() == "ok\n"
+
+
 @pytest.mark.usefixtures("real_fnug")
 def test_integration_git_selection_from_caller_repo(git_repo, monkeypatch, capfd):
     (git_repo / "changed.txt").write_text("hello\n")
