@@ -125,8 +125,8 @@ struct LockState {
 /// index has conflicts, `StashError::Stale` if a stopped run's changes can't be put back, and
 /// another error if git fails. Whatever was set aside by then is put back.
 pub fn stash(cwd: &Path) -> Result<StashGuard, StashError> {
-    let (git, git_dir) = Git::locate(cwd)?;
-    let lock = git_dir.join(LOCK_NAME);
+    let git = Git::locate(cwd)?;
+    let lock = git.git_dir.join(LOCK_NAME);
     let recovered = acquire(&git, &lock)?;
     let mut guard = StashGuard {
         git,
@@ -139,7 +139,7 @@ pub fn stash(cwd: &Path) -> Result<StashGuard, StashError> {
         recovered,
         done: false,
     };
-    if let Err(e) = guard.set_aside(&git_dir) {
+    if let Err(e) = guard.set_aside() {
         guard.done = true;
         if let Err(undo) = guard.put_back() {
             error!("{undo}");
@@ -157,8 +157,8 @@ pub fn stash(cwd: &Path) -> Result<StashGuard, StashError> {
 ///
 /// As for [`stash`].
 pub fn recover(cwd: &Path) -> Result<Option<RestoreNote>, StashError> {
-    let (git, git_dir) = Git::locate(cwd)?;
-    let lock = git_dir.join(LOCK_NAME);
+    let git = Git::locate(cwd)?;
+    let lock = git.git_dir.join(LOCK_NAME);
     let Some(state) = read_lock(&lock)? else {
         return Ok(None);
     };
@@ -172,8 +172,7 @@ pub fn recover(cwd: &Path) -> Result<Option<RestoreNote>, StashError> {
 /// are still set aside until [`stash`] or [`recover`] runs there.
 #[must_use]
 pub fn pending(cwd: &Path) -> Option<PathBuf> {
-    let (_, git_dir) = Git::locate(cwd).ok()?;
-    let lock = git_dir.join(LOCK_NAME);
+    let lock = Git::locate(cwd).ok()?.git_dir.join(LOCK_NAME);
     let state = read_lock(&lock).ok()??;
     (!pid_alive(state.pid)).then_some(lock)
 }
@@ -200,7 +199,7 @@ impl StashGuard {
         self.put_back()
     }
 
-    fn set_aside(&mut self, git_dir: &Path) -> Result<(), StashError> {
+    fn set_aside(&mut self) -> Result<(), StashError> {
         if !self.git.run(&["ls-files", "-u", "-z"])?.is_empty() {
             return Err(StashError::Unmerged);
         }
@@ -221,7 +220,7 @@ impl StashGuard {
         let Some(diff) = self.git.unstaged_diff(&tree, &[])? else {
             return Ok(());
         };
-        self.state.patch = Some(save_patch(git_dir, &diff)?);
+        self.state.patch = Some(save_patch(&self.git.git_dir, &diff)?);
         self.state.tree = Some(tree);
         write_lock(&self.lock, &self.state)?;
 
@@ -429,29 +428,31 @@ fn recover_stale(
     Ok(note)
 }
 
-/// Runs git at the top of one work tree, in its own process group, so the terminal's Ctrl+C
-/// can't stop it halfway through rewriting the work tree.
+/// Runs git on one work tree, named explicitly, from its top and in its own process group, so
+/// the terminal's Ctrl+C can't stop it halfway through rewriting the work tree.
 struct Git {
     toplevel: PathBuf,
+    git_dir: PathBuf,
 }
 
 impl Git {
-    /// The work tree containing `cwd`, and its git dir.
-    fn locate(cwd: &Path) -> Result<(Self, PathBuf), StashError> {
-        let git = Git {
-            toplevel: cwd.to_path_buf(),
-        };
-        let out = git.run(&["rev-parse", "--show-toplevel", "--absolute-git-dir"])?;
-        let mut lines = out.split(|&b| b == b'\n');
-        let (Some(toplevel), Some(git_dir)) = (lines.next(), lines.next()) else {
-            return Err(StashError::Git {
-                args: "rev-parse --show-toplevel --absolute-git-dir".into(),
-                stderr: "unexpected output".into(),
-            });
-        };
-        let toplevel = PathBuf::from(OsStr::from_bytes(toplevel));
-        let git_dir = PathBuf::from(OsStr::from_bytes(git_dir));
-        Ok((Git { toplevel }, git_dir))
+    /// The work tree containing `cwd`.
+    fn locate(cwd: &Path) -> Result<Self, StashError> {
+        let found = locate_from(cwd, false)?;
+        // git hands hooks an absolute GIT_DIR when `.git` is a file, as in a linked worktree,
+        // and without GIT_WORK_TREE git takes `cwd`, such as the config's directory, as the
+        // top. Found without it, the same git dir tells the real top.
+        if std::env::var_os("GIT_DIR").is_some_and(|d| !d.is_empty())
+            && std::env::var_os("GIT_WORK_TREE").is_none()
+        {
+            let rediscovered = locate_from(cwd, true)
+                .ok()
+                .filter(|git| same_file(&git.git_dir, &found.git_dir));
+            if let Some(rediscovered) = rediscovered {
+                return Ok(rediscovered);
+            }
+        }
+        Ok(found)
     }
 
     fn command<S: AsRef<OsStr>>(&self, args: &[S]) -> Command {
@@ -459,6 +460,8 @@ impl Git {
         command
             .args(args)
             .current_dir(&self.toplevel)
+            .env("GIT_DIR", &self.git_dir)
+            .env("GIT_WORK_TREE", &self.toplevel)
             .stdin(Stdio::null())
             .process_group(0);
         command
@@ -640,6 +643,41 @@ impl Git {
         }
         Ok(false)
     }
+}
+
+/// The work tree git finds from `cwd` with the environment fnug inherited, or with `GIT_DIR`
+/// removed when `ignore_git_dir` is set.
+fn locate_from(cwd: &Path, ignore_git_dir: bool) -> Result<Git, StashError> {
+    const ARGS: [&str; 3] = ["rev-parse", "--show-toplevel", "--absolute-git-dir"];
+    let mut command = Command::new("git");
+    command
+        .args(ARGS)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .process_group(0);
+    if ignore_git_dir {
+        command.env_remove("GIT_DIR");
+    }
+    let output = command.output().map_err(StashError::Spawn)?;
+    if !output.status.success() {
+        return Err(git_error(&ARGS, &output));
+    }
+    let mut lines = output.stdout.split(|&b| b == b'\n');
+    let (Some(toplevel), Some(git_dir)) = (lines.next(), lines.next()) else {
+        return Err(StashError::Git {
+            args: ARGS.join(" "),
+            stderr: "unexpected output".into(),
+        });
+    };
+    Ok(Git {
+        toplevel: PathBuf::from(OsStr::from_bytes(toplevel)),
+        git_dir: PathBuf::from(OsStr::from_bytes(git_dir)),
+    })
+}
+
+/// Whether `a` and `b` name the same existing file or directory.
+fn same_file(a: &Path, b: &Path) -> bool {
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 /// `paths` split into runs short enough for one command line, in order; a single empty run if

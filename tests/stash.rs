@@ -647,3 +647,105 @@ fn stash_in_commit_hook_checks_what_is_committed() {
     assert_eq!(git(dir, &["show", "HEAD:src/a.py"]), "ok\nfine\nmore\n");
     assert_clean_git_dir(dir);
 }
+
+/// Records, in `$SEEN`, what the command sees as `a.txt` and which files its directory holds.
+const SUB_RECORD: &str = r#"
+name: sub
+commands:
+  - name: record
+    cmd: 'cat a.txt > "$SEEN"; ls >> "$SEEN"'
+    auto:
+      always: true
+"#;
+
+/// Files for [`commit_in_sub_sees_staged_content`]: an `a.txt` at the top too, which a
+/// checkout relative to `sub/` would put there.
+const SUB_FILES: &[(&str, &str)] = &[("a.txt", "top\n"), ("sub/a.txt", "sub\n")];
+
+/// Commit through the pre-commit hook `fnug setup` installs for a config in `top/sub`, where
+/// `sub/a.txt` has staged and unstaged changes, and check that the command saw exactly the
+/// staged `sub/a.txt`. `git_dir` is the work tree's own git dir.
+fn commit_in_sub_sees_staged_content(top: &Path, git_dir: &Path) {
+    use fnug::setup::hooks;
+
+    write(top, "sub/a.txt", "sub staged\n");
+    git(top, &["add", "sub/a.txt"]);
+    write(top, "sub/a.txt", "sub staged\nunstaged\n");
+
+    // The hook runs whichever `fnug` is first on PATH
+    let bin = top.parent().unwrap().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fnug"), bin.join("fnug")).unwrap();
+    let opts = hooks::InstallOptions {
+        no_workspace: true,
+        ..hooks::InstallOptions::default()
+    };
+    hooks::install_with(&hooks::resolve(&top.join("sub")).unwrap(), &opts).unwrap();
+
+    let seen = top.parent().unwrap().join("seen");
+    let path = std::env::var("PATH").unwrap_or_default();
+    let output = common::git::command(top)
+        .args(["commit", "-qm", "sub"])
+        .env("PATH", format!("{}:{path}", bin.display()))
+        .env("SEEN", &seen)
+        .env_remove("FNUG_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", printed(&output));
+    // Not the top's a.txt, nor a copy of the index under sub/
+    assert_eq!(read(&seen), "sub staged\na.txt\n", "{}", printed(&output));
+    assert_eq!(git(top, &["show", "HEAD:sub/a.txt"]), "sub staged\n");
+    assert_eq!(read(&top.join("sub/a.txt")), "sub staged\nunstaged\n");
+    assert_eq!(read(&top.join("a.txt")), "top\n");
+    assert!(!top.join("sub/sub").exists());
+    assert!(!git_dir.join("fnug-stash.lock").exists());
+}
+
+#[test]
+fn stash_hook_in_linked_worktree_with_config_in_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("main");
+    std::fs::create_dir(&main).unwrap();
+    if !repo(&main, "name: root\n", SUB_FILES) {
+        return;
+    }
+    common::write_config(&main.join("sub"), SUB_RECORD);
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-qm", "sub config"]);
+    // Absolute, since a linked worktree's `.git` is a file
+    let hooks = main.join(".git/hooks");
+    git(
+        &main,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let wt = tmp.path().join("wt");
+    git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+
+    commit_in_sub_sees_staged_content(&wt, &main.join(".git/worktrees/wt"));
+}
+
+#[test]
+fn stash_hook_in_separate_git_dir_with_config_in_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    if !common::git::available() {
+        return;
+    }
+    let top = tmp.path().join("wt");
+    let git_dir = tmp.path().join("gd");
+    let (top_arg, git_dir_arg) = (top.to_str().unwrap(), git_dir.to_str().unwrap());
+    git(
+        tmp.path(),
+        &["init", "-q", "--separate-git-dir", git_dir_arg, top_arg],
+    );
+    let hooks = git_dir.join("hooks");
+    git(&top, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    for (path, content) in SUB_FILES {
+        write(&top, path, content);
+    }
+    common::write_config(&top.join("sub"), SUB_RECORD);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "init"]);
+
+    commit_in_sub_sees_staged_content(&top, &git_dir);
+}
