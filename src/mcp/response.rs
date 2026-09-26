@@ -2,7 +2,7 @@
 //!
 //! A run's result is a compact JSON summary that lists failures first, followed by a text block
 //! with the output of each command that failed or timed out, and with `verbose` also of those
-//! that passed or were cancelled.
+//! that passed or were cancelled, as many as fit the result's size limits.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use std::time::Duration;
 use rmcp::model::{CallToolResult, Content};
 use serde::Serialize;
 
-use super::text::{self, Capped, Gap};
+use super::text::{self, Gap};
 use crate::commands::command::Command;
 use crate::process::ExitInfo;
 use crate::runner::{
@@ -21,12 +21,19 @@ use crate::selectors::{SelectedBy, SelectedCommand};
 
 /// Output a result keeps of one command: a fifth from its start, the rest from its end.
 const OUTPUT_PER_COMMAND: usize = 20 * 1024;
-/// Output a result keeps of all its commands together.
+/// Size of a result's text blocks together, their headers and omission markers included.
 const OUTPUT_TOTAL: usize = 60 * 1024;
-/// Matched files a result lists per command.
+/// Output a command's block keeps at least, when it has that much; commands after one that
+/// doesn't fit that get no block.
+const MIN_OUTPUT: usize = 512;
+/// Size of the JSON summary at most; entries at the end of its command list make way.
+const SUMMARY_MAX: usize = 16 * 1024;
+/// Matched files a result lists per command, and changed files a failure lists.
 const MAX_FILES: usize = 5;
 /// Ids a message lists.
 const MAX_IDS: usize = 10;
+/// Warnings a summary lists.
+const MAX_WARNINGS: usize = 10;
 
 /// Which commands a run tool asked for.
 #[derive(Debug, Clone)]
@@ -149,6 +156,9 @@ struct Summary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     commands: Vec<CommandSummary>,
+    /// Entries left out at the end of `commands`, to keep the summary within [`SUMMARY_MAX`].
+    #[serde(skip_serializing_if = "is_zero")]
+    commands_omitted: usize,
 }
 
 #[derive(Serialize)]
@@ -175,7 +185,7 @@ struct CommandSummary {
     /// Bytes of output the command wrote.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_bytes: Option<u64>,
-    /// Bytes of its output left out of its text block.
+    /// Bytes of its output left out of its text block, or all of them when it got none.
     #[serde(skip_serializing_if = "is_zero")]
     truncated_bytes: u64,
 }
@@ -220,22 +230,37 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
     order.sort_by_key(|&i| rank(&entries[i].1.outcome));
 
     // Failures get the output budget first
-    let failures = shown_outputs(&entries, &order, OUTPUT_TOTAL, is_failure);
-    let left = OUTPUT_TOTAL.saturating_sub(failures.iter().map(|(_, c)| c.text.len()).sum());
-    let extras = if verbose {
-        shown_outputs(&entries, &order, left, |outcome| {
+    let mut shown = blocks(&entries, &order, OUTPUT_TOTAL, is_failure);
+    let failures_left_out: Vec<String> = shown
+        .left_out
+        .iter()
+        .map(|&(i, _)| entries[i].1.id.clone())
+        .collect();
+    if verbose {
+        let left = OUTPUT_TOTAL.saturating_sub(shown.size());
+        let extras = blocks(&entries, &order, left, |outcome| {
             matches!(outcome, Outcome::Passed | Outcome::Cancelled)
-        })
-    } else {
-        Vec::new()
-    };
-    let mut shown: Vec<(usize, Capped)> = failures.into_iter().chain(extras).collect();
-    shown.sort_by_key(|(i, _)| (rank(&entries[*i].1.outcome), *i));
+        });
+        shown.blocks.extend(extras.blocks);
+        shown.left_out.extend(extras.left_out);
+    }
+    shown
+        .blocks
+        .sort_by_key(|block| (rank(&entries[block.index].1.outcome), block.index));
 
+    let mut message = message(scope, plan, report, selectable);
+    if !failures_left_out.is_empty() {
+        let _ = write!(
+            message,
+            " Output of {} of them is left out to keep the result small: {}; run_lint shows it.",
+            failures_left_out.len(),
+            list_ids(&failures_left_out)
+        );
+    }
     let counts = report.counts();
-    let summary = Summary {
+    let mut summary = Summary {
         ok: report.success(),
-        message: message(scope, plan, report, selectable),
+        message,
         total: counts.total,
         passed: counts.passed,
         failed: counts.failed,
@@ -246,32 +271,76 @@ pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error>
         duration_ms: report.duration.as_millis(),
         queued_ms: queued.map(|q| q.as_millis()),
         changed_files: matches!(scope, RunScope::Changes { .. }).then_some(plan.changed_files),
-        warnings: plan.warnings.clone(),
+        warnings: capped_warnings(&plan.warnings),
         commands: order
             .iter()
             .map(|&i| {
-                let truncated = shown
-                    .iter()
-                    .find(|(j, _)| *j == i)
-                    .map_or(0, |(_, capped)| capped.omitted);
                 command_summary(
                     entries[i].0,
                     entries[i].1,
                     root,
                     report.cancelled,
-                    truncated,
+                    shown.omitted(i),
                 )
             })
             .collect(),
+        commands_omitted: 0,
     };
 
-    let mut content = vec![Content::text(serde_json::to_string(&summary)?)];
+    let mut content = vec![Content::text(summary_json(&mut summary)?)];
     content.extend(
         shown
-            .iter()
-            .map(|(i, capped)| Content::text(block(entries[*i].1, capped))),
+            .blocks
+            .into_iter()
+            .map(|block| Content::text(block.text)),
     );
     Ok(CallToolResult::success(content))
+}
+
+/// Serialize `summary`, leaving out as few entries at the end of its command list as keep it
+/// within [`SUMMARY_MAX`]; its message and `commands_omitted` then say how many.
+fn summary_json(summary: &mut Summary) -> Result<String, serde_json::Error> {
+    let json = serde_json::to_string(summary)?;
+    if json.len() <= SUMMARY_MAX {
+        return Ok(json);
+    }
+    let mut commands = std::mem::take(&mut summary.commands);
+    let message = std::mem::take(&mut summary.message);
+    let note = |omitted: usize| {
+        format!(
+            "{message} To keep the result small, the commands list leaves out its last \
+             {omitted} entries."
+        )
+    };
+    // Sized for leaving out every entry, the count with the most digits
+    summary.message = note(commands.len());
+    summary.commands_omitted = commands.len();
+    let mut size = serde_json::to_string(summary)?.len();
+    let mut kept = 0;
+    for command in &commands {
+        size += serde_json::to_string(command)?.len() + 1;
+        if size > SUMMARY_MAX {
+            break;
+        }
+        kept += 1;
+    }
+    summary.commands_omitted = commands.len() - kept;
+    summary.message = note(summary.commands_omitted);
+    commands.truncate(kept);
+    summary.commands = commands;
+    serde_json::to_string(summary)
+}
+
+/// Up to [`MAX_WARNINGS`] of `warnings`, then how many more there are.
+fn capped_warnings(warnings: &[String]) -> Vec<String> {
+    let mut capped: Vec<String> = warnings.iter().take(MAX_WARNINGS).cloned().collect();
+    if warnings.len() > MAX_WARNINGS {
+        capped.push(format!(
+            "… and {} more warnings",
+            warnings.len() - MAX_WARNINGS
+        ));
+    }
+    capped
 }
 
 /// Where a command goes in the result: failures first, passes last.
@@ -289,29 +358,113 @@ fn is_failure(outcome: &Outcome) -> bool {
     matches!(outcome, Outcome::Failed(_) | Outcome::TimedOut(_))
 }
 
-/// The cleaned output of each command, in `order`, whose outcome `show` picks, capped to share
-/// `total` bytes.
-fn shown_outputs(
+/// A command's text block.
+struct Block {
+    /// Into the run's entries.
+    index: usize,
+    text: String,
+    /// Bytes of the command's output left out of `text`.
+    omitted: u64,
+}
+
+/// The text blocks of some of a run's commands, and those left out for want of room.
+#[derive(Default)]
+struct Shown {
+    blocks: Vec<Block>,
+    /// Entry indices of commands without a block, with the size of their output.
+    left_out: Vec<(usize, u64)>,
+}
+
+impl Shown {
+    fn size(&self) -> usize {
+        self.blocks.iter().map(|block| block.text.len()).sum()
+    }
+
+    /// Bytes of entry `index`'s output left out of the result.
+    fn omitted(&self, index: usize) -> u64 {
+        if let Some(block) = self.blocks.iter().find(|block| block.index == index) {
+            return block.omitted;
+        }
+        self.left_out
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map_or(0, |(_, bytes)| *bytes)
+    }
+}
+
+/// The blocks of the commands in `order` whose outcome `show` picks, together at most `total`
+/// bytes: each holds a header and at most [`OUTPUT_PER_COMMAND`] of cleaned output, with a
+/// marker line where some is left out. Once a command's block can't get [`MIN_OUTPUT`] of its
+/// output, it and the commands after it get none.
+fn blocks(
     entries: &[(&PlannedCommand, &CommandReport)],
     order: &[usize],
     total: usize,
     show: impl Fn(&Outcome) -> bool,
-) -> Vec<(usize, Capped)> {
-    let picked: Vec<(usize, (String, Option<Gap>))> = order
+) -> Shown {
+    struct Picked {
+        index: usize,
+        header: String,
+        output: String,
+        gap: Option<Gap>,
+        /// The header, and room for a marker line unless there is no output at all.
+        fixed: usize,
+    }
+    let picked = order
         .iter()
         .filter(|&&i| show(&entries[i].1.outcome))
         .map(|&i| {
-            let output = entries[i].1.output.as_ref();
-            (i, output.map(text::clean_captured).unwrap_or_default())
-        })
-        .collect();
-    let lengths: Vec<usize> = picked.iter().map(|(_, (text, _))| text.len()).collect();
-    let budgets = text::budgets(&lengths, OUTPUT_PER_COMMAND, total);
-    picked
+            let report = entries[i].1;
+            let (output, gap) = report
+                .output
+                .as_ref()
+                .map(text::clean_captured)
+                .unwrap_or_default();
+            let empty = output.is_empty() && gap.is_none();
+            let header = header(report, empty);
+            let marker = if empty {
+                0
+            } else {
+                text::marker_room(&output, gap)
+            };
+            Picked {
+                index: i,
+                fixed: header.len() + marker,
+                header,
+                output,
+                gap,
+            }
+        });
+
+    let mut shown = Shown::default();
+    let mut kept: Vec<Picked> = Vec::new();
+    let mut floor = 0;
+    for p in picked {
+        floor += p.fixed + p.output.len().min(MIN_OUTPUT);
+        if floor > total || !shown.left_out.is_empty() {
+            let bytes = p.output.len() as u64 + p.gap.map_or(0, |gap| gap.bytes);
+            shown.left_out.push((p.index, bytes));
+        } else {
+            kept.push(p);
+        }
+    }
+
+    let fixed: usize = kept.iter().map(|p| p.fixed).sum();
+    let lengths: Vec<usize> = kept.iter().map(|p| p.output.len()).collect();
+    let budgets = text::budgets(&lengths, OUTPUT_PER_COMMAND, total - fixed);
+    shown.blocks = kept
         .into_iter()
         .zip(budgets)
-        .map(|((i, (output, gap)), budget)| (i, text::cap(&output, gap, budget)))
-        .collect()
+        .map(|(p, budget)| {
+            let capped = text::cap(&p.output, p.gap, budget);
+            Block {
+                index: p.index,
+                text: p.header + &capped.text,
+                omitted: capped.omitted,
+            }
+        })
+        .collect();
+    shown
 }
 
 fn command_summary(
@@ -388,8 +541,15 @@ fn describe(outcome: &Outcome) -> String {
         }
         Outcome::Failed(Failure::Spawn(_)) => "failed to start".into(),
         Outcome::Failed(Failure::Modified(files)) => {
-            let files: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
-            format!("failed: it changed tracked files: {}", files.join(", "))
+            let mut list: Vec<String> = files
+                .iter()
+                .take(MAX_FILES)
+                .map(|f| f.display().to_string())
+                .collect();
+            if files.len() > MAX_FILES {
+                list.push(format!("and {} more", files.len() - MAX_FILES));
+            }
+            format!("failed: it changed tracked files: {}", list.join(", "))
         }
         Outcome::TimedOut(limit) => {
             format!("timed out after {}", humantime::format_duration(*limit))
@@ -400,25 +560,25 @@ fn describe(outcome: &Outcome) -> String {
     }
 }
 
-/// A command's text block: a `###` header saying how it ended, then its output.
-fn block(report: &CommandReport, output: &Capped) -> String {
-    let mut block = if report.name == report.id {
+/// The start of a command's text block: a `###` line saying how it ended, then why it failed to
+/// start, or `(no output)` if it has `no_output`.
+fn header(report: &CommandReport, no_output: bool) -> String {
+    let mut header = if report.name == report.id {
         format!("### {}", report.id)
     } else {
         format!("### {} ({})", report.name, report.id)
     };
-    let _ = write!(block, ": {}", describe(&report.outcome));
+    let _ = write!(header, ": {}", describe(&report.outcome));
     if let Some(duration) = report.duration {
-        let _ = write!(block, " ({:.1}s)", duration.as_secs_f64());
+        let _ = write!(header, " ({:.1}s)", duration.as_secs_f64());
     }
-    block.push('\n');
+    header.push('\n');
     if let Outcome::Failed(Failure::Spawn(message)) = &report.outcome {
-        let _ = writeln!(block, "{message}");
-    } else if output.text.is_empty() {
-        block.push_str("(no output)\n");
+        let _ = writeln!(header, "{message}");
+    } else if no_output {
+        header.push_str("(no output)\n");
     }
-    block.push_str(&output.text);
-    block
+    header
 }
 
 fn plural(n: usize) -> &'static str {
