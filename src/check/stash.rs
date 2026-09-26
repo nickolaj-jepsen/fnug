@@ -166,13 +166,32 @@ pub fn recover(cwd: &Path) -> Result<Option<RestoreNote>, StashError> {
     recover_stale(&git, &lock, &state)
 }
 
-/// The lock a stopped run left in the work tree containing `cwd`, if any: its unstaged changes
-/// are still set aside until [`stash`] or [`recover`] runs there.
+/// The lock a stopped run left in the work tree containing `cwd`, if it still has unstaged
+/// changes set aside, which stay so until [`stash`] or [`recover`] runs there.
 #[must_use]
 pub fn pending(cwd: &Path) -> Option<PathBuf> {
-    let lock = Git::locate(cwd).ok()?.git_dir.join(LOCK_NAME);
+    let git = Git::locate(cwd).ok()?;
+    let lock = git.git_dir.join(LOCK_NAME);
     let state = read_lock(&lock).ok()??;
-    (!pid_alive(state.pid)).then_some(lock)
+    (!pid_alive(state.pid) && left_set_aside(&git, &state)).then_some(lock)
+}
+
+/// Whether a stopped run that recorded `state` left something set aside: intent-to-add entries
+/// out of the index, or a patch the files it changes don't hold. When unsure, it did.
+fn left_set_aside(git: &Git, state: &LockState) -> bool {
+    if !state.intent_to_add.is_empty() {
+        return true;
+    }
+    let Some(patch) = state.patch.as_ref().filter(|p| p.is_file()) else {
+        // Without the file, the stopped run had already put the changes back
+        return false;
+    };
+    let Some(tree) = state.tree.as_deref() else {
+        return true;
+    };
+    SavedPatch::read(git, patch)
+        .and_then(|saved| saved.compare(git, tree))
+        .map_or(true, |files| files != WorkTree::Patched)
 }
 
 impl StashGuard {
