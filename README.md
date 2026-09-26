@@ -164,6 +164,7 @@ If the checkout belongs to another user than the one running fnug, as in some co
 - It works on the repository that contains the current directory, as `--staged` does, not the one that contains the config file. It covers that whole repository, even when the hook runs fnug from a subdirectory, and works the same in a linked worktree, a submodule or a repository with a separate git directory. In a workspace, other repositories, such as submodules, aren't touched.
 - When a command changes a file that also has unstaged changes, as a formatter can, fnug always discards the command's changes to that file when it puts yours back, even when the two don't overlap, and says so: `Commands changed files that also have unstaged changes, so their changes to those files were discarded to put yours back.` Its changes to files without unstaged changes stay. Unless you pass `--allow-modifications`, the command has already failed for changing files.
 - fnug deletes the patch once the files it changes hold exactly your changes again. Otherwise it keeps the patch and prints its path.
+- A TUI open in the same worktree waits while a `fnug check --stash` runs, such as the pre-commit hook: the files the checkout and the restore change don't select commands or start `auto.run_on_change` runs, a config reload (from a saved config file or `F5`) is put off, and the toolbar says `Waiting for fnug check --stash to finish`. Once the run has ended, which the TUI checks about once a second, it reloads the config once if a config file changed, then selects what the changed files select and auto-runs those commands, on the final content.
 - A signal doesn't stop fnug before it has put the changes back. If fnug is killed with SIGKILL, the next `fnug check --staged --stash` in that worktree puts them back first. When the files they change have changed since, it keeps the patch, says how to apply it by hand and exits with 2. Until then, other `fnug check` runs warn that changes are still set aside. Only one such run works on a worktree at a time; another one exits with 2. Linked worktrees of one repository don't wait for each other.
 
 ### Init
@@ -269,7 +270,7 @@ commands:
         - "\\.rs$"
 ```
 
-Add `run_on_change: true` to also run the command when a change selects it, as bacon or cargo-watch do. Like the other `auto` keys, it is inherited by child groups and commands. A change while the command is queued or running gets it one more run once that run ends, and changes in the second after an automatic run ends are ignored, so the files a formatter or `clippy --fix` writes don't start it again right away. A change during the run can still start one extra run. Press `w` in the TUI to turn this off, and on again, for the session.
+Add `run_on_change: true` to also run the command when a change selects it, as bacon or cargo-watch do. It needs `watch: true` too: without it no change selects the command, so it never runs on its own. Like the other `auto` keys, it is inherited by child groups and commands. A change while the command is queued or running gets it one more run once that run ends, and changes in the second after an automatic run ends are ignored, so the files a formatter or `clippy --fix` writes don't start it again right away. A change during the run can still start one extra run. Press `w` in the TUI to turn this off, and on again, for the session; the toolbar shows `w Auto-run` only when some command has both `watch` and `run_on_change`.
 
 ### Always auto-selection
 
@@ -384,7 +385,9 @@ commands:
       regex: ["\\.py$"]
 ```
 
-A command without such a list gets no `FNUG_FILES`, and `{files}` becomes its `auto.path` entries (`.` for its own `cwd`, or when it has none), so it checks everything it covers. That happens when you name it or pass `--all`, when it runs only as another command's dependency, when it has no `auto.git`, when all its matched files were deleted, and, with a warning, when the list is longer than 100 KiB. The TUI doesn't pass file lists yet.
+A command without such a list gets no `FNUG_FILES`, and `{files}` becomes its `auto.path` entries (`.` for its own `cwd`, or when it has none), so it checks everything it covers. That happens when you name it or pass `--all`, when it runs only as another command's dependency, when it has no `auto.git`, when all its matched files were deleted, and, with a warning, when the list is longer than 100 KiB.
+
+In the TUI, a command that git selected gets the files git matched when you run it (`Enter`, `r` or a group run), and one the file watcher selected gets the files that changed since it last passed, `auto.run_on_change` runs included; a change while it runs adds to the files of the rerun queued for it. A command you selected by hand, one selected by `auto.always` or by a failed `fnug check` that opened the TUI, one that isn't selected, and one that runs only as another's dependency get the `auto.path` fallback.
 
 ### Ids and dependencies
 
@@ -538,7 +541,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`); they may not exist yet |
 | `regex`  | list of strings   | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)      |
 | `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
-| `run_on_change` | bool         | In the TUI, run the command when a watched change selects it (default `false`) |
+| `run_on_change` | bool         | In the TUI, run the command when a watched change selects it; needs `watch` (default `false`) |
 
 A changed file selects a command when it is under one of its `path` entries and matches one of its `regex` patterns (any file, if there are none). The patterns see the file's path relative to the command's `cwd`, such as `src/main.rs`, or `../shared/lib.rs` for a file outside it. Anchor with `^` to match from the `cwd` (`^tests/`), or write `(^|/)tests/` to match a directory at any depth.
 
@@ -595,4 +598,4 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 
 ### Reloading the config
 
-The TUI loads the config again when you save one of its files, or when you press `F5`. Commands and groups keep their output, selection and expansion by id. A command that is no longer in the config is stopped, and one that runs while its `cmd`, `cwd` or `env` changed keeps running as it was until you restart it; the toolbar names it. If the new config doesn't load, the old one stays and the toolbar shows why until a reload succeeds. A new workspace package is only picked up by `F5`, since fnug watches the config files it loaded.
+The TUI loads the config again when you save one of its files, or when you press `F5`. Commands and groups keep their output, selection and expansion by id. A command that is no longer in the config is stopped, and a running command whose `cmd`, `cwd` or `env` now differs from what it was started with keeps running as it was until you restart it; the toolbar names it. While a `fnug check --stash` runs, reloads wait for it to end (see [Checking what is committed](#checking-what-is-committed)). If the new config doesn't load, the old one stays and the toolbar shows why until a reload succeeds. A new workspace package is only picked up by `F5`, since fnug watches the config files it loaded.
