@@ -261,20 +261,16 @@ pub fn plan(
     let included = expand_dependencies(&entries, &index, &chosen, opts);
     let ordered = topo_sort(&entries, &index, &included);
     let in_plan: HashSet<&str> = ordered.iter().map(|&i| entries[i].0.id.as_str()).collect();
+    // A chosen command's `check: false` dependency runs after all
+    plan.excluded_manual
+        .retain(|id| !in_plan.contains(id.as_str()));
 
     plan.commands = ordered
         .iter()
         .map(|&i| {
             let (cmd, group_path) = &entries[i];
             let (reason, files) = chosen.remove(&i).unwrap_or_else(|| {
-                let of = entries
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, (other, _))| {
-                        included.contains(j) && other.depends_on.contains(&cmd.id)
-                    })
-                    .map(|(_, (other, _))| other.id.clone())
-                    .collect();
+                let of = dependents(&entries, &included, &cmd.id);
                 (SelectReason::Dependency { of }, None)
             });
             PlannedCommand {
@@ -292,6 +288,16 @@ pub fn plan(
         })
         .collect();
     Ok(plan)
+}
+
+/// Ids of the included commands that depend on `id`, in config order.
+fn dependents(entries: &[(&Command, String)], included: &HashSet<usize>, id: &str) -> Vec<String> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(j, (other, _))| included.contains(j) && other.depends_on.iter().any(|d| d == id))
+        .map(|(_, (other, _))| other.id.clone())
+        .collect()
 }
 
 /// Indices of the chosen commands plus everything they transitively depend on, minus
@@ -513,6 +519,39 @@ commands:
             )
             .unwrap();
             assert_eq!(ids(&plan), expected);
+        }
+    }
+
+    #[test]
+    fn check_false_dependency_is_not_excluded() {
+        let config = load(
+            r"
+name: root
+auto:
+  always: true
+commands:
+  - name: lint
+    cmd: 'true'
+    depends_on: [demo]
+  - name: demo
+    cmd: 'true'
+    auto:
+      check: false
+",
+        );
+        let all = Selection::All {
+            include_manual: false,
+        };
+        for selection in [auto(false), all] {
+            let plan = plan(&config, &selection, &PlanOptions::default()).unwrap();
+            assert_eq!(ids(&plan), ["demo", "lint"], "{selection:?}");
+            assert_eq!(
+                plan.get("demo").unwrap().reason,
+                SelectReason::Dependency {
+                    of: vec!["lint".into()]
+                }
+            );
+            assert!(plan.excluded_manual.is_empty(), "{selection:?}");
         }
     }
 
