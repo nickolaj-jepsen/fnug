@@ -274,6 +274,7 @@ fn init(dir: &Path, force: bool) -> Result<PathBuf, InitError> {
     fnug::init::run(
         &InitOptions {
             dir: dir.to_path_buf(),
+            file: None,
             force,
             yes: true,
         },
@@ -347,7 +348,7 @@ fn init_includes_what_choose_picks() {
         let opts = InitOptions {
             dir: dir.path().to_path_buf(),
             force: true,
-            yes: false,
+            ..InitOptions::default()
         };
         fnug::init::run(&opts, |proposals| {
             let keys: Vec<_> = proposals.iter().map(|p| p.key).collect();
@@ -486,6 +487,73 @@ fn init_cli_proposes_nix_tools_on_path() {
     assert!(!again.status.success(), "{again:?}");
     let stderr = String::from_utf8_lossy(&again.stderr);
     assert!(stderr.contains("already exists"), "{stderr}");
+}
+
+#[test]
+fn init_cli_creates_in_root() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "sub/go.mod", "module demo\n");
+
+    let output = fnug(dir.path(), &["--root", "sub", "init", "--yes"]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(!dir.path().join(".fnug.yaml").exists());
+    assert_eq!(
+        load_ids(&dir.path().join("sub/.fnug.yaml")),
+        ["gofmt", "vet", "test"]
+    );
+
+    // DIR names the same directory, or else it's a contradiction
+    let output = fnug(dir.path(), &["--root", "sub", "init", "--force", "sub"]);
+    assert!(output.status.success(), "{output:?}");
+    std::fs::create_dir(dir.path().join("other")).unwrap();
+    let output = fnug(dir.path(), &["--root", "sub", "init", "other"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--root"), "{stderr}");
+    assert!(!dir.path().join("other/.fnug.yaml").exists());
+}
+
+#[test]
+fn init_cli_writes_the_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "sub/go.mod", "module demo\n");
+
+    // The file's directory is the project, as it is when fnug loads the file
+    let output = fnug(dir.path(), &["-c", "sub/ci.yaml", "init", "--yes"]);
+    assert!(output.status.success(), "{output:?}");
+    let path = dir.path().join("sub/ci.yaml");
+    assert_header(&std::fs::read_to_string(&path).unwrap());
+    assert_eq!(load_ids(&path), ["gofmt", "vet", "test"]);
+    assert!(!dir.path().join("sub/.fnug.yaml").exists());
+
+    let again = fnug(dir.path(), &["-c", "sub/ci.yaml", "init", "--yes"]);
+    assert_eq!(again.status.code(), Some(2), "{again:?}");
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+
+    let output = fnug(dir.path(), &["-c", "sub/ci.json", "init", "--yes"]);
+    assert!(output.status.success(), "{output:?}");
+    let json = Config::from_file(&dir.path().join("sub/ci.json")).unwrap();
+    assert_eq!(json.schema, Some(fnug::schema::schema_url_for_version()));
+
+    // With --root, the commands run there instead, so the file can be elsewhere
+    let output = fnug(
+        dir.path(),
+        &["-c", "ci.yaml", "--root", "sub", "init", "--yes"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let loaded = fnug::load(&fnug::LoadOptions {
+        config: Some(dir.path().join("ci.yaml")),
+        root_dir: Some(dir.path().join("sub")),
+        ..fnug::LoadOptions::default()
+    })
+    .unwrap();
+    assert_eq!(command_ids(&loaded.root), ["gofmt", "vet", "test"]);
+
+    // Without it, a file outside DIR would run DIR's commands in the wrong place
+    let output = fnug(dir.path(), &["-c", "elsewhere.yaml", "init", "sub"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(!dir.path().join("elsewhere.yaml").exists());
 }
 
 #[test]

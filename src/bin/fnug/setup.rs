@@ -26,7 +26,7 @@ pub fn run(
 
 /// The directory to set up and the config, if one loads. Without a config it is `--root`, or the
 /// working directory.
-fn setup_context(
+pub(crate) fn setup_context(
     load_opts: &LoadOptions,
 ) -> Result<(PathBuf, Option<LoadedConfig>), Box<dyn std::error::Error>> {
     match fnug::load(load_opts) {
@@ -35,15 +35,7 @@ fn setup_context(
         Err(ConfigError::ConfigNotFound(_)) => {}
         Err(e) => warn!("{e}; continuing without a config"),
     }
-    let start = match &load_opts.start_dir {
-        Some(dir) => dir.clone(),
-        None => std::env::current_dir()?,
-    };
-    let dir = load_opts
-        .root_dir
-        .as_ref()
-        .map_or_else(|| start.clone(), |root| start.join(root));
-    Ok((dir, None))
+    Ok((crate::new_config_dir(load_opts)?, None))
 }
 
 #[cfg(test)]
