@@ -57,7 +57,7 @@ impl fmt::Display for Feature {
 struct RepoHook {
     name: String,
     target: HookTarget,
-    /// Against `opts`, so a hook that would change is outdated.
+    /// Against `opts` ([`hooks::status_with`]).
     status: HookStatus,
     /// How to install it; the foreign policy is decided when preparing.
     opts: InstallOptions,
@@ -642,7 +642,8 @@ fn confirm_chain(hook: &Path, interpreter: &str) -> Result<bool, SetupError> {
 
 /// Run the interactive setup wizard: it asks what to set up, shows every change it will make,
 /// and makes them only once the user confirms. `load` is how `config` was loaded; the pre-commit
-/// hook passes the same `-c`, `--root` and `--no-workspace`.
+/// hook and the MCP entry pass the same `-c`, `--root` and `--no-workspace`. The MCP entries go
+/// in `cwd`.
 ///
 /// # Errors
 ///
