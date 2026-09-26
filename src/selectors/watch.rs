@@ -6,6 +6,7 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -52,8 +53,14 @@ pub struct WatchMatch {
     pub files: Vec<PathBuf>,
 }
 
-/// Where the event thread finds the watcher, to watch directories created later.
-type WatcherSlot = Arc<OnceLock<Weak<Mutex<RecommendedWatcher>>>>;
+/// What the event thread shares with the [`WatchHandle`], to watch directories created later.
+#[derive(Default)]
+struct NewDirs {
+    /// Where the event thread finds the watcher.
+    watcher: OnceLock<Weak<Mutex<RecommendedWatcher>>>,
+    /// Watches registered for new directories so far.
+    watched: AtomicUsize,
+}
 
 /// How long events are gathered, from the first, before they are matched together. No change
 /// waits longer than this.
@@ -64,7 +71,17 @@ pub struct WatchHandle {
     /// Commands selected by file changes, a batch at a time, in config order.
     pub events: mpsc::Receiver<Vec<WatchMatch>>,
     pub report: WatchReport,
+    new_dirs: Arc<NewDirs>,
     _watcher: Arc<Mutex<RecommendedWatcher>>,
+}
+
+impl WatchHandle {
+    /// Watches registered so far: [`WatchReport::watched_dirs`] plus, on Linux, those added
+    /// since for directories created or moved in under a watched directory.
+    #[must_use]
+    pub fn watched_dirs(&self) -> usize {
+        self.report.watched_dirs + self.new_dirs.watched.load(Ordering::Relaxed)
+    }
 }
 
 /// A watch path and the commands watching it.
@@ -221,7 +238,7 @@ fn in_git_dir(path: &Path, key: &Path) -> bool {
 fn start_watcher(
     mut matcher: Matcher,
     sender: mpsc::Sender<Vec<WatchMatch>>,
-    slot: WatcherSlot,
+    new_dirs: Arc<NewDirs>,
 ) -> Result<RecommendedWatcher, notify::Error> {
     info!("Starting file watcher");
     let (raw_sender, raw) = std::sync::mpsc::channel();
@@ -231,7 +248,7 @@ fn start_watcher(
         .name("fnug-watch".to_string())
         .spawn(move || {
             while let Some(batch) = next_batch(&raw) {
-                handle_batch(&mut matcher, batch, &sender, &slot);
+                handle_batch(&mut matcher, batch, &sender, &new_dirs);
             }
         })
         .map_err(notify::Error::io)?;
@@ -260,7 +277,7 @@ fn handle_batch(
     matcher: &mut Matcher,
     batch: Vec<notify::Result<Event>>,
     sender: &mpsc::Sender<Vec<WatchMatch>>,
-    slot: &WatcherSlot,
+    new_dirs: &NewDirs,
 ) {
     let mut events = Vec::with_capacity(batch.len());
     let mut rescan = false;
@@ -279,7 +296,7 @@ fn handle_batch(
         .filter(|event| event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove())
         .flat_map(|event| event.paths.iter().cloned())
         .collect();
-    changed.extend(watch_new_dirs(matcher, &events, slot));
+    changed.extend(watch_new_dirs(matcher, &events, new_dirs));
     changed.sort();
     changed.dedup();
 
@@ -297,7 +314,7 @@ fn handle_batch(
 /// Watch the directories that `events` created or moved in under a watched directory, and
 /// return the files already in them, which appeared before any watch could report them.
 #[cfg(target_os = "linux")]
-fn watch_new_dirs(matcher: &mut Matcher, events: &[Event], slot: &WatcherSlot) -> Vec<PathBuf> {
+fn watch_new_dirs(matcher: &mut Matcher, events: &[Event], new_dirs: &NewDirs) -> Vec<PathBuf> {
     let dirs: Vec<&PathBuf> = events
         .iter()
         .filter(|event| {
@@ -312,7 +329,7 @@ fn watch_new_dirs(matcher: &mut Matcher, events: &[Event], slot: &WatcherSlot) -
     if dirs.is_empty() {
         return Vec::new();
     }
-    let Some(watcher) = slot.get().and_then(Weak::upgrade) else {
+    let Some(watcher) = new_dirs.watcher.get().and_then(Weak::upgrade) else {
         return Vec::new();
     };
     let mut watcher = watcher.lock();
@@ -327,6 +344,7 @@ fn watch_new_dirs(matcher: &mut Matcher, events: &[Event], slot: &WatcherSlot) -
             walk_tree(&mut watcher, dir, ignore, &mut watched_dirs, &mut walk);
         }
     }
+    new_dirs.watched.fetch_add(walk.dirs, Ordering::Relaxed);
     for (path, e) in &walk.failed {
         warn!("Could not watch {}: {e}", path.display());
     }
@@ -334,7 +352,7 @@ fn watch_new_dirs(matcher: &mut Matcher, events: &[Event], slot: &WatcherSlot) -
 }
 
 #[cfg(not(target_os = "linux"))]
-fn watch_new_dirs(_: &mut Matcher, _: &[Event], _: &WatcherSlot) -> Vec<PathBuf> {
+fn watch_new_dirs(_: &mut Matcher, _: &[Event], _: &NewDirs) -> Vec<PathBuf> {
     Vec::new()
 }
 
@@ -578,13 +596,13 @@ pub fn watch_commands(commands: Vec<Command>) -> Result<WatchHandle, WatchError>
         .collect();
 
     let (sender, events) = mpsc::channel(100);
-    let slot = WatcherSlot::default();
+    let new_dirs = Arc::new(NewDirs::default());
     let watcher = Arc::new(Mutex::new(start_watcher(
         matcher,
         sender,
-        Arc::clone(&slot),
+        Arc::clone(&new_dirs),
     )?));
-    let _ = slot.set(Arc::downgrade(&watcher));
+    let _ = new_dirs.watcher.set(Arc::downgrade(&watcher));
     let report = register(&mut watcher.lock(), &paths);
     if report.roots.is_empty() {
         return Err(WatchError::NothingWatched(report));
@@ -592,6 +610,7 @@ pub fn watch_commands(commands: Vec<Command>) -> Result<WatchHandle, WatchError>
     Ok(WatchHandle {
         events,
         report,
+        new_dirs,
         _watcher: watcher,
     })
 }
@@ -741,6 +760,29 @@ mod tests {
             );
         }
         assert_eq!(project.matched_ids(any(), &["main.rs"]), ["any"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn new_dir_rules_skip_ignored_git_and_unwatched_dirs() {
+        let project = Project::new();
+        git2::Repository::init(&project.root).unwrap();
+        std::fs::write(project.root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::create_dir_all(project.root.join("target/doc")).unwrap();
+        let mut matcher = Matcher::new(vec![
+            project.command("any", vec!["."], vec![]),
+            project.command("docs", vec!["target/doc"], vec![]),
+        ]);
+        let root = &project.root;
+        let mut rules = |dir: PathBuf| matcher.new_dir_rules(&dir);
+
+        assert_eq!(rules(root.join("src")), Some(true));
+        assert_eq!(rules(root.join("target")), None);
+        assert_eq!(rules(root.join("src/target")), None);
+        assert_eq!(rules(root.join(".git/refs")), None);
+        assert_eq!(rules(root.with_file_name("elsewhere")), None);
+        // Below an ignored watch path, everything is watched.
+        assert_eq!(rules(root.join("target/doc/api")), Some(false));
     }
 
     #[test]

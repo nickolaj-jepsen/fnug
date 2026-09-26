@@ -1368,9 +1368,11 @@ commands:
         (tmp, root, repo)
     }
 
-    /// Touch a file in `ctl/` and merge watch events until it is reported.
+    /// Create a file in `ctl/` and merge watch events until it is reported.
     async fn watch_until_ctl(handle: &mut WatchHandle, root: &Path) -> Seen {
-        std::fs::write(root.join("ctl/done"), "").unwrap();
+        // A new file each call, so no event from an earlier call can end this one.
+        let n = std::fs::read_dir(root.join("ctl")).unwrap().count();
+        std::fs::write(root.join(format!("ctl/done{n}")), "").unwrap();
         watch_until(handle, |seen| seen.contains_key("ctl")).await
     }
 
@@ -1473,6 +1475,27 @@ commands:
         // About half a second in a debug build; checking each new watch against every earlier
         // one took 8 seconds.
         assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_skips_ignored_dirs_created_later() {
+        let (_tmp, root, _repo) = watch_repo();
+        std::fs::remove_dir_all(root.join("repo/target")).unwrap();
+        let mut handle = start_watch(&root.join(".fnug.yaml"));
+        let baseline = handle.watched_dirs();
+
+        // Like `cargo build` after `cargo clean`.
+        std::fs::create_dir_all(root.join("repo/target/debug/deps")).unwrap();
+        watch_until_ctl(&mut handle, &root).await;
+        assert_eq!(handle.watched_dirs(), baseline);
+
+        // Moved in whole, so a single event reports it: src2 and src2/a get watches, but not
+        // the ignored src2/a/target.
+        let staged = root.join("staging/src2");
+        std::fs::create_dir_all(staged.join("a/target")).unwrap();
+        std::fs::rename(&staged, root.join("repo/src2")).unwrap();
+        watch_until_ctl(&mut handle, &root).await;
+        assert_eq!(handle.watched_dirs(), baseline + 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
