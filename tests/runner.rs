@@ -233,6 +233,38 @@ commands:
     assert!(!report.cancelled);
 }
 
+#[tokio::test]
+async fn fail_fast_kills_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: slow
+    cmd: 'echo $$ > pid; exec sleep 30'
+  - name: fail
+    cmd: 'i=0; until [ -e pid ]; do i=$((i+1)); [ $i -gt 250 ] && exit 9; sleep 0.02; done; exit 1'
+  - name: third
+    cmd: 'true'
+",
+    );
+    let opts = ExecOptions {
+        fail_fast: true,
+        jobs: NonZeroUsize::new(2).unwrap(),
+        ..capture()
+    };
+    let started = Instant::now();
+    let report = run(&config, &cwd, &opts).await;
+    assert!(started.elapsed() < TIMEOUT, "took {:?}", started.elapsed());
+    assert_eq!(*outcome(&report, "fail"), Outcome::Failed(Failure::Exit(1)));
+    assert_eq!(*outcome(&report, "slow"), Outcome::Cancelled);
+    assert_eq!(*outcome(&report, "third"), Outcome::NotRun);
+    assert!(!report.cancelled);
+    let pid = common::read_pid(&dir.path().join("pid"));
+    assert!(common::wait_until(TIMEOUT, || !common::process_alive(pid)));
+}
+
 /// Each command marks itself started, then waits until all three have.
 const OVERLAP: &str = r"
 name: root
