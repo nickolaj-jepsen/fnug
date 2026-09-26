@@ -25,4 +25,4 @@ expression: screen
   │                                      Esc         Exit fullscreen         │
   └──────────────────────────────────────────────────────────────────────────┘
                               │
- SPACE  Select all   r  Run all   g  Git select   ^R  Fullscreen         ?  Help
+ SPACE  Select all   r  Run all   g  Git select   /  Search   L  Logs    ?  Help

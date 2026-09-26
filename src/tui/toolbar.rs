@@ -41,20 +41,39 @@ pub struct ToolbarRegion {
     pub action: ToolbarAction,
 }
 
+/// How much a shortcut is missed when the toolbar can't show them all: the least go first
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Need {
+    /// Such as the way into a running command, which may be waiting for an answer
+    Urgent,
+    Core,
+    Handy,
+    /// Also in the help overlay, and seldom needed from the toolbar
+    Minor,
+}
+
 struct Shortcut {
     key: Cow<'static, str>,
     desc: Cow<'static, str>,
     action: ToolbarAction,
+    need: Need,
 }
 
 impl Shortcut {
-    /// A shortcut for `key`, named as in the keymap and shown as its badge
+    /// A shortcut for `key`, named as in the keymap and shown as its badge. It is
+    /// [`Need::Urgent`] unless [`need`](Self::need) says otherwise.
     fn new(key: &'static str, desc: impl Into<Cow<'static, str>>, action: ToolbarAction) -> Self {
         Self {
             key: badge(key),
             desc: desc.into(),
             action,
+            need: Need::Urgent,
         }
+    }
+
+    /// The shortcut, kept only as far as `need` allows when they don't all fit
+    fn need(self, need: Need) -> Self {
+        Self { need, ..self }
     }
 
     /// Width this shortcut occupies: " key " (padded badge) + space + desc
@@ -68,7 +87,7 @@ fn help_shortcut() -> Shortcut {
     Shortcut::new("?", "Help", ToolbarAction::ShowHelp)
 }
 
-/// The shortcuts for the current state, most useful first, without the pinned help.
+/// The shortcuts for the current state in the order they show, without the pinned help.
 fn get_shortcuts(app: &App) -> Vec<Shortcut> {
     let mut shortcuts = Vec::new();
 
@@ -102,11 +121,8 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
 
     let selected_count = app.selected.len();
     if selected_count > 0 {
-        shortcuts.push(Shortcut::new(
-            "Enter",
-            format!("Run selected ({selected_count})"),
-            ToolbarAction::RunSelected,
-        ));
+        let run = format!("Run selected ({selected_count})");
+        shortcuts.push(Shortcut::new("Enter", run, ToolbarAction::RunSelected).need(Need::Core));
     }
     push_node_shortcuts(app, &mut shortcuts);
     if app.has_auto_run_commands() {
@@ -115,15 +131,13 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
         } else {
             "Auto-run: off"
         };
-        shortcuts.push(Shortcut::new("w", label, ToolbarAction::ToggleAutoRun));
+        shortcuts.push(Shortcut::new("w", label, ToolbarAction::ToggleAutoRun).need(Need::Handy));
     }
 
-    shortcuts.push(Shortcut::new("g", "Git select", ToolbarAction::GitSelect));
-    shortcuts.push(Shortcut::new(
-        "Ctrl+R",
-        "Fullscreen",
-        ToolbarAction::ToggleFullscreen,
-    ));
+    shortcuts.push(Shortcut::new("g", "Git select", ToolbarAction::GitSelect).need(Need::Minor));
+    shortcuts.push(
+        Shortcut::new("Ctrl+R", "Fullscreen", ToolbarAction::ToggleFullscreen).need(Need::Minor),
+    );
     if app.active_command_is_running() {
         shortcuts.push(Shortcut::new(
             "Tab",
@@ -140,26 +154,26 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
             ToolbarAction::AcceptSearch,
         ));
     } else if app.search.is_filtering() {
-        shortcuts.push(Shortcut::new("/", "Edit filter", ToolbarAction::Search));
+        shortcuts.push(Shortcut::new("/", "Edit filter", ToolbarAction::Search).need(Need::Handy));
         shortcuts.push(Shortcut::new(
             "Esc",
             "Clear filter",
             ToolbarAction::ClearSearch,
         ));
     } else {
-        shortcuts.push(Shortcut::new("/", "Search", ToolbarAction::Search));
+        shortcuts.push(Shortcut::new("/", "Search", ToolbarAction::Search).need(Need::Handy));
     }
 
     let unseen = app.unseen_log_issues();
-    let log_label: Cow<'static, str> = if app.show_logs {
-        "Hide logs".into()
+    let logs = if app.show_logs {
+        Shortcut::new("L", "Hide logs", ToolbarAction::ToggleLogs).need(Need::Handy)
     } else if unseen > 0 {
-        format!("Logs ({unseen}!)").into()
+        Shortcut::new("L", format!("Logs ({unseen}!)"), ToolbarAction::ToggleLogs)
     } else {
-        "Logs".into()
+        Shortcut::new("L", "Logs", ToolbarAction::ToggleLogs).need(Need::Minor)
     };
-    shortcuts.push(Shortcut::new("L", log_label, ToolbarAction::ToggleLogs));
-    shortcuts.push(Shortcut::new("q", "Quit", ToolbarAction::Quit));
+    shortcuts.push(logs);
+    shortcuts.push(Shortcut::new("q", "Quit", ToolbarAction::Quit).need(Need::Minor));
     shortcuts
 }
 
@@ -170,18 +184,16 @@ fn push_node_shortcuts(app: &App, shortcuts: &mut Vec<Shortcut>) {
             selected, status, ..
         }) => {
             let toggle_label = if *selected { "Deselect" } else { "Select" };
-            shortcuts.push(Shortcut::new(
-                "Space",
-                toggle_label,
-                ToolbarAction::ToggleSpace,
-            ));
-            shortcuts.push(Shortcut::new("r", "Run", ToolbarAction::Run));
+            shortcuts.push(
+                Shortcut::new("Space", toggle_label, ToolbarAction::ToggleSpace).need(Need::Handy),
+            );
+            shortcuts.push(Shortcut::new("r", "Run", ToolbarAction::Run).need(Need::Core));
             if matches!(status, CommandStatus::Running) {
-                shortcuts.push(Shortcut::new("s", "Stop", ToolbarAction::Stop));
+                shortcuts.push(Shortcut::new("s", "Stop", ToolbarAction::Stop).need(Need::Core));
             }
-            shortcuts.push(Shortcut::new("c", "Copy", ToolbarAction::Copy));
+            shortcuts.push(Shortcut::new("c", "Copy", ToolbarAction::Copy).need(Need::Handy));
             if *status != CommandStatus::Pending {
-                shortcuts.push(Shortcut::new("x", "Clear", ToolbarAction::Clear));
+                shortcuts.push(Shortcut::new("x", "Clear", ToolbarAction::Clear).need(Need::Handy));
             }
         }
         Some(NodeKind::Group {
@@ -192,12 +204,10 @@ fn push_node_shortcuts(app: &App, shortcuts: &mut Vec<Shortcut>) {
             } else {
                 "Select all"
             };
-            shortcuts.push(Shortcut::new(
-                "Space",
-                toggle_label,
-                ToolbarAction::ToggleSpace,
-            ));
-            shortcuts.push(Shortcut::new("r", "Run all", ToolbarAction::Run));
+            shortcuts.push(
+                Shortcut::new("Space", toggle_label, ToolbarAction::ToggleSpace).need(Need::Handy),
+            );
+            shortcuts.push(Shortcut::new("r", "Run all", ToolbarAction::Run).need(Need::Core));
         }
         None => {}
     }
@@ -205,6 +215,29 @@ fn push_node_shortcuts(app: &App, shortcuts: &mut Vec<Shortcut>) {
 
 /// Separator between shortcuts
 const SEP: &str = "  ";
+
+/// The `shortcuts` that fit in `width` columns, the most needed first, in the order they came.
+/// Where one doesn't fit, shorter ones that are less needed still can.
+fn fitting(shortcuts: Vec<Shortcut>, width: usize) -> Vec<Shortcut> {
+    let mut by_need: Vec<usize> = (0..shortcuts.len()).collect();
+    by_need.sort_by_key(|&i| shortcuts[i].need);
+    let mut keep = vec![false; shortcuts.len()];
+    // Every shortcut but the first comes after a separator
+    let mut used = 0;
+    for i in by_need {
+        let sep = if used == 0 { 0 } else { SEP.len() };
+        let cost = sep + shortcuts[i].width();
+        if used + cost <= width {
+            used += cost;
+            keep[i] = true;
+        }
+    }
+    shortcuts
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(shortcut, keep)| keep.then_some(shortcut))
+        .collect()
+}
 
 /// A shortcut as a key badge, " KEY ", then its description
 fn shortcut_spans(shortcut: &Shortcut, hovered: bool) -> [Span<'static>; 3] {
@@ -341,13 +374,9 @@ pub fn build_toolbar_line(app: &App, width: u16) -> (Line<'static>, Vec<ToolbarR
     let reserved = help.as_ref().map_or(0, |h| SEP.len() + h.width());
 
     let mut line = LineBuilder::new(app, width);
-    for shortcut in get_shortcuts(app) {
-        let sep = if line.x > 0 { SEP.len() } else { 0 };
-        // Leave out what doesn't fit, but keep trying the shorter ones after it
-        if line.x + sep + shortcut.width() + reserved > line.width {
-            continue;
-        }
-        if sep > 0 {
+    let room = line.width.saturating_sub(reserved);
+    for shortcut in fitting(get_shortcuts(app), room) {
+        if line.x > 0 {
             line.push_text(SEP.into(), LineBuilder::bg());
         }
         line.push_shortcut(&shortcut);
@@ -366,7 +395,7 @@ mod tests {
     use crate::logger::LogEntry;
     use crate::tui::app::AppEvent;
     use crate::tui::keymap::KEYMAP;
-    use crate::tui::test_util::{draw, press, two_groups};
+    use crate::tui::test_util::{AREA, cursor_node, draw, press, shell_app, two_groups};
 
     fn toolbar_text(app: &App, width: u16) -> String {
         let (line, _) = build_toolbar_line(app, width);
@@ -469,6 +498,42 @@ mod tests {
         assert!(!text.contains("Git select"), "{text:?}");
         assert!(text.contains(" /  Search "), "{text:?}");
         assert!(text.ends_with(" ?  Help"), "{text:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn narrow_toolbar_keeps_terminal_and_log_badge() {
+        if !crate::pty::test_util::pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = shell_app(dir.path(), &[("prompt", "exec sleep 30"), ("b", "true")]);
+        app.select_by_hand("prompt".into());
+        app.select_by_hand("b".into());
+        app.run_command("prompt", AREA);
+        draw(&mut app, 100, 24);
+        while cursor_node(&app) != Some("prompt") {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        app.log_buffer.push(LogEntry {
+            level: Level::Error,
+            target: "test".into(),
+            message: "broken".into(),
+            timestamp: Instant::now(),
+        });
+        app.handle_app_event(AppEvent::LogUpdated);
+        app.rebuild_visible_nodes();
+
+        let text = toolbar_text(&app, 100);
+
+        assert!(text.contains(" TAB  Terminal "), "{text:?}");
+        assert!(text.contains(" L  Logs (1!)"), "{text:?}");
+        assert!(text.contains(" r  Run "), "{text:?}");
+        assert!(text.contains(" s  Stop "), "{text:?}");
+        assert!(text.ends_with(" ?  Help"), "{text:?}");
+        // Left out ones keep the others in their usual order
+        let (run, tab) = (text.find(" r  Run ").unwrap(), text.find(" TAB ").unwrap());
+        assert!(run < tab, "{text:?}");
+        app.shutdown().await;
     }
 
     #[test]
