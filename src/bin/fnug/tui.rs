@@ -199,6 +199,9 @@ async fn run_event_loop(
     // Frame rate limiter: ~60 FPS max
     let mut render_tick = tokio::time::interval(Duration::from_millis(16));
     render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Advances the elapsed time of running commands
+    let mut clock = tokio::time::interval(Duration::from_secs(1));
+    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         if needs_render {
@@ -228,6 +231,10 @@ async fn run_event_loop(
                 if app.any_terminal_dirty() {
                     needs_render = true;
                 }
+            }
+            _ = clock.tick(), if app.has_active_runs() => {
+                app.mark_tree_dirty();
+                needs_render = true;
             }
             // Crossterm events
             maybe_event = event_stream.next() => {
