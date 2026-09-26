@@ -1014,6 +1014,23 @@ fn dogfood_config_ids() {
     }
 }
 
+/// The fixer rewrites sources, so neither the TUI nor a check may start it alongside the lint
+#[test]
+fn dogfood_clippy_fix_only_runs_by_hand() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/.fnug.yaml");
+    let (config, _) = load_config(Some(path), true).unwrap();
+    let commands = config.all_commands();
+    let find = |id: &str| commands.iter().find(|c| c.id == id).unwrap();
+
+    let fix = &find("rust-clippy-fix").auto;
+    assert_eq!(
+        (fix.git, fix.watch, fix.always, fix.check),
+        (Some(false), Some(false), None, Some(false)),
+        "{fix:?}"
+    );
+    assert_eq!(find("clippy check").depends_on, ["rust-fmt"]);
+}
+
 // ─── resolve_command ───
 
 fn resolve_fixture() -> (tempfile::TempDir, CommandGroup) {

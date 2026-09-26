@@ -25,7 +25,10 @@ children:
         depends_on:
           - rust-fmt
         auto:
-          # Rewrites sources, which fails a check
+          # Rewrites sources, so only when started by hand: not alongside clippy check in the
+          # TUI, and not in a check, where modifying files fails
+          git: false
+          watch: false
           check: false
       - name: clippy check
         cmd: cargo clippy --all-targets -- -D warnings
