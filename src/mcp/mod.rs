@@ -154,7 +154,7 @@ fn select_options(base: Option<&str>) -> SelectOptions {
 /// --base` refuses; see [`check::check_base_repo`].
 fn check_base_repo(options: &SelectOptions, loaded: &LoadedConfig) -> Result<(), CallToolResult> {
     let dir = check::repo_dir(&loaded.cwd);
-    check::check_base_repo(&options.scope, &dir).map_err(|e| match e {
+    check::check_base_repo(&loaded.root, &options.scope, &dir).map_err(|e| match e {
         CheckError::BaseOutsideRepo { path, message } => tool_error(format!(
             "base needs a git repository, but {} is not in one: {message}",
             path.display()

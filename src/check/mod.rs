@@ -103,9 +103,10 @@ pub struct CheckResult {
 /// # Errors
 ///
 /// Returns `CheckError::Plan` if a target names no single command or git selection fails as a
-/// whole, `CheckError::BaseOutsideRepo` if it selects by changes since a base and
-/// [`repo_dir`] isn't in a git work tree, and `CheckError::Stash` if unstaged changes can't be
-/// set aside or put back.
+/// whole, `CheckError::BaseOutsideRepo` if it selects by changes since a base and neither
+/// [`repo_dir`] nor a git-enabled command's path is in a git work tree (see
+/// [`check_base_repo`]), and `CheckError::Stash` if unstaged changes can't be set aside or put
+/// back.
 pub async fn run(
     config: &CommandGroup,
     cwd: &Path,
@@ -114,7 +115,7 @@ pub async fn run(
 ) -> Result<CheckResult, CheckError> {
     let repo = repo_dir(cwd);
     if let Selection::Auto { options, .. } = &opts.selection {
-        check_base_repo(&options.scope, &repo)?;
+        check_base_repo(config, &options.scope, &repo)?;
     }
     let Some(plan) = plan_unless_cancelled(config, &opts.selection, &cancel).await? else {
         printer::interrupted();
@@ -209,25 +210,48 @@ pub fn repo_dir(fallback: &Path) -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| fallback.to_path_buf())
 }
 
-/// Under the since-base scope, fail unless `dir` is in a git work tree. Selection alone only
-/// warns about paths outside one, and would run just the `always` commands.
+/// Under the since-base scope, fail unless `dir` or an `auto.path` of one of `config`'s
+/// git-enabled commands is in a git work tree. Selection alone only warns about paths outside
+/// one, and would run just the `always` commands. When `dir` isn't in one, as at the root of a
+/// workspace whose packages are repos of their own, the issues of each package's repo decide.
 ///
 /// # Errors
 ///
-/// Returns `CheckError::BaseOutsideRepo` if `dir` isn't in a git work tree.
-pub fn check_base_repo(scope: &GitScope, dir: &Path) -> Result<(), CheckError> {
+/// Returns `CheckError::BaseOutsideRepo` if neither `dir` nor any such path is in a git work
+/// tree.
+pub fn check_base_repo(
+    config: &CommandGroup,
+    scope: &GitScope,
+    dir: &Path,
+) -> Result<(), CheckError> {
     if !matches!(scope, GitScope::Since(_)) {
         return Ok(());
     }
-    let message = match Repository::open_ext(dir, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]) {
-        Ok(repo) if repo.workdir().is_some() => return Ok(()),
-        Ok(_) => "it is in a bare repository".to_string(),
-        Err(e) => e.message().to_string(),
+    let Err(message) = work_tree_of(dir) else {
+        return Ok(());
     };
+    let commands = config.all_commands();
+    let mut paths = commands
+        .iter()
+        .filter(|cmd| cmd.auto.git == Some(true))
+        .flat_map(|cmd| cmd.auto.paths());
+    if paths.any(|path| work_tree_of(path).is_ok()) {
+        return Ok(());
+    }
     Err(CheckError::BaseOutsideRepo {
         path: dir.to_path_buf(),
         message,
     })
+}
+
+/// Fails with the reason unless `path`, or its nearest existing ancestor, is in a git work tree.
+fn work_tree_of(path: &Path) -> Result<(), String> {
+    let start = path.ancestors().find(|p| p.is_dir()).unwrap_or(path);
+    match Repository::open_ext(start, RepositoryOpenFlags::CROSS_FS, &[] as &[&Path]) {
+        Ok(repo) if repo.workdir().is_some() => Ok(()),
+        Ok(_) => Err("it is in a bare repository".to_string()),
+        Err(e) => Err(e.message().to_string()),
+    }
 }
 
 /// Plan the run on a blocking thread, since git selection can take a while in a big repo.

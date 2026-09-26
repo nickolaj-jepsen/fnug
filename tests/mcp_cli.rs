@@ -220,6 +220,37 @@ fn base_outside_repo_is_an_error() {
 }
 
 #[test]
+fn base_outside_repo_uses_the_commands_repos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    if git2::Repository::discover(root).is_ok() {
+        eprintln!("skipping: the temp dir is inside a git repo");
+        return;
+    }
+    // As at the root of a workspace whose packages are repos of their own
+    common::write_config(
+        root,
+        "name: root\ncommands:\n  - name: lint\n    cmd: 'true'\n    cwd: pkg\n    auto:\n      \
+         git: true\n      path: [.]\n",
+    );
+    let pkg = root.join("pkg");
+    std::fs::create_dir(&pkg).unwrap();
+    let repo = git2::Repository::init(&pkg).unwrap();
+    std::fs::write(pkg.join("a.txt"), "one\n").unwrap();
+    common::commit_all(&repo);
+    std::fs::write(pkg.join("a.txt"), "two\n").unwrap();
+    common::commit_all(&repo);
+    let mut server = Server::start(root);
+
+    server.call(2, "run_lints", &json!({"base": "HEAD~1"}));
+    let result = &server.response(2)["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let summary: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(summary["passed"], 1, "{summary}");
+}
+
+#[test]
 fn bad_base_is_an_error_without_git_commands() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(
