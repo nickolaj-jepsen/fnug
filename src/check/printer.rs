@@ -104,12 +104,17 @@ impl Printer {
         }
     }
 
-    pub(super) fn nothing_selected(&self, configured: usize) {
+    /// Say that nothing was selected, and with `hint`, how to select more.
+    pub(super) fn nothing_selected(&self, configured: usize, hint: bool) {
+        let hint = if hint {
+            "; use --all, --base <ref>, or name commands"
+        } else {
+            ""
+        };
         eprintln!(
             "{}",
             self.sty.dim(&format!(
-                "No commands selected ({configured} configured; use --all, --base <ref>, or name \
-                 commands)"
+                "No commands selected ({configured} configured{hint})"
             ))
         );
     }

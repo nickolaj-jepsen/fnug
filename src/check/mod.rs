@@ -149,7 +149,12 @@ pub async fn run(
         {
             printer.stash_recovered(&note);
         }
-        printer.nothing_selected(config.all_commands().len());
+        // A pre-commit hook selects by what is staged, and can't take other flags
+        let staged = matches!(
+            &opts.selection,
+            Selection::Auto { options, .. } if options.scope == GitScope::Staged
+        );
+        printer.nothing_selected(config.all_commands().len(), !staged);
         return Ok(CheckResult {
             exit_code: 0,
             report: RunReport::default(),
