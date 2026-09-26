@@ -265,6 +265,11 @@ pub struct ConfigAuto {
     /// Set to `false` to skip in `fnug check`, git hooks and MCP runs (default `true`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<bool>,
+    /// In the TUI, run the command when a change to a watched file selects it, rather than
+    /// only selecting it (default `false`). Needs `watch`; the TUI's `w` key turns it off for
+    /// the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_on_change: Option<bool>,
 }
 
 impl TryFrom<ConfigAuto> for Auto {
@@ -278,6 +283,7 @@ impl TryFrom<ConfigAuto> for Auto {
             path: config.path,
             always: config.always,
             check: config.check,
+            run_on_change: config.run_on_change,
         })
     }
 }

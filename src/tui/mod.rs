@@ -1,4 +1,5 @@
 pub mod app;
+mod auto_run;
 pub mod clipboard;
 pub(crate) mod context_menu;
 mod cursor;

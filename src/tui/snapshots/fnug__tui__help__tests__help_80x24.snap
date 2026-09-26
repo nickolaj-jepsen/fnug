@@ -21,7 +21,7 @@ expression: screen
   │x           Clear command             Typing into a command               │
   │g           Select by git changes     Ctrl+]      Back to the tree        │
   │F5          Reload the config         Esc         Back, unless full-screen│
-  │                                      Fullscreen                          │
+  │w           Toggle auto-run           Fullscreen                          │
   │                                      Esc         Exit fullscreen         │
   └──────────────────────────────────────────────────────────────────────────┘
                               │

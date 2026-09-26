@@ -157,6 +157,13 @@
             "type": "string"
           }
         },
+        "run_on_change": {
+          "description": "In the TUI, run the command when a change to a watched file selects it, rather than\nonly selecting it (default `false`). Needs `watch`; the TUI's `w` key turns it off for\nthe session.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "watch": {
           "description": "Select when a watched file under `path` matching `regex` changes.",
           "type": [

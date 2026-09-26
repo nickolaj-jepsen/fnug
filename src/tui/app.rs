@@ -231,7 +231,7 @@ impl Default for ToolbarCache {
 /// Main application state for the TUI
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "5 independent boolean flags (fullscreen, should_quit, tree_dirty, show_logs, show_help) are reasonable for TUI state"
+    reason = "independent flags (fullscreen, should_quit, tree_dirty, show_logs, show_help, auto_run_enabled) are reasonable for TUI state"
 )]
 pub struct App {
     pub config: CommandGroup,
@@ -325,6 +325,14 @@ pub struct App {
     pub(super) file_watcher: Option<JoinHandle<()>>,
     /// The file watcher's last warning, which a restarted watcher doesn't post again
     pub(super) watcher_warning: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Whether file changes run the commands with `auto.run_on_change`; `w` toggles it
+    pub auto_run_enabled: bool,
+    /// Commands that changed files will run again once their current run ends
+    pub(super) auto_run_pending: HashSet<String>,
+    /// Commands run, or to be rerun, because of file changes that haven't ended yet
+    pub(super) auto_running: HashSet<String>,
+    /// Until when file changes don't run each command, after its last auto-run
+    pub(super) quiet_until: HashMap<String, Instant>,
 }
 
 /// Collect all group IDs in the tree (including root).
@@ -423,6 +431,10 @@ impl App {
             config_watcher: None,
             file_watcher: None,
             watcher_warning: Arc::default(),
+            auto_run_enabled: true,
+            auto_run_pending: HashSet::new(),
+            auto_running: HashSet::new(),
+            quiet_until: HashMap::new(),
         };
         app.rebuild_visible_nodes();
         app
@@ -604,6 +616,7 @@ impl App {
     /// Handle app events (called from event loop). Returns whether the screen needs a redraw.
     pub fn handle_app_event(&mut self, event: AppEvent) -> bool {
         let redraw = self.apply_app_event(event);
+        self.settle_auto_runs(Instant::now());
         let focused = self.focus;
         self.release_stale_focus();
         redraw || self.focus != focused
@@ -699,6 +712,7 @@ impl App {
             })
             .collect();
         self.set_status(watch_status(&matches, &names, &self.cwd), StatusLevel::Info);
+        let ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
         for m in matches {
             self.selected.insert(m.id.clone());
             self.selection_reason
@@ -707,6 +721,7 @@ impl App {
         // Background events never collapse: the cursor or the user may be in there
         self.fit_expansion_to_selection(false);
         self.mark_tree_dirty();
+        self.auto_run(&ids, Instant::now());
     }
 
     /// Select the commands the latest git selection chose.
@@ -828,7 +843,10 @@ impl App {
         // Clear batch tracking
         self.batch_run_ids = None;
 
-        if failed_ids.is_empty() {
+        // Moving the cursor would take the keyboard from a command the user is typing into
+        if failed_ids.is_empty()
+            || (self.focus == Focus::Terminal && self.active_command_is_running())
+        {
             return;
         }
         if self.tree_dirty {
@@ -1310,6 +1328,7 @@ impl App {
                 self.show_help = !self.show_help;
                 self.help_scroll = 0;
             }
+            ToolbarAction::ToggleAutoRun => self.toggle_auto_run(),
         }
     }
 }
