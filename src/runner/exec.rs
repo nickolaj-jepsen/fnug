@@ -501,11 +501,19 @@ impl Spawned {
         let output = self.pipe.take().map(|(_, output)| output);
         self.guard.reap();
 
+        // The terminal's Ctrl+C reached a command in fnug's process group along with fnug
+        let interrupted = !group
+            && opts.cancel.is_cancelled()
+            && opts.cancel_cause.signal() == Some(StopSignal::Interrupt);
+        // Otherwise only a stop sent before the command exited counts: one that ended by
+        // itself keeps its outcome, even if the run was stopped meanwhile
         let outcome = match exit {
             Err(e) => Outcome::Failed(Failure::Spawn(format!("lost track of the process: {e}"))),
-            Ok(_) if timed_out => Outcome::TimedOut(timeout.unwrap_or_default()),
+            Ok(exit) if timed_out && exit.stop_requested => {
+                Outcome::TimedOut(timeout.unwrap_or_default())
+            }
             Ok(exit) if exit.success() => Outcome::Passed,
-            Ok(_) if cancelled || stop.is_cancelled() => Outcome::Cancelled,
+            Ok(exit) if exit.stop_requested || interrupted => Outcome::Cancelled,
             Ok(ExitInfo {
                 code: Some(code), ..
             }) => Outcome::Failed(Failure::Exit(code)),
