@@ -257,8 +257,8 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 if mouse.column < tree_area.width {
-                    let max_scroll = self.visible_nodes.len().saturating_sub(1);
-                    self.tree_scroll = (self.tree_scroll + 5).min(max_scroll);
+                    self.tree_scroll += 5;
+                    self.clamp_tree_scroll(usize::from(tree_area.height));
                 } else if self.show_logs {
                     self.log_scroll = self.log_scroll.saturating_sub(5);
                 } else if let Some(ref active_id) = self.active_terminal_id

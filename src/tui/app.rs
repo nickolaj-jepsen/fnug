@@ -234,6 +234,9 @@ pub struct App {
     pub(super) tree_dirty: bool,
     /// Scroll offset for the tree panel (first visible row index)
     pub tree_scroll: usize,
+    /// Cursor row and tree height when the tree last scrolled to the cursor. Other frames
+    /// leave the scroll alone, so the mouse wheel can move the cursor out of view.
+    pub(super) last_scroll_anchor: Option<(usize, usize)>,
     /// Whether the log panel is shown instead of the terminal
     pub show_logs: bool,
     /// Ring buffer of log entries
@@ -330,6 +333,7 @@ impl App {
             error_messages: HashMap::new(),
             tree_dirty: false,
             tree_scroll: 0,
+            last_scroll_anchor: None,
             show_logs: false,
             log_buffer,
             log_scroll: 0,
@@ -801,7 +805,8 @@ impl App {
             .is_some_and(|proc| proc.terminal.parser().lock().screen().alternate_screen())
     }
 
-    /// Adjust `tree_scroll` so the cursor row is visible within the given height
+    /// Adjust `tree_scroll` so the cursor row is visible within the given height, and no
+    /// blank rows follow the last node
     pub fn ensure_cursor_visible(&mut self, height: usize) {
         if height == 0 {
             return;
@@ -811,6 +816,14 @@ impl App {
         } else if self.cursor >= self.tree_scroll + height {
             self.tree_scroll = self.cursor - height + 1;
         }
+        self.clamp_tree_scroll(height);
+    }
+
+    /// Keep the last row at or below the bottom of a tree `height` rows tall.
+    pub(super) fn clamp_tree_scroll(&mut self, height: usize) {
+        self.tree_scroll = self
+            .tree_scroll
+            .min(self.visible_nodes.len().saturating_sub(height));
     }
 
     /// Toggle the current node: expand/collapse for groups, select/deselect for commands.
