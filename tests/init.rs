@@ -310,6 +310,16 @@ fn not_found_suggests_init() {
 }
 
 fn init(dir: &Path, force: bool) -> Result<PathBuf, InitError> {
+    let created = init_all(dir, force)?;
+    assert!(
+        !created.workspace && created.packages.is_empty(),
+        "{created:?}"
+    );
+    Ok(created.path)
+}
+
+/// Run `fnug init --yes` on `dir`.
+fn init_all(dir: &Path, force: bool) -> Result<fnug::init::Created, InitError> {
     fnug::init::run(
         &InitOptions {
             dir: dir.to_path_buf(),
@@ -395,6 +405,7 @@ fn init_includes_what_choose_picks() {
             Ok(choice)
         })
         .unwrap()
+        .path
     };
 
     let path = run(vec![1]);
@@ -431,6 +442,165 @@ fn prepare_writes_a_workspace_root_and_packages() {
     root.write().unwrap();
     let (loaded, _) = fnug::load_config(root.path.to_str(), false).unwrap();
     assert_eq!(command_ids(&loaded), ["api/gofmt", "api/vet", "api/test"]);
+}
+
+/// A monorepo with tooling in two packages and none at the top, and directories that aren't
+/// packages: ignored, hidden, dependencies, one with a config already, and one too deep.
+fn monorepo() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git2::Repository::init(dir).unwrap();
+    write(dir, ".gitignore", "build/\n");
+    write(dir, "crates/core/Cargo.toml", "");
+    write(
+        dir,
+        "web/package.json",
+        r#"{"scripts": {"lint": "eslint ."}}"#,
+    );
+    write(dir, "web/node_modules/dep/Cargo.toml", "");
+    write(dir, "build/out/Cargo.toml", "");
+    write(dir, ".cache/go.mod", "module cache\n");
+    write(dir, "node_modules/dep/Cargo.toml", "");
+    write(dir, "docs/README.md", "");
+    write(dir, "tools/.fnug.yaml", "name: tools\ncommands: []\n");
+    write(dir, "tools/go.mod", "module tools\n");
+    write(dir, "a/b/c/d/go.mod", "module deep\n");
+    tmp
+}
+
+#[test]
+fn init_offers_package_configs_in_a_monorepo() {
+    let tmp = monorepo();
+    let dir = tmp.path().canonicalize().unwrap();
+
+    let created = init_all(&dir, false).unwrap();
+
+    assert_eq!(created.path, dir.join(".fnug.yaml"));
+    assert_eq!(
+        created.packages,
+        [
+            dir.join("crates/core/.fnug.yaml"),
+            dir.join("web/.fnug.yaml")
+        ]
+    );
+    let root = std::fs::read_to_string(&created.path).unwrap();
+    assert_header(&root);
+    assert!(root.contains("workspace: true"), "{root}");
+    assert!(!root.contains("example"), "{root}");
+    // Its workspace takes in the new packages, and the one that had a config already
+    let (loaded, _) = fnug::load_config(created.path.to_str(), false).unwrap();
+    let mut ids = command_ids(&loaded);
+    ids.sort();
+    assert_eq!(ids, ["core/clippy", "core/fmt", "core/test", "web/lint"]);
+    let mut packages: Vec<_> = loaded.children.iter().map(|g| g.name.as_str()).collect();
+    packages.sort_unstable();
+    assert_eq!(packages, ["core", "tools", "web"]);
+}
+
+#[test]
+fn init_asks_which_package_commands_to_include() {
+    let tmp = monorepo();
+    let dir = tmp.path().canonicalize().unwrap();
+    let opts = InitOptions {
+        dir: dir.clone(),
+        ..InitOptions::default()
+    };
+
+    let created = fnug::init::run(&opts, |proposals| {
+        let shown: Vec<_> = proposals.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            shown,
+            [
+                "Rust (crates/core/Cargo.toml): fmt, clippy, test",
+                "Node (web/package.json): lint"
+            ]
+        );
+        Ok(vec![1])
+    })
+    .unwrap();
+
+    assert_eq!(created.packages, [dir.join("web/.fnug.yaml")]);
+    assert!(!dir.join("crates/core/.fnug.yaml").exists());
+    let (loaded, _) = fnug::load_config(created.path.to_str(), false).unwrap();
+    assert_eq!(command_ids(&loaded), ["web/lint"]);
+
+    // Nothing picked: a workspace root still, for the package that has a config
+    std::fs::remove_file(&created.path).unwrap();
+    std::fs::remove_file(dir.join("web/.fnug.yaml")).unwrap();
+    let created = fnug::init::run(&opts, |_| Ok(Vec::new())).unwrap();
+    assert!(
+        created.workspace && created.packages.is_empty(),
+        "{created:?}"
+    );
+    assert!(!dir.join("web/.fnug.yaml").exists());
+
+    // With no package to include, the top gets an example command instead
+    std::fs::remove_file(&created.path).unwrap();
+    std::fs::remove_file(dir.join("tools/.fnug.yaml")).unwrap();
+    let created = fnug::init::run(&opts, |_| Ok(Vec::new())).unwrap();
+    assert!(!created.workspace, "{created:?}");
+    assert_eq!(load_ids(&created.path), ["example"]);
+}
+
+#[test]
+fn init_counts_packages_that_have_a_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path().canonicalize().unwrap();
+    write(
+        &dir,
+        "web/.fnug.yaml",
+        "name: web\ncommands:\n  - {name: lint, cmd: 'true'}\n",
+    );
+    write(&dir, "api/go.mod", "module api\n");
+
+    let created = init_all(&dir, false).unwrap();
+
+    assert!(created.workspace);
+    assert_eq!(created.packages, [dir.join("api/.fnug.yaml")]);
+    let (loaded, _) = fnug::load_config(created.path.to_str(), false).unwrap();
+    let mut ids = command_ids(&loaded);
+    ids.sort();
+    assert_eq!(ids, ["api/gofmt", "api/test", "api/vet", "web/lint"]);
+
+    // Made again, the root stays a workspace root with every package already configured
+    let created = init_all(&dir, true).unwrap();
+    assert!(created.workspace);
+    assert!(created.packages.is_empty());
+    let (loaded, _) = fnug::load_config(created.path.to_str(), false).unwrap();
+    assert_eq!(command_ids(&loaded).len(), 4);
+}
+
+#[test]
+fn init_needs_two_packages_for_a_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "crates/core/Cargo.toml", "");
+
+    let created = init_all(dir.path(), false).unwrap();
+
+    assert!(created.packages.is_empty());
+    assert_eq!(load_ids(&created.path), ["example"]);
+}
+
+#[test]
+fn init_cli_reports_package_configs() {
+    let tmp = monorepo();
+
+    let output = fnug(tmp.path(), &["init", "--yes"]);
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let dir = tmp.path().canonicalize().unwrap();
+    assert!(
+        stdout.contains(&format!(
+            "Created {}, a workspace root for these new package configs:\n  {}\n  {}\n",
+            dir.join(".fnug.yaml").display(),
+            dir.join("crates/core/.fnug.yaml").display(),
+            dir.join("web/.fnug.yaml").display()
+        )),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("found no tooling"), "{stderr}");
 }
 
 #[test]

@@ -65,7 +65,9 @@ enum Commands {
     /// Looks for Rust (Cargo.toml), Python (pyproject.toml or ruff.toml; run with uv, poetry or
     /// pdm when locked), Node (the package.json scripts format:check, lint, typecheck and test,
     /// run with the lockfile's package manager), Go (go.mod) and Nix (flake.nix, with alejandra,
-    /// statix and deadnix when they are on PATH).
+    /// statix and deadnix when they are on PATH). With none of these in the directory itself but
+    /// some in two or more directories below it, those get a config each, and the directory a
+    /// workspace root that includes them.
     ///
     /// Without DIR, the config goes in --root, or else in the directory of the file -c names. -c
     /// names the file to write; its commands run from its directory unless it is loaded with

@@ -6,29 +6,33 @@ use std::path::{Path, PathBuf};
 
 use log::info;
 
-use crate::config_file::{ConfigAuto, ConfigCommand, ConfigCommandGroup};
+use crate::config_file::{ConfigAuto, ConfigCommand, ConfigCommandGroup, find_config_in_dir};
 use crate::setup::fsutil;
 
 /// A command group proposed for a project, and the files that suggested it.
 #[derive(Debug)]
 pub struct Proposal {
-    /// The detector's name, such as `rust`; unique among proposals, and the group's name.
+    /// The detector's name, such as `rust`; unique among one directory's proposals, and the
+    /// group's name.
     pub key: &'static str,
     /// The tooling's display name, such as `Rust`.
     pub label: String,
-    /// The files that suggested the group, relative to the project directory.
+    /// The directory the group is for, relative to the project directory: empty for the
+    /// project itself, else a package's directory (see [`detect_packages`]).
+    pub dir: PathBuf,
+    /// The files that suggested the group, relative to `dir`.
     pub evidence: Vec<PathBuf>,
     /// The group to add to the config.
     pub group: ConfigCommandGroup,
 }
 
 impl fmt::Display for Proposal {
-    /// `Rust (Cargo.toml): fmt, clippy, test`.
+    /// `Rust (Cargo.toml): fmt, clippy, test`, with the evidence relative to the project.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let evidence: Vec<_> = self
             .evidence
             .iter()
-            .map(|p| p.display().to_string())
+            .map(|p| self.dir.join(p).display().to_string())
             .collect();
         let names: Vec<_> = self
             .group
@@ -60,6 +64,91 @@ pub fn detect(dir: &Path) -> Vec<Proposal> {
         .into_iter()
         .filter_map(|detector| detector(&project))
         .collect()
+}
+
+/// How many directory levels below the project [`detect_packages`] looks; the workspace walk
+/// that finds package configs goes deeper.
+const PACKAGE_DEPTH: usize = 3;
+
+/// Directories that hold dependencies or build output rather than packages.
+const NOT_PACKAGES: [&str; 3] = ["node_modules", "vendor", "target"];
+
+/// The directories below a project that look like packages of a workspace.
+#[derive(Debug, Default)]
+pub struct Packages {
+    /// What [`detect`] proposes for those without a config, with their [`Proposal::dir`].
+    pub proposals: Vec<Proposal>,
+    /// Those with a config already, relative to the project.
+    pub configured: Vec<PathBuf>,
+}
+
+impl Packages {
+    /// How many directories are packages, with a config or proposals.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        let mut dirs: Vec<&Path> = self.proposals.iter().map(|p| p.dir.as_path()).collect();
+        dirs.dedup();
+        dirs.len() + self.configured.len()
+    }
+}
+
+/// Find the directories below `dir` that look like packages of a workspace: those with a
+/// config, and those [`detect`] has proposals for. Like a workspace's walk for package configs,
+/// it skips hidden and gitignored directories and doesn't enter a package; unlike it, it also
+/// skips [`NOT_PACKAGES`] and looks only [`PACKAGE_DEPTH`] levels down. Directories come in
+/// path order.
+#[must_use]
+pub fn detect_packages(dir: &Path) -> Packages {
+    let repo = git2::Repository::discover(dir).ok();
+    let mut found = Packages::default();
+    walk_packages(dir, dir, repo.as_ref(), 1, &mut found);
+    found
+}
+
+fn walk_packages(
+    root: &Path,
+    dir: &Path,
+    repo: Option<&git2::Repository>,
+    depth: usize,
+    found: &mut Packages,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    // Symlinks aren't followed, so a link to a parent can't loop
+    let mut subdirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .collect();
+    subdirs.sort();
+    for sub in subdirs {
+        let name = sub.file_name().unwrap_or_default().to_string_lossy();
+        let skipped = name.starts_with('.')
+            || NOT_PACKAGES.contains(&name.as_ref())
+            || repo.is_some_and(|repo| repo.is_path_ignored(&sub).unwrap_or(false));
+        if skipped {
+            continue;
+        }
+        let relative = sub.strip_prefix(root).unwrap_or(&sub).to_path_buf();
+        if find_config_in_dir(&sub).is_some() {
+            found.configured.push(relative);
+            continue;
+        }
+        let proposals = detect(&sub);
+        if proposals.is_empty() {
+            if depth < PACKAGE_DEPTH {
+                walk_packages(root, &sub, repo, depth + 1, found);
+            }
+            continue;
+        }
+        found
+            .proposals
+            .extend(proposals.into_iter().map(|proposal| Proposal {
+                dir: relative.clone(),
+                ..proposal
+            }));
+    }
 }
 
 /// The directory being detected.
@@ -314,6 +403,7 @@ fn proposal(
     Proposal {
         key,
         label: label.to_string(),
+        dir: PathBuf::new(),
         evidence: evidence.iter().map(PathBuf::from).collect(),
         group: ConfigCommandGroup {
             id: None,
