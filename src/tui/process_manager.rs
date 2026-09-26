@@ -955,6 +955,39 @@ mod tests {
         app.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_scrollback_caps_the_lines_kept() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let print = "i=0; while [ $i -lt 100 ]; do i=$((i+1)); echo line$i; done";
+        let mut app = shell_app(dir.path(), &[("capped", print), ("default", print)]);
+        app.config.commands[0].scrollback = Some(5);
+
+        for id in ["capped", "default"] {
+            app.run_command(id, AREA);
+            let terminal = std::sync::Arc::clone(&app.processes[id].terminal);
+            let printed = wait_until(Duration::from_secs(5), || {
+                terminal
+                    .parser()
+                    .lock()
+                    .screen()
+                    .contents()
+                    .contains("line100")
+            });
+            assert!(printed, "{id} never printed its last line");
+        }
+
+        let kept = |id: &str| {
+            let terminal = &app.processes[id].terminal;
+            terminal.parser().lock().screen().scrollback_len()
+        };
+        assert_eq!(kept("capped"), 5);
+        assert!(kept("default") > 5, "{}", kept("default"));
+        app.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn running_command_shows_elapsed_time() {
         if !pty_available() {
