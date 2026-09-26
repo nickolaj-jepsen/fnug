@@ -206,7 +206,10 @@ pub struct App {
     pub config: CommandGroup,
     pub cwd: PathBuf,
     pub visible_nodes: Vec<VisibleNode>,
+    /// Row of the cursor in `visible_nodes`; set it through `set_cursor_index`
     pub cursor: usize,
+    /// Id of the node under the cursor, which it stays on when rows are rebuilt
+    pub(super) cursor_id: Option<String>,
     pub processes: HashMap<String, ProcessInstance>,
     pub active_terminal_id: Option<String>,
     pub fullscreen: bool,
@@ -308,6 +311,7 @@ impl App {
             cwd,
             visible_nodes: Vec::new(),
             cursor: 0,
+            cursor_id: None,
             processes: HashMap::new(),
             active_terminal_id: None,
             fullscreen: false,
@@ -365,7 +369,7 @@ impl App {
             .iter()
             .position(|n| rerun.contains(&n.id))
         {
-            self.cursor = first_failed;
+            self.set_cursor_index(first_failed);
         }
 
         let focus = self.current_command_id();
@@ -457,6 +461,7 @@ impl App {
         };
         flatten_group(&self.config, 0, true, &[], &mut ctx);
         self.tree_dirty = false;
+        self.resolve_cursor();
     }
 
     /// Where the latest run of command `id` stands
@@ -624,6 +629,9 @@ impl App {
         if failed_ids.is_empty() {
             return;
         }
+        if self.tree_dirty {
+            self.rebuild_visible_nodes();
+        }
 
         // Don't move cursor if it's already on a failed command
         if let Some(node) = self.visible_nodes.get(self.cursor)
@@ -638,7 +646,7 @@ impl App {
             .iter()
             .position(|n| failed_ids.contains(&n.id))
         {
-            self.cursor = pos;
+            self.set_cursor_index(pos);
             self.active_terminal_id = Some(self.visible_nodes[pos].id.clone());
         }
     }

@@ -14,6 +14,10 @@ impl App {
     )]
     pub fn handle_key(&mut self, key: KeyEvent, terminal_area: Rect) {
         self.last_terminal_area = terminal_area;
+        // Keys act on the rows as they are now, with the cursor still on its node
+        if self.tree_dirty {
+            self.rebuild_visible_nodes();
+        }
 
         // Help overlay dismissal
         if self.show_help {
@@ -94,13 +98,11 @@ impl App {
                 KeyCode::Backspace => {
                     self.search.pop_char();
                     self.mark_tree_dirty();
-                    self.cursor = self.cursor.min(self.visible_nodes.len().saturating_sub(1));
                     return;
                 }
                 KeyCode::Char(c) => {
                     self.search.push_char(c);
                     self.mark_tree_dirty();
-                    self.cursor = self.cursor.min(self.visible_nodes.len().saturating_sub(1));
                     return;
                 }
                 // Allow navigation keys to pass through
@@ -156,13 +158,13 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.cursor + 1 < self.visible_nodes.len() {
-                    self.cursor += 1;
+                    self.set_cursor_index(self.cursor + 1);
                     self.update_active_terminal();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.cursor > 0 {
-                    self.cursor -= 1;
+                    self.set_cursor_index(self.cursor - 1);
                     self.update_active_terminal();
                 }
             }

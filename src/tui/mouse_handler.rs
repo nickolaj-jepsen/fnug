@@ -145,7 +145,7 @@ impl App {
                                 self.mouse.last_click = None;
                                 match &node.kind {
                                     NodeKind::Command { .. } => {
-                                        self.cursor = row;
+                                        self.set_cursor_index(row);
                                         self.update_active_terminal();
                                         self.run_command(&node.id, terminal_area);
                                     }
@@ -156,7 +156,7 @@ impl App {
                                 }
                             } else {
                                 self.mouse.last_click = Some((Instant::now(), row));
-                                self.cursor = row;
+                                self.set_cursor_index(row);
                                 self.update_active_terminal();
 
                                 // Click on orb/arrow toggles the item
@@ -286,7 +286,7 @@ impl App {
                     // Right-click in tree area
                     let row = mouse.row.saturating_sub(tree_area.y) as usize + self.tree_scroll;
                     if row < self.visible_nodes.len() {
-                        self.cursor = row;
+                        self.set_cursor_index(row);
                         self.update_active_terminal();
                         let node = self.visible_nodes[row].clone();
                         let (items, target) = match &node.kind {
