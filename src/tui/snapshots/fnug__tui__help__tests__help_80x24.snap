@@ -3,26 +3,26 @@ source: src/tui/help.rs
 expression: screen
 ---
 ▼ root (0/4)                  │No command running. Press 'r' to run a command.
-├─▼ alpha (0/2)               │
-│ ┌────────────────────────────── Keybindings ───────────────────────────────┐
+├─┌────────────────────────────── Keybindings ───────────────────────────────┐
 │ │Navigate                              Output                              │
-└─│j / ↓       Move down                 c           Copy output             │
-  │k / ↑       Move up                   Shift+↑/↓   Scroll output           │
+│ │j / ↓       Move down                 c           Copy output             │
+└─│k / ↑       Move up                   Shift+↑/↓   Scroll output           │
   │h / ←       Collapse / deselect       { / }       Output top / bottom     │
-  │l / →       Expand / select           Tab         Type into the command   │
-  │Space       Toggle selection          Ctrl+R      Toggle fullscreen       │
-  │E           Expand all groups         L           Toggle log panel        │
-  │W           Collapse all groups       Other                               │
-  │/           Search and filter         ?           Toggle this help        │
-  │Run                                   q / Ctrl+C  Quit                    │
-  │Enter       Run selected commands     Searching                           │
-  │r           Run command or group      Enter       Keep the filter         │
-  │s           Stop command              Esc         Clear the search        │
-  │x           Clear command             Typing into a command               │
-  │g           Select by git changes     Ctrl+]      Back to the tree        │
-  │F5          Reload the config         Esc         Back, unless full-screen│
-  │w           Toggle auto-run           Fullscreen                          │
+  │l / →       Expand / select           Shift+Home  Output top              │
+  │Space       Toggle selection          Shift+End   Output bottom           │
+  │E           Expand all groups         Tab         Type into the command   │
+  │W           Collapse all groups       Ctrl+R      Toggle fullscreen       │
+  │/           Search and filter         L           Toggle log panel        │
+  │Run                                   Other                               │
+  │Enter       Run selected commands     ?           Toggle this help        │
+  │r           Run command or group      q / Ctrl+C  Quit                    │
+  │s           Stop command              Searching                           │
+  │x           Clear command             Enter       Keep the filter         │
+  │g           Select by git changes     Esc         Clear the search        │
+  │F5          Reload the config         Typing into a command               │
+  │w           Toggle auto-run           Ctrl+]      Back to the tree        │
+  │                                      Esc         Back, unless full-screen│
+  │                                      Fullscreen                          │
   │                                      Esc         Exit fullscreen         │
   └──────────────────────────────────────────────────────────────────────────┘
-                              │
  SPACE  Select all   r  Run all   g  Git select   /  Search   L  Logs    ?  Help

@@ -83,6 +83,8 @@ pub const KEYMAP: &[KeyHelp] = &[
     key("c", KeyContext::Output, "Copy output"),
     key("Shift+↑/↓", KeyContext::Output, "Scroll output"),
     key("{ / }", KeyContext::Output, "Output top / bottom"),
+    key("Shift+Home", KeyContext::Output, "Output top"),
+    key("Shift+End", KeyContext::Output, "Output bottom"),
     key("Tab", KeyContext::Output, "Type into the command"),
     key("Ctrl+R", KeyContext::Output, "Toggle fullscreen"),
     key("L", KeyContext::Output, "Toggle log panel"),

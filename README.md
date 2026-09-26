@@ -573,6 +573,8 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 | `c`            | Tree       | Copy output              |
 | `Shift+↑/↓`    | Tree       | Scroll output            |
 | `{` / `}`      | Tree       | Output top / bottom      |
+| `Shift+Home`   | Tree       | Output top               |
+| `Shift+End`    | Tree       | Output bottom            |
 | `Tab`          | Tree       | Type into the command    |
 | `Ctrl+R`       | Tree       | Toggle fullscreen        |
 | `L`            | Tree       | Toggle log panel         |
