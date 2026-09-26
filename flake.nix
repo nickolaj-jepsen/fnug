@@ -35,6 +35,7 @@
               src = ./.;
 
               cargoLock.lockFile = ./Cargo.lock;
+              useNextest = true;
 
               nativeBuildInputs = [pkg-config];
               # check --stash tests drive the git CLI
@@ -70,6 +71,7 @@
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.cachix
+            pkgs.cargo-nextest
             pkgs.alejandra
             pkgs.statix
             pkgs.deadnix
