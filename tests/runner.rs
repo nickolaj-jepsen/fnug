@@ -1,9 +1,23 @@
-//! Tests for the shared runner: planning with git selection.
+//! Tests for the shared runner: planning with git selection, and executing plans with real
+//! processes.
 
 mod common;
 
-use fnug::runner::{PlanError, PlanOptions, SelectReason, Selection, plan};
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use fnug::commands::group::CommandGroup;
+use fnug::runner::{
+    CaptureLimits, Counts, ExecHook, ExecOptions, Failure, NoHook, Outcome, OutputMode, Plan,
+    PlanError, PlanOptions, PlannedCommand, RunEvent, RunReport, SelectReason, Selection, execute,
+    plan,
+};
 use fnug::selectors::{GitScope, SelectOptions, SelectionIssue};
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+// ─── planning ───
 
 const GIT_CONFIG: &str = r"
 name: root
@@ -81,4 +95,450 @@ fn unknown_base_is_a_plan_error() {
         "{err:?}"
     );
     assert!(err.to_string().contains("no-such-ref"), "{err}");
+}
+
+// ─── execution ───
+
+fn capture() -> ExecOptions {
+    ExecOptions {
+        output: OutputMode::Capture(CaptureLimits::DEFAULT),
+        ..ExecOptions::default()
+    }
+}
+
+fn all() -> Selection {
+    Selection::All {
+        include_manual: false,
+    }
+}
+
+async fn run(config: &CommandGroup, cwd: &Path, opts: &ExecOptions) -> RunReport {
+    run_with(config, cwd, opts, &NoHook).await
+}
+
+async fn run_with<H: ExecHook>(
+    config: &CommandGroup,
+    cwd: &Path,
+    opts: &ExecOptions,
+    hook: &H,
+) -> RunReport {
+    let plan = plan(config, &all(), &PlanOptions::default()).unwrap();
+    execute(&plan, cwd, opts, hook, &mut |_| {}).await
+}
+
+fn outcome<'a>(report: &'a RunReport, id: &str) -> &'a Outcome {
+    &report.get(id).unwrap().outcome
+}
+
+fn output(report: &RunReport, id: &str) -> String {
+    report.get(id).unwrap().output.as_ref().unwrap().text()
+}
+
+const BUILD_CHAIN: &str = r"
+name: root
+commands:
+  - name: build
+    cmd: 'exit 1'
+  - name: test
+    cmd: 'true'
+    depends_on: [build]
+  - name: lint
+    cmd: 'true'
+    depends_on: [test]
+  - name: other
+    cmd: 'true'
+";
+
+#[tokio::test]
+async fn counts_failed_and_skipped_separately() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(dir.path(), BUILD_CHAIN);
+    let plan = plan(&config, &all(), &PlanOptions::default()).unwrap();
+    let mut events = Vec::new();
+    let report = execute(&plan, &cwd, &capture(), &NoHook, &mut |event| {
+        events.push(match event {
+            RunEvent::Started { seq, cmd, .. } => format!("start {seq} {}", cmd.id()),
+            RunEvent::Finished { seq, done, cmd, .. } => {
+                format!("finish {seq} {done} {}", cmd.id())
+            }
+        });
+    })
+    .await;
+
+    assert_eq!(
+        report.counts(),
+        Counts {
+            total: 4,
+            passed: 1,
+            failed: 1,
+            skipped: 2,
+            ..Counts::default()
+        }
+    );
+    assert_eq!(
+        *outcome(&report, "build"),
+        Outcome::Failed(Failure::Exit(1))
+    );
+    assert_eq!(
+        *outcome(&report, "lint"),
+        Outcome::Skipped {
+            cause: "build".into()
+        }
+    );
+    let ids: Vec<&str> = report.commands.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["build", "other", "test", "lint"]);
+    assert_eq!(
+        events,
+        [
+            "start 1 build",
+            "finish 1 1 build",
+            "finish 2 2 test",
+            "finish 3 3 lint",
+            "start 4 other",
+            "finish 4 4 other",
+        ]
+    );
+    assert!(!report.success());
+    assert_eq!(report.rerun_ids(), ["build", "test", "lint"]);
+}
+
+#[tokio::test]
+async fn fail_fast_reports_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: first
+    cmd: 'exit 2'
+  - name: second
+    cmd: 'touch second-ran'
+  - name: third
+    cmd: 'true'
+",
+    );
+    let opts = ExecOptions {
+        fail_fast: true,
+        ..capture()
+    };
+    let report = run(&config, &cwd, &opts).await;
+    let counts = report.counts();
+    assert_eq!((counts.failed, counts.not_run), (1, 2), "{counts:?}");
+    assert_eq!(*outcome(&report, "second"), Outcome::NotRun);
+    assert!(!dir.path().join("second-ran").exists());
+    assert!(!report.cancelled);
+}
+
+/// Each command marks itself started, then waits until all three have.
+const OVERLAP: &str = r"
+name: root
+commands:
+  - name: a
+    cmd: &wait 'touch $MARK; i=0; until [ -e a ] && [ -e b ] && [ -e c ]; do i=$((i+1)); [ $i -gt 250 ] && exit 1; sleep 0.02; done'
+    env: {MARK: a}
+  - name: b
+    cmd: *wait
+    env: {MARK: b}
+  - name: c
+    cmd: *wait
+    env: {MARK: c}
+";
+
+#[tokio::test]
+async fn parallel_independent_commands_overlap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(dir.path(), OVERLAP);
+    let opts = ExecOptions {
+        jobs: NonZeroUsize::new(3).unwrap(),
+        ..capture()
+    };
+    let report = run(&config, &cwd, &opts).await;
+    assert!(report.success(), "{report:#?}");
+}
+
+#[tokio::test]
+async fn inherit_mode_runs_one_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: a
+    cmd: &alone 'test ! -e running && touch running && sleep 0.2 && rm running'
+  - name: b
+    cmd: *alone
+",
+    );
+    let opts = ExecOptions {
+        jobs: NonZeroUsize::new(4).unwrap(),
+        ..ExecOptions::default()
+    };
+    let report = run(&config, &cwd, &opts).await;
+    assert!(report.success(), "{report:#?}");
+    assert!(report.get("a").unwrap().output.is_none());
+}
+
+#[tokio::test]
+async fn parallel_respects_deps() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: test
+    cmd: 'test -e built'
+    depends_on: [build]
+  - name: build
+    cmd: 'sleep 0.3 && touch built'
+  - name: unrelated
+    cmd: 'true'
+",
+    );
+    let opts = ExecOptions {
+        jobs: NonZeroUsize::new(4).unwrap(),
+        ..capture()
+    };
+    let report = run(&config, &cwd, &opts).await;
+    assert!(report.success(), "{report:#?}");
+}
+
+const BACKGROUND_SLEEP: &str = r"
+name: root
+commands:
+  - name: hang
+    cmd: 'sleep 30 & echo $! > pid; wait'
+  - name: after
+    cmd: 'true'
+    depends_on: [hang]
+";
+
+#[tokio::test]
+async fn timeout_kills_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(dir.path(), BACKGROUND_SLEEP);
+    let timeout = Duration::from_millis(300);
+    let opts = ExecOptions {
+        default_timeout: Some(timeout),
+        ..capture()
+    };
+    let started = Instant::now();
+    let report = run(&config, &cwd, &opts).await;
+    assert!(started.elapsed() < TIMEOUT, "took {:?}", started.elapsed());
+    assert_eq!(*outcome(&report, "hang"), Outcome::TimedOut(timeout));
+    assert_eq!(
+        *outcome(&report, "after"),
+        Outcome::Skipped {
+            cause: "hang".into()
+        }
+    );
+    let pid = common::read_pid(&dir.path().join("pid"));
+    assert!(common::wait_until(TIMEOUT, || !common::process_alive(pid)));
+}
+
+#[tokio::test]
+async fn cancel_kills_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(dir.path(), BACKGROUND_SLEEP);
+    let opts = capture();
+    let cancel = opts.cancel.clone();
+    let pid_file = dir.path().join("pid");
+    let canceller = tokio::task::spawn_blocking(move || {
+        let pid = common::read_pid(&pid_file);
+        cancel.cancel();
+        pid
+    });
+    let started = Instant::now();
+    let report = run(&config, &cwd, &opts).await;
+    assert!(started.elapsed() < TIMEOUT, "took {:?}", started.elapsed());
+    assert!(report.cancelled);
+    assert_eq!(*outcome(&report, "hang"), Outcome::Cancelled);
+    assert_eq!(*outcome(&report, "after"), Outcome::NotRun);
+    let pid = canceller.await.unwrap();
+    assert!(common::wait_until(TIMEOUT, || !common::process_alive(pid)));
+}
+
+#[tokio::test]
+async fn cancelled_before_start_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(dir.path(), BUILD_CHAIN);
+    let opts = capture();
+    opts.cancel.cancel();
+    let report = run(&config, &cwd, &opts).await;
+    assert_eq!(report.counts().not_run, 4);
+    assert!(report.cancelled && !report.success());
+}
+
+#[tokio::test]
+async fn leftover_background_process_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: spawner
+    cmd: 'sleep 30 & echo $! > pid; echo done'
+",
+    );
+    let started = Instant::now();
+    let report = run(&config, &cwd, &capture()).await;
+    assert!(started.elapsed() < TIMEOUT, "took {:?}", started.elapsed());
+    assert_eq!(*outcome(&report, "spawner"), Outcome::Passed);
+    assert_eq!(output(&report, "spawner"), "done\n");
+    let pid = common::read_pid(&dir.path().join("pid"));
+    assert!(common::wait_until(TIMEOUT, || !common::process_alive(pid)));
+}
+
+#[tokio::test]
+async fn merged_output_preserves_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: mixed
+    cmd: 'echo o1; echo e1 >&2; echo o2; printf no-newline >&2'
+",
+    );
+    let report = run(&config, &cwd, &capture()).await;
+    assert_eq!(output(&report, "mixed"), "o1\ne1\no2\nno-newline");
+}
+
+#[tokio::test]
+async fn exit_code_and_signal_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: code
+    cmd: 'exit 3'
+  - name: killed
+    cmd: 'kill -9 $$'
+",
+    );
+    for opts in [capture(), ExecOptions::default()] {
+        let report = run(&config, &cwd, &opts).await;
+        assert_eq!(*outcome(&report, "code"), Outcome::Failed(Failure::Exit(3)));
+        assert_eq!(
+            *outcome(&report, "killed"),
+            Outcome::Failed(Failure::Signal(9))
+        );
+    }
+}
+
+#[tokio::test]
+async fn spawn_error_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: gone
+    cmd: 'true'
+    cwd: sub
+  - name: after
+    cmd: 'true'
+    depends_on: [gone]
+",
+    );
+    std::fs::remove_dir(dir.path().join("sub")).unwrap();
+    for opts in [capture(), ExecOptions::default()] {
+        let report = run(&config, &cwd, &opts).await;
+        let Outcome::Failed(Failure::Spawn(message)) = outcome(&report, "gone") else {
+            panic!("{report:#?}");
+        };
+        assert!(
+            message.contains("sub") && message.contains("does not exist"),
+            "{message}"
+        );
+        assert_eq!(report.counts().skipped, 1);
+    }
+}
+
+#[tokio::test]
+async fn capture_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: flood
+    cmd: 'head -c 10000000 /dev/zero | tr ''\0'' a; echo; echo last'
+",
+    );
+    let opts = ExecOptions {
+        output: OutputMode::Capture(CaptureLimits {
+            head: 1024,
+            tail: 1024,
+        }),
+        ..ExecOptions::default()
+    };
+    let report = run(&config, &cwd, &opts).await;
+    assert_eq!(*outcome(&report, "flood"), Outcome::Passed);
+    let captured = report.get("flood").unwrap().output.as_ref().unwrap();
+    assert_eq!(captured.total_bytes(), 10_000_006);
+    assert_eq!(captured.omitted_bytes(), 10_000_006 - 2048);
+    let text = captured.text();
+    assert!(text.contains("bytes omitted"));
+    assert!(text.ends_with("a\nlast\n"), "{}", &text[text.len() - 20..]);
+}
+
+/// Fails every command that passed, as a check for modified files would.
+struct FailPassing;
+
+impl ExecHook for FailPassing {
+    type Token = String;
+
+    fn before(&self, cmd: &PlannedCommand) -> String {
+        cmd.id().to_string()
+    }
+
+    fn after(&self, cmd: &PlannedCommand, token: String, outcome: &mut Outcome) {
+        assert_eq!(token, cmd.id());
+        if *outcome == Outcome::Passed {
+            *outcome = Outcome::Failed(Failure::Modified(vec![token.into()]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn hook_can_fail_a_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: fixer
+    cmd: 'true'
+  - name: after
+    cmd: 'true'
+    depends_on: [fixer]
+",
+    );
+    let report = run_with(&config, &cwd, &capture(), &FailPassing).await;
+    assert_eq!(
+        *outcome(&report, "fixer"),
+        Outcome::Failed(Failure::Modified(vec!["fixer".into()]))
+    );
+    assert_eq!(report.counts().skipped, 1);
+}
+
+#[test]
+fn execute_future_is_send() {
+    fn assert_send<T: Send>(_: &T) {}
+    let plan = Plan::default();
+    let opts = ExecOptions::default();
+    let mut on_event = |_: RunEvent<'_>| {};
+    let future = execute(&plan, Path::new("."), &opts, &NoHook, &mut on_event);
+    assert_send(&future);
 }
