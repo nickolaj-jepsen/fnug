@@ -1,8 +1,8 @@
 //! Every keybinding the help overlay, the toolbar and the README list, defined once. The
-//! dispatch lives in `key_handler`; tests keep the two in step.
+//! dispatch lives in `key_handler`, whose tests check that each key here does something and
+//! that unmodified keys not here do nothing.
 
 use std::borrow::Cow;
-use std::fmt::Write;
 
 /// Where a key works, which also groups the help overlay
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,49 +108,50 @@ pub fn badge(key: &'static str) -> Cow<'static, str> {
     }
 }
 
-/// The keybinding table in the README's "Keyboard Shortcuts" section.
-#[must_use]
-pub fn readme_table() -> String {
-    let rows: Vec<[String; 3]> = KEYMAP
-        .iter()
-        .map(|k| {
-            let keys = k
-                .keys
-                .split(" / ")
-                .map(|key| format!("`{key}`"))
-                .collect::<Vec<_>>()
-                .join(" / ");
-            [keys, k.context.applies_in().to_string(), k.desc.to_string()]
-        })
-        .collect();
-    let header = ["Key", "Context", "Action"].map(String::from);
-    let width = |col: usize| {
-        rows.iter()
-            .chain(std::iter::once(&header))
-            .map(|row| row[col].chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let widths = [width(0), width(1), width(2)];
-    let line = |cells: &[String; 3]| {
-        let mut line = String::from("|");
-        for (cell, width) in cells.iter().zip(widths) {
-            let pad = width - cell.chars().count();
-            let _ = write!(line, " {cell}{} |", " ".repeat(pad));
-        }
-        line
-    };
-    let rule = widths.map(|w| "-".repeat(w));
-    std::iter::once(line(&header))
-        .chain(std::iter::once(line(&rule)))
-        .chain(rows.iter().map(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use super::*;
+
+    /// The keybinding table in the README's "Keyboard Shortcuts" section.
+    fn readme_table() -> String {
+        let rows: Vec<[String; 3]> = KEYMAP
+            .iter()
+            .map(|k| {
+                let keys = k
+                    .keys
+                    .split(" / ")
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                [keys, k.context.applies_in().to_string(), k.desc.to_string()]
+            })
+            .collect();
+        let header = ["Key", "Context", "Action"].map(String::from);
+        let width = |col: usize| {
+            rows.iter()
+                .chain(std::iter::once(&header))
+                .map(|row| row[col].chars().count())
+                .max()
+                .unwrap_or(0)
+        };
+        let widths = [width(0), width(1), width(2)];
+        let line = |cells: &[String; 3]| {
+            let mut line = String::from("|");
+            for (cell, width) in cells.iter().zip(widths) {
+                let pad = width - cell.chars().count();
+                let _ = write!(line, " {cell}{} |", " ".repeat(pad));
+            }
+            line
+        };
+        let rule = widths.map(|w| "-".repeat(w));
+        std::iter::once(line(&header))
+            .chain(std::iter::once(line(&rule)))
+            .chain(rows.iter().map(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn descriptions_fit_the_help_overlay() {

@@ -460,4 +460,298 @@ mod tests {
             app.shutdown().await;
         }
     }
+
+    /// Every key in `KEYMAP` does what it says, and unmodified keys not in it do nothing.
+    mod keymap_parity {
+        use std::path::Path;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        use crate::commands::command::Command;
+        use crate::pty::test_util::{pty_available, wait_until};
+        use crate::tui::app::{App, CommandStatus, Focus};
+        use crate::tui::keymap::{KEYMAP, KeyContext};
+        use crate::tui::log_state::LogBuffer;
+        use crate::tui::test_util::{AREA, cursor_node, group, type_text};
+
+        /// The key events `name`, one key as `KEYMAP` writes it, stands for
+        fn events(name: &str) -> Vec<KeyEvent> {
+            let (modifiers, key) = if let Some(key) = name.strip_prefix("Ctrl+") {
+                (KeyModifiers::CONTROL, key)
+            } else if let Some(key) = name.strip_prefix("Shift+") {
+                (KeyModifiers::SHIFT, key)
+            } else {
+                (KeyModifiers::NONE, name)
+            };
+            let codes = match key {
+                "↑/↓" => vec![KeyCode::Up, KeyCode::Down],
+                "↑" => vec![KeyCode::Up],
+                "↓" => vec![KeyCode::Down],
+                "←" => vec![KeyCode::Left],
+                "→" => vec![KeyCode::Right],
+                "Space" => vec![KeyCode::Char(' ')],
+                "Enter" => vec![KeyCode::Enter],
+                "Esc" => vec![KeyCode::Esc],
+                "Tab" => vec![KeyCode::Tab],
+                "F5" => vec![KeyCode::F(5)],
+                _ => {
+                    let mut chars = key.chars();
+                    let c = chars.next().unwrap();
+                    assert!(chars.next().is_none(), "unknown key {name:?}");
+                    // Terminals send Ctrl+R as Ctrl and `r`
+                    let c = if modifiers == KeyModifiers::CONTROL {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c
+                    };
+                    vec![KeyCode::Char(c)]
+                }
+            };
+            codes
+                .into_iter()
+                .map(|code| KeyEvent::new(code, modifiers))
+                .collect()
+        }
+
+        /// Everything a key could change that shows
+        #[derive(Debug, PartialEq)]
+        struct Seen {
+            cursor: Option<String>,
+            expanded: Vec<(String, bool)>,
+            selected: Vec<String>,
+            runs: Vec<(String, CommandStatus, Option<u64>)>,
+            scroll: Option<usize>,
+            search: String,
+            focus: Focus,
+            flags: [bool; 5],
+            status: Option<String>,
+            batch: Option<Vec<String>>,
+        }
+
+        fn seen(app: &mut App) -> Seen {
+            app.rebuild_visible_nodes();
+            let mut expanded: Vec<_> = app.expanded.clone().into_iter().collect();
+            expanded.sort();
+            let mut selected: Vec<_> = app.selected.iter().cloned().collect();
+            selected.sort();
+            let runs = app
+                .config
+                .all_commands()
+                .iter()
+                .map(|c| {
+                    let generation = app.processes.get(&c.id).map(|p| p.generation);
+                    (c.id.clone(), app.run_summary(&c.id).status, generation)
+                })
+                .collect();
+            let scroll = app.active_terminal_id.as_ref().and_then(|id| {
+                let proc = app.processes.get(id)?;
+                Some(proc.terminal.parser().lock().screen().scrollback())
+            });
+            let mut batch: Option<Vec<String>> = app
+                .batch_run_ids
+                .as_ref()
+                .map(|b| b.iter().cloned().collect());
+            if let Some(batch) = &mut batch {
+                batch.sort();
+            }
+            Seen {
+                cursor: cursor_node(app).map(String::from),
+                expanded,
+                selected,
+                runs,
+                scroll,
+                search: format!("{:?}", app.search),
+                focus: app.focus,
+                flags: [
+                    app.fullscreen,
+                    app.show_help,
+                    app.show_logs,
+                    app.should_quit,
+                    app.auto_run_enabled,
+                ],
+                status: app.status.as_ref().map(|s| s.text.clone()),
+                batch,
+            }
+        }
+
+        /// ```text
+        /// root
+        /// ├─ grp         expanded
+        /// │  ├─ out      running, its output scrolled up 5 lines, in the pane
+        /// │  └─ waiter   waiting for out
+        /// └─ closed      collapsed
+        ///    └─ sel      selected
+        /// ```
+        fn fixture(dir: &Path) -> App {
+            let command = |id: &str, cmd: &str, depends_on: &[&str]| Command {
+                id: id.into(),
+                name: id.into(),
+                cmd: cmd.into(),
+                cwd: dir.to_path_buf(),
+                depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
+                ..Default::default()
+            };
+            let config = group(
+                "root",
+                vec![
+                    group(
+                        "grp",
+                        vec![],
+                        vec![
+                            command("out", "seq 300; exec sleep 30", &[]),
+                            command("waiter", "true", &["out"]),
+                        ],
+                    ),
+                    group("closed", vec![], vec![command("sel", "true", &[])]),
+                ],
+                vec![],
+            );
+            let mut app = App::new(config, dir.to_path_buf(), LogBuffer::new());
+            app.expanded.insert("closed".into(), false);
+            app.select_by_hand("sel".into());
+            app.run_command("waiter", AREA);
+            app.active_terminal_id = Some("out".into());
+
+            let out = Arc::clone(&app.processes["out"].terminal);
+            let screen = |test: &dyn Fn(&vt100::Screen) -> bool| {
+                wait_until(Duration::from_secs(5), || {
+                    test(out.parser().lock().screen())
+                })
+            };
+            assert!(
+                screen(&|s| s.scrollback_len() >= 250),
+                "out printed too little"
+            );
+            out.set_scroll(5).unwrap();
+            assert!(screen(&|s| s.scrollback() == 5), "out didn't scroll");
+            app
+        }
+
+        fn cursor_to(app: &mut App, id: &str) {
+            app.rebuild_visible_nodes();
+            let row = app.visible_nodes.iter().position(|n| n.id == id).unwrap();
+            app.set_cursor_index(row);
+            app.update_active_terminal();
+        }
+
+        /// Set `app` up where `name` of `context` has something to act on.
+        fn place(app: &mut App, context: KeyContext, name: &str) {
+            match context {
+                KeyContext::Search => {
+                    app.handle_key(KeyEvent::from(KeyCode::Char('/')), AREA);
+                    type_text(app, "o");
+                }
+                KeyContext::Terminal => {
+                    cursor_to(app, "out");
+                    app.focus = Focus::Terminal;
+                }
+                KeyContext::Fullscreen => app.fullscreen = true,
+                _ => {
+                    let at = match name {
+                        "k" | "↑" | "h" | "←" => "grp",
+                        "l" | "→" => "closed",
+                        "s" | "c" => "waiter",
+                        "Space" | "r" | "x" | "Tab" | "Shift+↑/↓" | "{" | "}" => "out",
+                        _ => "root",
+                    };
+                    cursor_to(app, at);
+                }
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn every_listed_key_acts() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            for help in KEYMAP {
+                for name in help.keys.split(" / ") {
+                    for event in events(name) {
+                        let mut app = fixture(dir.path());
+                        place(&mut app, help.context, name);
+                        let before = seen(&mut app);
+
+                        app.handle_key(event, AREA);
+
+                        // Scrolling reaches the output a moment later
+                        let acted = wait_until(Duration::from_secs(2), || seen(&mut app) != before);
+                        app.shutdown().await;
+                        assert!(
+                            acted,
+                            "{event:?} ({name} in {:?}: {}) did nothing",
+                            help.context, help.desc
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Unmodified keys a terminal sends
+        fn unmodified_keys() -> Vec<KeyEvent> {
+            let named = [
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::PageUp,
+                KeyCode::PageDown,
+                KeyCode::Tab,
+                KeyCode::BackTab,
+                KeyCode::Backspace,
+                KeyCode::Delete,
+                KeyCode::Insert,
+                KeyCode::Enter,
+                KeyCode::Esc,
+            ];
+            let function = (1..=12).map(KeyCode::F);
+            let chars = (' '..='~').map(KeyCode::Char);
+            named
+                .into_iter()
+                .chain(function)
+                .chain(chars)
+                .map(KeyEvent::from)
+                .collect()
+        }
+
+        /// Modified keys aren't tried: most bindings ignore Shift, and Shift+Home/End scroll
+        /// like `{` and `}`.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn unlisted_keys_do_nothing_in_the_tree() {
+            if !pty_available() {
+                return;
+            }
+            let tree = [
+                KeyContext::Navigate,
+                KeyContext::Run,
+                KeyContext::Output,
+                KeyContext::Other,
+            ];
+            let listed: Vec<KeyEvent> = KEYMAP
+                .iter()
+                .filter(|k| tree.contains(&k.context))
+                .flat_map(|k| k.keys.split(" / ").flat_map(events))
+                .collect();
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = fixture(dir.path());
+            app.rebuild_visible_nodes();
+            let rows: Vec<String> = app.visible_nodes.iter().map(|n| n.id.clone()).collect();
+            for row in rows {
+                cursor_to(&mut app, &row);
+                for event in unmodified_keys() {
+                    if listed.contains(&event) {
+                        continue;
+                    }
+                    let before = seen(&mut app);
+                    app.handle_key(event, AREA);
+                    assert_eq!(before, seen(&mut app), "{event:?} on {row} did something");
+                }
+            }
+            app.shutdown().await;
+        }
+    }
 }
