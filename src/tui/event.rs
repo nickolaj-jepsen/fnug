@@ -92,3 +92,115 @@ pub fn translate_key_event(key: &KeyEvent, parser: &Arc<Mutex<vt100::Parser>>) -
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use parking_lot::Mutex;
+
+    use super::translate_key_event;
+
+    const NONE: KeyModifiers = KeyModifiers::NONE;
+    const CTRL: KeyModifiers = KeyModifiers::CONTROL;
+    const ALT: KeyModifiers = KeyModifiers::ALT;
+
+    /// What the PTY gets for the key, with the program in application cursor key mode or not.
+    fn translate(code: KeyCode, modifiers: KeyModifiers, app_cursor: bool) -> Option<Vec<u8>> {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        if app_cursor {
+            // DECCKM, which programs such as vim and less set
+            parser.lock().process(b"\x1b[?1h");
+        }
+        translate_key_event(&KeyEvent::new(code, modifiers), &parser)
+    }
+
+    #[test]
+    fn keys_become_xterm_bytes() {
+        let cases: &[(KeyCode, KeyModifiers, &[u8])] = &[
+            (KeyCode::Char('a'), NONE, b"a"),
+            (KeyCode::Char('A'), KeyModifiers::SHIFT, b"A"),
+            (KeyCode::Char('é'), NONE, "é".as_bytes()),
+            (KeyCode::Char('a'), CTRL, b"\x01"),
+            (KeyCode::Char('c'), CTRL, b"\x03"),
+            (KeyCode::Char('z'), CTRL, b"\x1a"),
+            (KeyCode::Char('x'), ALT, b"\x1bx"),
+            (KeyCode::Char('é'), ALT, "\x1bé".as_bytes()),
+            (KeyCode::Enter, NONE, b"\r"),
+            (KeyCode::Backspace, NONE, b"\x7f"),
+            (KeyCode::Tab, NONE, b"\t"),
+            (KeyCode::BackTab, KeyModifiers::SHIFT, b"\x1b[Z"),
+            (KeyCode::Esc, NONE, b"\x1b"),
+            (KeyCode::Home, NONE, b"\x1b[H"),
+            (KeyCode::End, NONE, b"\x1b[F"),
+            (KeyCode::PageUp, NONE, b"\x1b[5~"),
+            (KeyCode::PageDown, NONE, b"\x1b[6~"),
+            (KeyCode::Insert, NONE, b"\x1b[2~"),
+            (KeyCode::Delete, NONE, b"\x1b[3~"),
+        ];
+        for &(code, modifiers, bytes) in cases {
+            assert_eq!(
+                translate(code, modifiers, false).as_deref(),
+                Some(bytes),
+                "{code:?} with {modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_keys_become_xterm_bytes() {
+        let expected: [&[u8]; 12] = [
+            b"\x1bOP",
+            b"\x1bOQ",
+            b"\x1bOR",
+            b"\x1bOS",
+            b"\x1b[15~",
+            b"\x1b[17~",
+            b"\x1b[18~",
+            b"\x1b[19~",
+            b"\x1b[20~",
+            b"\x1b[21~",
+            b"\x1b[23~",
+            b"\x1b[24~",
+        ];
+        for (n, bytes) in (1..).zip(expected) {
+            assert_eq!(
+                translate(KeyCode::F(n), NONE, false).as_deref(),
+                Some(bytes),
+                "F{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn arrows_follow_the_cursor_key_mode() {
+        let cases: [(KeyCode, &[u8], &[u8]); 4] = [
+            (KeyCode::Up, b"\x1b[A", b"\x1bOA"),
+            (KeyCode::Down, b"\x1b[B", b"\x1bOB"),
+            (KeyCode::Right, b"\x1b[C", b"\x1bOC"),
+            (KeyCode::Left, b"\x1b[D", b"\x1bOD"),
+        ];
+        for (code, normal, application) in cases {
+            assert_eq!(translate(code, NONE, false).as_deref(), Some(normal));
+            assert_eq!(translate(code, NONE, true).as_deref(), Some(application));
+        }
+    }
+
+    #[test]
+    fn keys_without_a_sequence_are_not_forwarded() {
+        for (code, modifiers) in [
+            // Only letters have a control code here
+            (KeyCode::Char('1'), CTRL),
+            (KeyCode::F(13), NONE),
+            (KeyCode::CapsLock, NONE),
+            (KeyCode::Null, NONE),
+        ] {
+            assert_eq!(
+                translate(code, modifiers, false),
+                None,
+                "{code:?} with {modifiers:?}"
+            );
+        }
+    }
+}
