@@ -185,3 +185,28 @@ fn sigterm_stops_commands_and_exits_143() {
     assert_eq!(server.wait().code(), Some(143));
     assert_dies(sleep.0);
 }
+
+#[test]
+fn shutdown_waits_for_commands_to_clean_up() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        r"
+name: root
+commands:
+  - name: graceful
+    cmd: 'trap ''sleep 0.5; touch cleaned-up; exit 1'' TERM; touch started; i=0; while [ $i -lt 600 ]; do i=$((i+1)); sleep 0.05; done'
+",
+    );
+    let mut server = Server::start(dir.path());
+    server.call(2, "run_lint", &json!({"command": "graceful"}));
+    let started = dir.path().join("started");
+    assert!(common::wait_until(TIMEOUT, || started.exists()));
+
+    drop(server.stdin.take());
+    assert!(server.wait().success());
+    assert!(
+        dir.path().join("cleaned-up").exists(),
+        "the server exited before the command's SIGTERM handler finished"
+    );
+}
