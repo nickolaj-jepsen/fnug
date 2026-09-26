@@ -5,30 +5,17 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 import fnug
-from fnug import Auto, Command, Config
+from fnug import Auto, Command, CommandGroup, Config
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def real_fnug(monkeypatch):
-    """FNUG_TEST_BINARY, or the binary `maturin develop` installed next to Python.
-
-    PATH is not searched, so a stale global install is never tested by accident.
-    """
-    binary = os.environ.get("FNUG_TEST_BINARY") or str(
-        Path(sys.executable).parent / "fnug"
-    )
-    if not Path(binary).is_file():
-        pytest.skip("no fnug binary: run `maturin develop` or set FNUG_TEST_BINARY")
-    monkeypatch.setattr(fnug, "_find_binary", lambda: binary)
-    return binary
 
 
 @pytest.fixture
@@ -108,3 +95,36 @@ def test_integration_git_selection_from_caller_repo(git_repo, monkeypatch, capfd
     output = capfd.readouterr()
     assert result.returncode == 0, output
     assert str(git_repo) in output.out + output.err
+
+
+@pytest.mark.usefixtures("real_fnug")
+def test_integration_config_keys_are_accepted(tmp_path, monkeypatch, capfd):
+    monkeypatch.chdir(tmp_path)
+    config = Config(
+        schema="https://example.com/fnug.schema.json",
+        name="demo",
+        timeout="5m",
+        exclusive=False,
+        children=[
+            CommandGroup(
+                name="group",
+                timeout=60,
+                exclusive=False,
+                commands=[
+                    Command(
+                        name="ok",
+                        cmd="true",
+                        timeout=10,
+                        exclusive=True,
+                        auto=Auto(always=True, watch=True, run_on_change=True),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    result = fnug.check(config, all_=True, no_tui=True)
+
+    output = capfd.readouterr()
+    assert result.returncode == 0, output
+    assert "ok PASS" in output.err

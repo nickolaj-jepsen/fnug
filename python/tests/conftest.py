@@ -1,19 +1,21 @@
-"""Fixtures for the wrapper tests: a fake fnug binary that records its calls."""
+"""Fixtures for the wrapper tests: a fake fnug binary, the real one, and its schema."""
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
 import fnug
 
-if TYPE_CHECKING:
-    from pathlib import Path
+REPO = Path(__file__).resolve().parents[2]
 
 # Copies the config while it runs, because the wrapper deletes its temp file afterwards.
 FAKE_BINARY = """\
@@ -76,3 +78,42 @@ def fake_fnug(
     monkeypatch.delenv("FNUG_FAKE_EXIT", raising=False)
     monkeypatch.setattr(fnug, "_find_binary", lambda: str(binary))
     return FakeFnug(binary, log)
+
+
+def real_binary() -> str | None:
+    """FNUG_TEST_BINARY, or the binary `maturin develop` installed next to Python.
+
+    PATH is not searched, so a stale global install is never tested by accident.
+    """
+    binary = os.environ.get("FNUG_TEST_BINARY") or str(
+        Path(sys.executable).parent / "fnug"
+    )
+    return binary if Path(binary).is_file() else None
+
+
+@pytest.fixture
+def real_fnug(monkeypatch: pytest.MonkeyPatch) -> str:
+    """The real binary, which the wrapper then runs; skips the test without one."""
+    binary = real_binary()
+    if binary is None:
+        pytest.skip("no fnug binary: run `maturin develop` or set FNUG_TEST_BINARY")
+    monkeypatch.setattr(fnug, "_find_binary", lambda: binary)
+    return binary
+
+
+@pytest.fixture(scope="session")
+def fnug_schema() -> dict[str, Any]:
+    """The config schema from `fnug schema`, or else the committed copy.
+
+    A Rust test keeps schema/fnug.schema.json equal to the binary's output.
+    """
+    binary = real_binary()
+    if binary is not None:
+        result = subprocess.run(
+            [binary, "schema"], check=True, capture_output=True, text=True
+        )
+        return json.loads(result.stdout)
+    committed = REPO / "schema" / "fnug.schema.json"
+    if not committed.is_file():
+        pytest.skip("no fnug binary and no schema/fnug.schema.json")
+    return json.loads(committed.read_text())
