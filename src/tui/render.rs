@@ -406,6 +406,47 @@ mod tests {
         assert_eq!(cursor_node(&app), Some("c01"));
     }
 
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn divider_drag_ends_without_release_in_the_panes() {
+        let mut app = long_list(3);
+        let (_, areas) = draw(&mut app, 80, 12);
+        let divider = areas.0.width;
+        let press = mouse(MouseEventKind::Down(MouseButton::Left), divider, 2);
+
+        // Released over the toolbar, which handles its own clicks
+        app.handle_mouse(press, areas.0, areas.1);
+        assert!(app.mouse.resizing);
+        let release = MouseEventKind::Up(MouseButton::Left);
+        app.handle_mouse(mouse(release, divider, app.toolbar.y), areas.0, areas.1);
+        assert!(!app.mouse.resizing, "release on the toolbar");
+
+        // Released outside the window: a move without a button held ends the drag
+        app.handle_mouse(press, areas.0, areas.1);
+        app.handle_mouse(mouse(MouseEventKind::Moved, 30, 3), areas.0, areas.1);
+        assert!(!app.mouse.resizing, "move after a lost release");
+    }
+
+    #[test]
+    fn fullscreen_click_on_first_column_starts_no_drag() {
+        let mut app = long_list(3);
+        app.fullscreen = true;
+        let (_, areas) = draw(&mut app, 80, 12);
+        assert_eq!(areas.0.width, 0);
+
+        let press = MouseEventKind::Down(MouseButton::Left);
+        app.handle_mouse(mouse(press, 0, 2), areas.0, areas.1);
+        assert!(!app.mouse.resizing);
+    }
+
     #[test]
     fn scrolled_search_not_blank() {
         let mut app = long_list(32);
