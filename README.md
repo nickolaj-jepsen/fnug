@@ -556,10 +556,11 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 | `/`       | Tree     | Search/filter commands            |
 | `Esc`     | Search   | Clear search                      |
 | `L`       | Tree     | Toggle log panel                  |
-| `Tab`     | Tree     | Focus terminal                    |
-| `Esc`     | Terminal | Back to tree                      |
-| `Ctrl+R`  | Global   | Toggle fullscreen                 |
-| `Ctrl+C`  | Global   | Quit                              |
+| `Tab`     | Tree     | Type into the running command     |
+| `Ctrl+]`  | Terminal | Back to tree                      |
+| `Esc`     | Terminal | Back to tree, unless full-screen  |
+| `Ctrl+R`  | Tree     | Toggle fullscreen                 |
+| `Ctrl+C`  | Tree     | Quit                              |
 | `q`       | Tree     | Quit                              |
 
 ### Mouse
@@ -569,6 +570,7 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 - **Click** the selection orb (●/○) or arrow (▼/▶) to toggle
 - **Drag** the separator between tree and terminal to resize
 - **Scroll wheel** in the terminal panel to scroll output
+- **Click** the terminal panel of a running full-screen or mouse-aware program to type into it
 - **Right-click** a command for a context menu with run/stop/clear options
 
 ### Copying output

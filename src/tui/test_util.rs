@@ -1,6 +1,6 @@
 //! Helpers for TUI tests that need no PTY.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
@@ -46,8 +46,29 @@ pub(super) fn two_groups() -> App {
     App::new(config, PathBuf::new(), LogBuffer::new())
 }
 
+/// `root` holding a command per `(id, cmd)`, each running `cmd` in `dir`
+pub(super) fn shell_app(dir: &Path, commands: &[(&str, &str)]) -> App {
+    let commands = commands
+        .iter()
+        .map(|(id, cmd)| Command {
+            cmd: (*cmd).into(),
+            cwd: dir.to_path_buf(),
+            ..command(id)
+        })
+        .collect();
+    App::new(
+        group("root", vec![], commands),
+        dir.to_path_buf(),
+        LogBuffer::new(),
+    )
+}
+
 pub(super) fn press(app: &mut App, code: KeyCode) {
     app.handle_key(KeyEvent::new(code, KeyModifiers::NONE), AREA);
+}
+
+pub(super) fn press_ctrl(app: &mut App, c: char) {
+    app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL), AREA);
 }
 
 pub(super) fn type_text(app: &mut App, text: &str) {

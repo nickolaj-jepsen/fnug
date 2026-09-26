@@ -565,6 +565,13 @@ impl App {
 
     /// Handle app events (called from event loop). Returns whether the screen needs a redraw.
     pub fn handle_app_event(&mut self, event: AppEvent) -> bool {
+        let redraw = self.apply_app_event(event);
+        let focused = self.focus;
+        self.release_stale_focus();
+        redraw || self.focus != focused
+    }
+
+    fn apply_app_event(&mut self, event: AppEvent) -> bool {
         match event {
             AppEvent::ProcessExited {
                 id,
@@ -909,11 +916,47 @@ impl App {
         }
     }
 
-    /// Whether the currently active terminal is interactive (using alternate screen)
+    /// Whether the command on screen is running, so it can take keyboard focus
+    #[must_use]
+    pub fn active_command_is_running(&self) -> bool {
+        self.active_process()
+            .is_some_and(|proc| proc.status == CommandStatus::Running)
+    }
+
+    /// Whether the command on screen runs a full-screen program or reads the mouse, so a click
+    /// in the pane is meant for it
     #[must_use]
     pub fn active_command_is_interactive(&self) -> bool {
+        self.active_command_is_running()
+            && self.active_screen_is(|screen| {
+                screen.alternate_screen()
+                    || screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+            })
+    }
+
+    /// Whether the command on screen shows the alternate screen, as full-screen programs do
+    #[must_use]
+    pub fn active_command_on_alternate_screen(&self) -> bool {
+        self.active_screen_is(vt100::Screen::alternate_screen)
+    }
+
+    fn active_screen_is(&self, test: impl FnOnce(&vt100::Screen) -> bool) -> bool {
         self.active_process()
-            .is_some_and(|proc| proc.terminal.parser().lock().screen().alternate_screen())
+            .is_some_and(|proc| test(proc.terminal.parser().lock().screen()))
+    }
+
+    /// Give the command on screen keyboard focus, if it is running.
+    pub(super) fn focus_terminal(&mut self) {
+        if self.active_command_is_running() {
+            self.focus = Focus::Terminal;
+        }
+    }
+
+    /// Give focus back to the tree once the focused command ended or left the screen.
+    pub(super) fn release_stale_focus(&mut self) {
+        if self.focus == Focus::Terminal && !self.active_command_is_running() {
+            self.focus = Focus::Tree;
+        }
     }
 
     /// Adjust `tree_scroll` so the cursor row is visible within the given height, and no
@@ -1154,11 +1197,8 @@ impl App {
             ToolbarAction::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
             }
-            ToolbarAction::FocusTerminal => {
-                if self.active_terminal_id.is_some() && self.active_command_is_interactive() {
-                    self.focus = Focus::Terminal;
-                }
-            }
+            ToolbarAction::FocusTerminal => self.focus_terminal(),
+            ToolbarAction::LeaveTerminal => self.focus = Focus::Tree,
             ToolbarAction::Quit => {
                 self.should_quit = true;
             }

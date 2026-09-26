@@ -19,6 +19,7 @@ pub enum ToolbarAction {
     GitSelect,
     ToggleFullscreen,
     FocusTerminal,
+    LeaveTerminal,
     Quit,
     BackToTree,
     ToggleLogs,
@@ -65,6 +66,15 @@ impl Shortcut {
 fn get_shortcuts(app: &App) -> Vec<Shortcut> {
     let mut shortcuts = Vec::new();
 
+    // Every other key goes to the command
+    if app.focus == Focus::Terminal {
+        shortcuts.push(Shortcut::new("^]", "Back", ToolbarAction::LeaveTerminal));
+        if !app.active_command_on_alternate_screen() {
+            shortcuts.push(Shortcut::new("ESC", "Back", ToolbarAction::LeaveTerminal));
+        }
+        return shortcuts;
+    }
+
     if app.fullscreen {
         shortcuts.push(Shortcut::new(
             "^R",
@@ -80,113 +90,96 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
         return shortcuts;
     }
 
-    match app.focus {
-        Focus::Terminal => {
-            shortcuts.push(Shortcut::new(
-                "ESC",
-                "Back to tree",
-                ToolbarAction::BackToTree,
-            ));
-            shortcuts.push(Shortcut::new(
-                "^R",
-                "Fullscreen",
-                ToolbarAction::ToggleFullscreen,
-            ));
-            shortcuts.push(Shortcut::new("^C", "Quit", ToolbarAction::Quit));
-        }
-        Focus::Tree => {
-            let cursor_node = app.visible_nodes.get(app.cursor);
+    let cursor_node = app.visible_nodes.get(app.cursor);
 
-            // "Run selected (N)" — only when there are selected commands
-            let selected_count = app.selected.len();
-            if selected_count > 0 {
-                shortcuts.push(Shortcut::new(
-                    "ENTER",
-                    Cow::Owned(format!("Run selected ({selected_count})")),
-                    ToolbarAction::RunSelected,
-                ));
-            }
-
-            match cursor_node.map(|n| &n.kind) {
-                Some(NodeKind::Command {
-                    selected, status, ..
-                }) => {
-                    let toggle_label = if *selected { "Deselect" } else { "Select" };
-                    shortcuts.push(Shortcut::new(
-                        "SPACE",
-                        toggle_label,
-                        ToolbarAction::ToggleSpace,
-                    ));
-                    shortcuts.push(Shortcut::new("R", "Run", ToolbarAction::Run));
-                    if matches!(status, CommandStatus::Running) {
-                        shortcuts.push(Shortcut::new("S", "Stop", ToolbarAction::Stop));
-                    }
-                    shortcuts.push(Shortcut::new("C", "Copy", ToolbarAction::Copy));
-                }
-                Some(NodeKind::Group {
-                    selected, total, ..
-                }) => {
-                    let toggle_label = if *selected == *total {
-                        "Deselect all"
-                    } else {
-                        "Select all"
-                    };
-                    shortcuts.push(Shortcut::new(
-                        "SPACE",
-                        toggle_label,
-                        ToolbarAction::ToggleSpace,
-                    ));
-                    shortcuts.push(Shortcut::new("R", "Run all", ToolbarAction::Run));
-                }
-                None => {}
-            }
-
-            shortcuts.push(Shortcut::new("G", "Git select", ToolbarAction::GitSelect));
-            shortcuts.push(Shortcut::new(
-                "^R",
-                "Fullscreen",
-                ToolbarAction::ToggleFullscreen,
-            ));
-
-            if app.active_terminal_id.is_some() && app.active_command_is_interactive() {
-                shortcuts.push(Shortcut::new(
-                    "TAB",
-                    "Terminal",
-                    ToolbarAction::FocusTerminal,
-                ));
-            }
-
-            if app.search.is_editing() {
-                shortcuts.push(Shortcut::new("ESC", "Clear", ToolbarAction::ClearSearch));
-                shortcuts.push(Shortcut::new(
-                    "ENTER",
-                    "Accept",
-                    ToolbarAction::AcceptSearch,
-                ));
-            } else if app.search.is_filtering() {
-                shortcuts.push(Shortcut::new("/", "Edit filter", ToolbarAction::Search));
-                shortcuts.push(Shortcut::new(
-                    "ESC",
-                    "Clear filter",
-                    ToolbarAction::ClearSearch,
-                ));
-            } else {
-                shortcuts.push(Shortcut::new("/", "Search", ToolbarAction::Search));
-            }
-
-            let unseen = app.unseen_log_issues();
-            let log_label: Cow<'static, str> = if app.show_logs {
-                "Hide logs".into()
-            } else if unseen > 0 {
-                format!("Logs ({unseen}!)").into()
-            } else {
-                "Logs".into()
-            };
-            shortcuts.push(Shortcut::new("L", log_label, ToolbarAction::ToggleLogs));
-            shortcuts.push(Shortcut::new("?", "Help", ToolbarAction::ShowHelp));
-            shortcuts.push(Shortcut::new("Q", "Quit", ToolbarAction::Quit));
-        }
+    // "Run selected (N)" — only when there are selected commands
+    let selected_count = app.selected.len();
+    if selected_count > 0 {
+        shortcuts.push(Shortcut::new(
+            "ENTER",
+            Cow::Owned(format!("Run selected ({selected_count})")),
+            ToolbarAction::RunSelected,
+        ));
     }
+
+    match cursor_node.map(|n| &n.kind) {
+        Some(NodeKind::Command {
+            selected, status, ..
+        }) => {
+            let toggle_label = if *selected { "Deselect" } else { "Select" };
+            shortcuts.push(Shortcut::new(
+                "SPACE",
+                toggle_label,
+                ToolbarAction::ToggleSpace,
+            ));
+            shortcuts.push(Shortcut::new("R", "Run", ToolbarAction::Run));
+            if matches!(status, CommandStatus::Running) {
+                shortcuts.push(Shortcut::new("S", "Stop", ToolbarAction::Stop));
+            }
+            shortcuts.push(Shortcut::new("C", "Copy", ToolbarAction::Copy));
+        }
+        Some(NodeKind::Group {
+            selected, total, ..
+        }) => {
+            let toggle_label = if *selected == *total {
+                "Deselect all"
+            } else {
+                "Select all"
+            };
+            shortcuts.push(Shortcut::new(
+                "SPACE",
+                toggle_label,
+                ToolbarAction::ToggleSpace,
+            ));
+            shortcuts.push(Shortcut::new("R", "Run all", ToolbarAction::Run));
+        }
+        None => {}
+    }
+
+    shortcuts.push(Shortcut::new("G", "Git select", ToolbarAction::GitSelect));
+    shortcuts.push(Shortcut::new(
+        "^R",
+        "Fullscreen",
+        ToolbarAction::ToggleFullscreen,
+    ));
+
+    if app.active_command_is_running() {
+        shortcuts.push(Shortcut::new(
+            "TAB",
+            "Terminal",
+            ToolbarAction::FocusTerminal,
+        ));
+    }
+
+    if app.search.is_editing() {
+        shortcuts.push(Shortcut::new("ESC", "Clear", ToolbarAction::ClearSearch));
+        shortcuts.push(Shortcut::new(
+            "ENTER",
+            "Accept",
+            ToolbarAction::AcceptSearch,
+        ));
+    } else if app.search.is_filtering() {
+        shortcuts.push(Shortcut::new("/", "Edit filter", ToolbarAction::Search));
+        shortcuts.push(Shortcut::new(
+            "ESC",
+            "Clear filter",
+            ToolbarAction::ClearSearch,
+        ));
+    } else {
+        shortcuts.push(Shortcut::new("/", "Search", ToolbarAction::Search));
+    }
+
+    let unseen = app.unseen_log_issues();
+    let log_label: Cow<'static, str> = if app.show_logs {
+        "Hide logs".into()
+    } else if unseen > 0 {
+        format!("Logs ({unseen}!)").into()
+    } else {
+        "Logs".into()
+    };
+    shortcuts.push(Shortcut::new("L", log_label, ToolbarAction::ToggleLogs));
+    shortcuts.push(Shortcut::new("?", "Help", ToolbarAction::ShowHelp));
+    shortcuts.push(Shortcut::new("Q", "Quit", ToolbarAction::Quit));
 
     shortcuts
 }
@@ -376,7 +369,14 @@ mod tests {
         app.set_status("Copied", StatusLevel::Info);
         app.focus = Focus::Terminal;
 
-        assert!(toolbar_text(&app, 80).contains("Back to tree"));
+        assert!(toolbar_text(&app, 80).contains("^]  Back"));
+    }
+
+    #[test]
+    fn toolbar_terminal_focus() {
+        let mut app = two_groups();
+        app.focus = Focus::Terminal;
+        insta::assert_snapshot!(toolbar_text(&app, 80).trim_end());
     }
 
     #[test]
