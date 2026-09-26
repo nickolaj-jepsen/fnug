@@ -917,6 +917,19 @@ fn base_outside_repo_exits_2() {
 }
 
 #[test]
+fn staged_selecting_nothing_gives_no_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    clean_repo(dir.path(), SELECTION);
+
+    // In a hook, where --all and the rest don't apply
+    let output = check(dir.path(), &["--staged"]);
+    let err = stderr(&output);
+    assert!(output.status.success(), "{err}");
+    assert!(err.contains("No commands selected (4 configured)"), "{err}");
+    assert!(!err.contains("--all"), "{err}");
+}
+
+#[test]
 fn stash_requires_staged() {
     let dir = tempfile::tempdir().unwrap();
     clean_repo(dir.path(), SELECTION);
