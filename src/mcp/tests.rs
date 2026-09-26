@@ -846,6 +846,11 @@ async fn include_manual_runs_check_false_commands() {
 
 #[tokio::test]
 async fn base_selects_committed_changes() {
+    // The server checks the base in its own cwd's repo, e.g. not in the nix build sandbox
+    if git2::Repository::discover(".").is_err() {
+        eprintln!("skipping: the test process doesn't run in a git repository");
+        return;
+    }
     let (server, dir, repo) = repo_server(RUST_AND_DOCS);
     let head = repo.head().unwrap().peel_to_commit().unwrap();
     repo.branch("start", &head, false).unwrap();
