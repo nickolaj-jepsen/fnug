@@ -95,6 +95,7 @@ Run `fnug` in a directory with a `.fnug.yaml` configuration file (or pass `-c pa
 | `--all`           | Run every command instead of the ones changes select (`check` only) |
 | `--include-manual` | Also run commands with `auto.check: false` (`check` only)      |
 | `--base <ref>`    | Select by the changes since the merge base of `HEAD` and `<ref>`, such as `origin/main`: commits since then plus uncommitted changes (`check` only) |
+| `--staged`        | Select by the changes staged for the next commit, or in a pre-commit hook the ones being committed; unstaged and untracked changes don't count (`check` only) |
 | `--timeout <dur>` | Kill commands that run longer than `<dur>` (seconds, or e.g. `90s`, `5m`) unless their config sets `timeout` (`check` only) |
 | `-j`, `--jobs <n>` | Run up to `<n>` commands at once, each after its dependencies; `0` means one per CPU (default `1`, `check` only) |
 | `-V`, `--version` | Print fnug's version                                            |

@@ -37,6 +37,11 @@ pub struct CheckArgs {
     #[arg(long, value_name = "REF", group = "source")]
     base: Option<String>,
 
+    /// Select by the changes staged for the next commit; unstaged and untracked changes don't
+    /// count. In a pre-commit hook, the index git is committing
+    #[arg(long, group = "source")]
+    staged: bool,
+
     /// Stop on first failure
     #[arg(long)]
     fail_fast: bool,
@@ -69,15 +74,16 @@ impl CheckArgs {
         } else if self.all {
             Selection::All { include_manual }
         } else {
-            let scope = match &self.base {
-                Some(base) => GitScope::Since(base.clone()),
-                None => GitScope::WorkingTree,
-            };
-            Selection::Auto {
-                options: SelectOptions {
-                    scope,
+            let options = match &self.base {
+                Some(base) => SelectOptions {
+                    scope: GitScope::Since(base.clone()),
                     index_override: None,
                 },
+                None if self.staged => SelectOptions::from_env(GitScope::Staged),
+                None => SelectOptions::default(),
+            };
+            Selection::Auto {
+                options,
                 include_manual,
             }
         }

@@ -15,7 +15,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn fnug_command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fnug"));
-    command
+    common::git::isolate(&mut command)
         .current_dir(dir)
         .args(["--no-workspace", "check", "--no-tui"])
         .args(args)
@@ -853,4 +853,149 @@ fn base_unresolvable_exits_2() {
         stderr(&output).contains("cannot be used with"),
         "{output:?}"
     );
+}
+
+const STAGED: &str = r"
+name: root
+commands:
+  - name: rust-lint
+    cmd: 'touch .git/rust-lint-ran; ! grep -rn BAD src/'
+    auto:
+      git: true
+      path: [src]
+      regex: ['\.rs$']
+  - name: docs
+    cmd: 'true'
+    auto:
+      git: true
+      path: [docs]
+";
+
+/// Write [`STAGED`], `src/a.rs` and `docs/a.md` in `dir`.
+fn write_staged_project(dir: &Path) {
+    common::write_config(dir, STAGED);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "ok\n").unwrap();
+    std::fs::write(dir.join("docs/a.md"), "docs\n").unwrap();
+}
+
+#[test]
+fn staged_ignores_unstaged_and_untracked() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    write_staged_project(dir.path());
+    common::commit_all(&repo);
+
+    std::fs::write(dir.path().join("docs/a.md"), "more docs\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("docs/a.md")).unwrap();
+    index.write().unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "BAD\n").unwrap();
+    std::fs::write(dir.path().join("src/scratch.rs"), "BAD\n").unwrap();
+
+    let output = check(dir.path(), &["--staged"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["docs"], "{}", stderr(&output));
+
+    // The working tree scope sees the unstaged work
+    let output = check(dir.path(), &[]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(ran(&output), ["rust-lint", "docs"], "{}", stderr(&output));
+
+    let output = check(dir.path(), &["--staged", "--base", "HEAD"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+#[test]
+fn staged_outside_repo_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    if git2::Repository::discover(dir.path()).is_ok() {
+        eprintln!("skipping: the temp dir is inside a git repo");
+        return;
+    }
+    common::write_config(dir.path(), STAGED);
+    let output = check(dir.path(), &["--staged"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("staged changes need a git repository"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// A repo in `dir` made with the git CLI, with [`write_staged_project`] committed and a
+/// pre-commit hook that runs `fnug check --staged`.
+fn repo_with_staged_hook(dir: &Path) {
+    common::git::init(dir);
+    write_staged_project(dir);
+    common::git::git(dir, &["add", "-A"]);
+    common::git::git(dir, &["commit", "-qm", "init"]);
+    let hook = dir.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nexec '{}' --no-workspace check --no-tui --staged --mute-success\n",
+            env!("CARGO_BIN_EXE_fnug")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+}
+
+/// Run `git commit` with `args` in `dir`; returns whether it succeeded, and its stderr.
+fn git_commit(dir: &Path, args: &[&str]) -> (bool, String) {
+    let output = common::git::command(dir)
+        .arg("commit")
+        .args(args)
+        .env_remove("FNUG_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn staged_honours_git_commit_a() {
+    if !common::git::available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    repo_with_staged_hook(dir.path());
+    let marker = dir.path().join(".git/rust-lint-ran");
+
+    // A docs-only commit isn't blocked by unstaged work
+    std::fs::write(dir.path().join("src/a.rs"), "BAD\n").unwrap();
+    std::fs::write(dir.path().join("docs/a.md"), "more docs\n").unwrap();
+    common::git::git(dir.path(), &["add", "docs/a.md"]);
+    let (committed, err) = git_commit(dir.path(), &["-qm", "docs"]);
+    assert!(committed, "{err}");
+    assert!(!marker.exists(), "{err}");
+
+    // `commit -a` stages the work in a temporary index, which selects the lint
+    let (committed, err) = git_commit(dir.path(), &["-qam", "all"]);
+    assert!(!committed, "the lint should block the commit: {err}");
+    assert!(marker.exists(), "{err}");
+}
+
+#[test]
+fn staged_honours_commit_path() {
+    if !common::git::available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    repo_with_staged_hook(dir.path());
+    std::fs::write(dir.path().join("src/a.rs"), "BAD\n").unwrap();
+
+    let (committed, err) = git_commit(dir.path(), &["-qm", "path", "src/a.rs"]);
+    assert!(!committed, "the lint should block the commit: {err}");
+    assert!(dir.path().join(".git/rust-lint-ran").exists(), "{err}");
+
+    std::fs::write(dir.path().join("src/a.rs"), "fine\n").unwrap();
+    let (committed, err) = git_commit(dir.path(), &["-qm", "path", "src/a.rs"]);
+    assert!(committed, "{err}");
 }
