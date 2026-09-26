@@ -130,7 +130,7 @@
           }
         },
         "regex": {
-          "description": "Regular expressions matched against changed file paths; a file must match at least one.\n`[]` clears an inherited value, so any file matches.",
+          "description": "Regular expressions matched against the changed file's path relative to the working\ndirectory, with `/` separators (`src/main.rs`, or `../shared/lib.rs` outside it); a file\nmust match at least one. `[]` clears an inherited value, so any file matches.",
           "type": [
             "array",
             "null"
