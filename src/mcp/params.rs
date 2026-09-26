@@ -14,6 +14,10 @@ pub(super) struct ListLintsParams {
     /// Filter by command name or id (case-insensitive substring match).
     #[schemars(default)]
     pub name: Option<String>,
+    /// Report `selected` by what changed since the merge base of HEAD and this git revision,
+    /// as `run_lints` does with the same parameter.
+    #[schemars(default)]
+    pub base: Option<String>,
 }
 
 /// An `auto` rule that selects commands. Variants carry no docs, so the schema lists the values
@@ -27,13 +31,36 @@ pub(super) enum AutoType {
     None,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RunParams {
+pub(super) struct RunLintsParams {
     /// Stop on first failure instead of running all commands. Useful for quick
     /// feedback when you expect failures.
     #[schemars(default)]
     pub fail_fast: Option<bool>,
+    /// Select by what changed since the merge base of HEAD and this git revision, such as
+    /// "origin/main": the branch's commits plus uncommitted changes. Without it, only
+    /// uncommitted changes count (staged, unstaged and untracked files).
+    #[schemars(default)]
+    pub base: Option<String>,
+    /// Also run selected commands with `auto.check: false`, which are skipped by default.
+    #[schemars(default)]
+    pub include_manual: Option<bool>,
+    /// Also return the output of commands that passed or were cancelled. Output stays capped.
+    #[schemars(default)]
+    pub verbose: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RunAllParams {
+    /// Stop on first failure instead of running all commands. Useful for quick
+    /// feedback when you expect failures.
+    #[schemars(default)]
+    pub fail_fast: Option<bool>,
+    /// Also run commands with `auto.check: false`, which are skipped by default.
+    #[schemars(default)]
+    pub include_manual: Option<bool>,
     /// Also return the output of commands that passed or were cancelled. Output stays capped.
     #[schemars(default)]
     pub verbose: Option<bool>,

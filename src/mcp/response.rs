@@ -5,39 +5,126 @@
 //! that passed or were cancelled.
 
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use rmcp::model::{CallToolResult, Content};
 use serde::Serialize;
 
 use super::text::{self, Capped, Gap};
+use crate::commands::command::Command;
 use crate::process::ExitInfo;
 use crate::runner::{
-    CapturedOutput, CommandReport, Failure, Outcome, Plan, PlannedCommand, RunReport,
+    CapturedOutput, CommandReport, Failure, Outcome, Plan, PlannedCommand, RunReport, SelectReason,
 };
+use crate::selectors::{SelectedBy, SelectedCommand};
 
 /// Output a result keeps of one command: a fifth from its start, the rest from its end.
 const OUTPUT_PER_COMMAND: usize = 20 * 1024;
 /// Output a result keeps of all its commands together.
 const OUTPUT_TOTAL: usize = 60 * 1024;
+/// Matched files a result lists per command.
+const MAX_FILES: usize = 5;
+/// Ids a message lists.
+const MAX_IDS: usize = 10;
 
-#[derive(Serialize)]
-pub(super) struct LintInfo {
-    pub id: String,
-    pub name: String,
-    pub cmd: String,
-    pub cwd: String,
-    pub auto_rules: AutoRules,
-    pub depends_on: Vec<String>,
-    pub group: String,
-    pub selected: bool,
+/// Which commands a run tool asked for.
+#[derive(Debug, Clone)]
+pub(super) enum RunScope {
+    /// Those the changes select (`run_lints`), compared with `base` if given.
+    Changes {
+        base: Option<String>,
+        include_manual: bool,
+    },
+    /// Every command (`run_all`).
+    All { include_manual: bool },
+    /// One command, by id or name (`run_lint`).
+    Named(String),
 }
 
 #[derive(Serialize)]
-pub(super) struct AutoRules {
-    pub git: Option<bool>,
-    pub watch: Option<bool>,
-    pub always: Option<bool>,
-    pub check: Option<bool>,
+pub(super) struct LintInfo {
+    id: String,
+    name: String,
+    cmd: String,
+    cwd: String,
+    auto_rules: AutoRules,
+    depends_on: Vec<String>,
+    group: String,
+    /// Whether its `auto` rules select it now: `always`, or `git` with a matching change.
+    selected: bool,
+    /// Whether `run_lints` and `run_all` run it when selected: false for `auto.check: false`.
+    runs_in_check: bool,
+    /// `always` or `git`, when selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    #[serde(flatten)]
+    files: MatchedFiles,
+}
+
+#[derive(Serialize)]
+struct AutoRules {
+    git: Option<bool>,
+    watch: Option<bool>,
+    always: Option<bool>,
+    check: Option<bool>,
+}
+
+/// The first few changed files that match a command's `auto` rules, and how many there are.
+#[derive(Serialize, Default)]
+struct MatchedFiles {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    matched_files: Vec<String>,
+    #[serde(skip_serializing_if = "is_zero")]
+    matched_file_count: usize,
+}
+
+impl MatchedFiles {
+    /// Up to [`MAX_FILES`] of `files`, relative to `root` when inside it.
+    fn new(files: &[PathBuf], root: &Path) -> Self {
+        Self {
+            matched_files: files
+                .iter()
+                .take(MAX_FILES)
+                .map(|file| {
+                    file.strip_prefix(root)
+                        .unwrap_or(file)
+                        .display()
+                        .to_string()
+                })
+                .collect(),
+            matched_file_count: files.len(),
+        }
+    }
+}
+
+/// How `list_lints` describes a command, given what the changes select.
+pub(super) fn lint_info(
+    cmd: &Command,
+    group: String,
+    selected: Option<&SelectedCommand>,
+    root: &Path,
+) -> LintInfo {
+    LintInfo {
+        id: cmd.id.clone(),
+        name: cmd.name.clone(),
+        cmd: cmd.cmd.clone(),
+        cwd: cmd.cwd.display().to_string(),
+        auto_rules: AutoRules {
+            git: cmd.auto.git,
+            watch: cmd.auto.watch,
+            always: cmd.auto.always,
+            check: cmd.auto.check,
+        },
+        depends_on: cmd.depends_on.clone(),
+        group,
+        selected: selected.is_some(),
+        runs_in_check: cmd.auto.check != Some(false),
+        reason: selected.map(|s| match s.by {
+            SelectedBy::Always => "always",
+            SelectedBy::Git => "git",
+        }),
+        files: selected.map_or_else(MatchedFiles::default, |s| MatchedFiles::new(&s.files, root)),
+    }
 }
 
 #[derive(Serialize)]
@@ -52,6 +139,9 @@ struct Summary {
     cancelled: usize,
     not_run: usize,
     duration_ms: u128,
+    /// Distinct changed files git selection found, for `run_lints`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed_files: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     commands: Vec<CommandSummary>,
@@ -63,6 +153,10 @@ struct CommandSummary {
     name: String,
     group: String,
     cmd: String,
+    /// `requested`, `all`, `always`, `git`, or `dependency of <ids>`.
+    reason: String,
+    #[serde(flatten)]
+    files: MatchedFiles,
     /// `passed`, `failed`, `timeout`, `skipped`, `cancelled` or `not_run`.
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,9 +176,18 @@ struct CommandSummary {
     truncated_bytes: u64,
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes a reference
-fn is_zero(n: &u64) -> bool {
-    *n == 0
+fn is_zero<T: Default + PartialEq>(n: &T) -> bool {
+    *n == T::default()
+}
+
+/// A finished run, and what it was asked for.
+pub(super) struct Run<'a> {
+    pub scope: &'a RunScope,
+    pub plan: &'a Plan,
+    pub report: &'a RunReport,
+    /// The config's directory; matched files are listed relative to it.
+    pub root: &'a Path,
+    pub verbose: bool,
 }
 
 /// The result of a run: the summary, then a text block per command whose output is shown.
@@ -92,11 +195,14 @@ fn is_zero(n: &u64) -> bool {
 /// # Errors
 ///
 /// Returns an error if the summary can't be serialized.
-pub(super) fn run_result(
-    plan: &Plan,
-    report: &RunReport,
-    verbose: bool,
-) -> Result<CallToolResult, serde_json::Error> {
+pub(super) fn run_result(run: &Run) -> Result<CallToolResult, serde_json::Error> {
+    let Run {
+        scope,
+        plan,
+        report,
+        root,
+        verbose,
+    } = *run;
     // Reports are in plan order
     let entries: Vec<(&PlannedCommand, &CommandReport)> =
         plan.commands.iter().zip(&report.commands).collect();
@@ -119,7 +225,7 @@ pub(super) fn run_result(
     let counts = report.counts();
     let summary = Summary {
         ok: report.success(),
-        message: message(report),
+        message: message(scope, plan, report),
         total: counts.total,
         passed: counts.passed,
         failed: counts.failed,
@@ -128,6 +234,7 @@ pub(super) fn run_result(
         cancelled: counts.cancelled,
         not_run: counts.not_run,
         duration_ms: report.duration.as_millis(),
+        changed_files: matches!(scope, RunScope::Changes { .. }).then_some(plan.changed_files),
         warnings: plan.warnings.clone(),
         commands: order
             .iter()
@@ -136,7 +243,13 @@ pub(super) fn run_result(
                     .iter()
                     .find(|(j, _)| *j == i)
                     .map_or(0, |(_, capped)| capped.omitted);
-                command_summary(entries[i].0, entries[i].1, report.cancelled, truncated)
+                command_summary(
+                    entries[i].0,
+                    entries[i].1,
+                    root,
+                    report.cancelled,
+                    truncated,
+                )
             })
             .collect(),
     };
@@ -193,6 +306,7 @@ fn shown_outputs(
 fn command_summary(
     planned: &PlannedCommand,
     report: &CommandReport,
+    root: &Path,
     run_cancelled: bool,
     truncated_bytes: u64,
 ) -> CommandSummary {
@@ -220,6 +334,19 @@ fn command_summary(
         name: report.name.clone(),
         group: planned.group_path.clone(),
         cmd: planned.command.cmd.clone(),
+        reason: match &planned.reason {
+            SelectReason::Requested => "requested".into(),
+            SelectReason::All => "all".into(),
+            SelectReason::Always => "always".into(),
+            SelectReason::Git => "git".into(),
+            SelectReason::Dependency { of } => format!("dependency of {}", of.join(", ")),
+        },
+        files: planned
+            .files
+            .as_deref()
+            .map_or_else(MatchedFiles::default, |files| {
+                MatchedFiles::new(files, root)
+            }),
         status,
         exit_code,
         signal,
@@ -283,13 +410,82 @@ fn block(report: &CommandReport, output: &Capped) -> String {
     block
 }
 
-/// One sentence or two on how the run went, for the summary.
-fn message(report: &RunReport) -> String {
-    let counts = report.counts();
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    if counts.total == 0 {
-        return "No commands were selected.".into();
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Up to [`MAX_IDS`] of `ids`, comma-separated.
+fn list_ids(ids: &[String]) -> String {
+    let mut list = ids[..ids.len().min(MAX_IDS)].join(", ");
+    if ids.len() > MAX_IDS {
+        let _ = write!(list, " and {} more", ids.len() - MAX_IDS);
     }
+    list
+}
+
+/// Why a run has no commands, and what to try instead.
+fn nothing_selected(scope: &RunScope, plan: &Plan) -> String {
+    let manual = &plan.excluded_manual;
+    match scope {
+        RunScope::Changes { base, .. } => {
+            let changed = plan.changed_files;
+            let mut message = match changed {
+                0 => "No changed files".to_string(),
+                n => format!("{n} changed file{}", plural(n)),
+            };
+            if let Some(base) = base {
+                let _ = write!(message, " since the merge base with {base}");
+            }
+            if !manual.is_empty() {
+                let _ = write!(
+                    message,
+                    "; the only commands they select have auto.check: false: {}. Set \
+                     include_manual to run them, or run one with run_lint.",
+                    list_ids(manual)
+                );
+            } else if changed == 0 {
+                message.push_str(", so no command was selected.");
+            } else {
+                message.push_str(", but no command's auto rules match them.");
+            }
+            message.push_str(" run_all runs every command");
+            if base.is_none() {
+                message.push_str(
+                    ", and base (such as \"origin/main\") selects by the changes since a \
+                     branch point instead of uncommitted changes only",
+                );
+            }
+            message.push('.');
+            message
+        }
+        RunScope::All { .. } if !manual.is_empty() => format!(
+            "Every command has auto.check: false: {}. Set include_manual to run them, or run \
+             one with run_lint.",
+            list_ids(manual)
+        ),
+        RunScope::All { .. } | RunScope::Named(_) => "The config has no commands.".into(),
+    }
+}
+
+/// One sentence or two on how the run went, for the summary.
+fn message(scope: &RunScope, plan: &Plan, report: &RunReport) -> String {
+    let counts = report.counts();
+    if counts.total == 0 {
+        return nothing_selected(scope, plan);
+    }
+    let mut message = outcome_message(report);
+    if !plan.excluded_manual.is_empty() {
+        let _ = write!(
+            message,
+            " Not run because of auto.check: false: {} (set include_manual to run them).",
+            list_ids(&plan.excluded_manual)
+        );
+    }
+    message
+}
+
+fn outcome_message(report: &RunReport) -> String {
+    let counts = report.counts();
     if report.cancelled {
         return "The run was cancelled: running commands were stopped and the rest not started."
             .into();
@@ -297,18 +493,18 @@ fn message(report: &RunReport) -> String {
     if report.success() {
         return format!("{} command{} passed.", counts.total, plural(counts.total));
     }
-    let failed: Vec<&str> = report
+    let failed: Vec<String> = report
         .commands
         .iter()
         .filter(|c| is_failure(&c.outcome))
-        .map(|c| c.id.as_str())
+        .map(|c| c.id.clone())
         .collect();
     let mut message = format!(
         "{} of {} command{} failed or timed out: {}.",
         failed.len(),
         counts.total,
         plural(counts.total),
-        failed.join(", ")
+        list_ids(&failed)
     );
     if counts.skipped > 0 {
         let _ = write!(
