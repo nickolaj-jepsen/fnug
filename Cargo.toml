@@ -53,6 +53,13 @@ schemars = "1"
 jsonc-parser = { version = "0.33", features = ["cst"] }
 unicode-width = "0.2"
 
+[profile.dev]
+# Full debuginfo made each test binary ~140 MB and linking dominated rebuilds
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 debug = "line-tables-only"
 strip = "symbols"
