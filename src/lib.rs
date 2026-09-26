@@ -21,6 +21,7 @@ pub mod logger;
 pub mod mcp;
 pub mod process;
 pub mod pty;
+pub mod runner;
 pub mod schema;
 pub mod selectors;
 pub mod setup;

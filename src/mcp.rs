@@ -1,16 +1,18 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use log::warn;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router, transport::stdio};
 use serde::Serialize;
 
-use crate::check::{execute_command, expand_dependencies, topo_sort};
+use crate::check::execute_command;
 use crate::commands::command::Command;
 use crate::commands::group::CommandGroup;
-use crate::selectors;
+use crate::runner::{self, PlanError, PlanOptions, Selection, commands_with_group_path};
+use crate::selectors::{self, SelectOptions};
 
 // ---------------------------------------------------------------------------
 // Parameter structs
@@ -107,6 +109,11 @@ fn mcp_err(e: impl std::fmt::Display) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(e.to_string(), None)
 }
 
+/// Report an unknown or ambiguous command, or unusable selection, as invalid parameters.
+fn plan_err(e: &PlanError) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(e.to_string(), None)
+}
+
 /// Check whether a command matches the `list_lints` filter parameters.
 fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParams) -> bool {
     if let Some(ref g) = params.group
@@ -139,20 +146,6 @@ fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParam
     true
 }
 
-/// Walk the command tree, collecting (command, `group_path`) pairs.
-fn flatten_commands<'a>(group: &'a CommandGroup, path: &str) -> Vec<(&'a Command, String)> {
-    let own = group.commands.iter().map(|cmd| (cmd, path.to_string()));
-    let nested = group.children.iter().flat_map(|child| {
-        let child_path = if path.is_empty() {
-            child.name.clone()
-        } else {
-            format!("{path} > {}", child.name)
-        };
-        flatten_commands(child, &child_path)
-    });
-    own.chain(nested).collect()
-}
-
 #[tool_router]
 impl FnugMcp {
     fn new(config: CommandGroup, cwd: PathBuf) -> Self {
@@ -177,11 +170,13 @@ impl FnugMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let config = self.config.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
-            let selected = selectors::get_selected_commands(all_commands).map_err(mcp_err)?;
-            let selected_ids: HashSet<&str> = selected.iter().map(|c| c.id.as_str()).collect();
-
-            let flat = flatten_commands(&config, &config.name);
+            let flat = commands_with_group_path(&config);
+            let commands: Vec<&Command> = flat.iter().map(|(cmd, _)| *cmd).collect();
+            let selection = selectors::select(&commands, &SelectOptions::default());
+            for issue in &selection.issues {
+                warn!("{issue}");
+            }
+            let selected_ids: HashSet<&str> = selection.ids().collect();
 
             let infos: Vec<LintInfo> = flat
                 .into_iter()
@@ -321,45 +316,22 @@ fn run_commands(
     fail_fast: bool,
     selection: &CommandSelection,
 ) -> Result<RunResult, rmcp::ErrorData> {
-    let all_commands: Vec<Command> = config.all_commands().into_iter().cloned().collect();
-
-    // Hoisted so references in the GitSelected branch live long enough.
-    let mut git_selected;
-
-    let selected: Vec<&Command> = match *selection {
-        CommandSelection::Single(ref target) => {
-            let found = all_commands
-                .iter()
-                .find(|c| c.id == *target || c.name.eq_ignore_ascii_case(target))
-                .ok_or_else(|| {
-                    rmcp::ErrorData::invalid_params(format!("Command not found: {target}"), None)
-                })?;
-            vec![found]
-        }
-        CommandSelection::All => all_commands
-            .iter()
-            .filter(|cmd| cmd.auto.check != Some(false))
-            .collect(),
-        CommandSelection::GitSelected => {
-            git_selected =
-                selectors::get_selected_commands(all_commands.clone()).map_err(mcp_err)?;
-            git_selected.retain(|cmd| cmd.auto.check != Some(false));
-            if git_selected.is_empty() {
-                return Ok(RunResult {
-                    total: 0,
-                    passed: 0,
-                    failed: 0,
-                    skipped: 0,
-                    duration_ms: 0,
-                    commands: vec![],
-                });
-            }
-            git_selected.iter().collect()
-        }
+    let selection = match selection {
+        CommandSelection::GitSelected => Selection::Auto {
+            options: SelectOptions::default(),
+            include_manual: false,
+        },
+        CommandSelection::Single(target) => Selection::Targets(vec![target.clone()]),
+        CommandSelection::All => Selection::All {
+            include_manual: false,
+        },
     };
-
-    let commands_to_run = expand_dependencies(&selected, &all_commands);
-    let ordered = topo_sort(&commands_to_run);
+    let plan =
+        runner::plan(config, &selection, &PlanOptions::default()).map_err(|e| plan_err(&e))?;
+    for warning in &plan.warnings {
+        warn!("{warning}");
+    }
+    let ordered: Vec<&Command> = plan.commands.iter().map(|c| &c.command).collect();
 
     let total_start = std::time::Instant::now();
     let mut passed = 0usize;
@@ -468,5 +440,40 @@ commands:
         let names: Vec<&str> = result.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["lint"]);
         assert_eq!(result.failed, 0);
+    }
+
+    #[test]
+    fn run_lint_ambiguous_name_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".fnug.yaml");
+        std::fs::write(
+            &path,
+            r"
+fnug_version: 0.1.0
+name: root
+children:
+  - name: backend
+    commands:
+      - name: test
+        cmd: 'true'
+  - name: frontend
+    commands:
+      - name: test
+        cmd: 'true'
+",
+        )
+        .unwrap();
+        let (config, cwd) = crate::load_config(path.to_str(), true).unwrap();
+
+        let Err(err) = run_commands(
+            &config,
+            &cwd,
+            false,
+            &CommandSelection::Single("test".into()),
+        ) else {
+            panic!("an ambiguous name ran a command");
+        };
+        assert!(err.message.contains("backend/test"), "{err:?}");
+        assert!(err.message.contains("frontend/test"), "{err:?}");
     }
 }
