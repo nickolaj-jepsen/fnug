@@ -83,7 +83,8 @@ pub struct HookTarget {
     /// that file, and `location` is where it is.
     pub resolved: Option<PathBuf>,
     pub location: HookLocation,
-    /// The config's directory relative to `workdir`; empty when the config is at the top.
+    /// Where the hook runs fnug, relative to `workdir`: the directory [`resolve`] was given, such
+    /// as the config's directory. Empty at the top.
     pub config_rel: PathBuf,
 }
 
@@ -129,9 +130,10 @@ pub enum ForeignPolicy {
 pub struct InstallOptions {
     /// Pass `--no-workspace`, for a repository inside another fnug workspace.
     pub no_workspace: bool,
-    /// Pass this as `-c`. It is relative to the config's directory, which the hook runs from.
+    /// Pass this as `-c`: absolute, or relative to the directory the hook runs fnug from
+    /// ([`HookTarget::config_rel`]).
     pub config_file: Option<PathBuf>,
-    /// Pass this as `--root`. It is relative to the config's directory.
+    /// Pass this as `--root`, relative to the directory the hook runs fnug from.
     pub root_dir: Option<PathBuf>,
     /// What to do with an existing hook that isn't a shell script.
     pub foreign: ForeignPolicy,
@@ -178,7 +180,7 @@ fn command_args(opts: &InstallOptions) -> Vec<String> {
 
 /// Resolve the pre-commit hook of the repository containing `config_dir` the way git does:
 /// `core.hooksPath` (relative to the work tree top) if set, otherwise the hooks directory in the
-/// common git dir, which linked worktrees share.
+/// common git dir, which linked worktrees share. The hook runs fnug from `config_dir`.
 ///
 /// # Errors
 ///
