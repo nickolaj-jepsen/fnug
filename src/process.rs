@@ -283,11 +283,13 @@ impl ProcessHandle {
             return Ok(true);
         }
         let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ESRCH) {
-            Ok(false)
-        } else {
-            Err(err)
-        }
+        let gone = match err.raw_os_error() {
+            Some(libc::ESRCH) => true,
+            // macOS refuses killpg for a group whose only member is our zombie leader
+            Some(libc::EPERM) => self.0.scope == SignalScope::Group && state.exit.is_some(),
+            _ => false,
+        };
+        if gone { Ok(false) } else { Err(err) }
     }
 
     /// Send `sig`, then `SIGKILL` if the process is still unreaped after `grace`.
