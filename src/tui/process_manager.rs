@@ -220,6 +220,19 @@ impl App {
 
     /// Copy a command's whole output to the clipboard, and say in the toolbar how it went.
     pub fn copy_command_output(&mut self, cmd_id: &str) {
+        // Like the pane, which hides an earlier run's output then
+        if let Some(cause) = self.cancelled_by.get(cmd_id) {
+            let text = if cause == cmd_id {
+                "Nothing to copy: stopped before it started".to_string()
+            } else {
+                let name = self
+                    .find_command(cause)
+                    .map_or_else(|| cause.clone(), |c| c.name);
+                format!("Nothing to copy: didn't run, as '{name}' was stopped")
+            };
+            self.set_status(text, StatusLevel::Info);
+            return;
+        }
         let Some(proc) = self.processes.get(cmd_id) else {
             self.set_status("Nothing to copy: the command hasn't run", StatusLevel::Info);
             return;
@@ -377,7 +390,7 @@ mod tests {
     use crate::runner::NodeState;
     use crate::tui::app::{App, AppEvent, CommandStatus};
     use crate::tui::log_state::LogBuffer;
-    use crate::tui::test_util::draw;
+    use crate::tui::test_util::{draw, shell_app};
     use crate::tui::tree_widget::NodeKind;
 
     const AREA: Rect = Rect::new(0, 0, 80, 24);
@@ -865,6 +878,48 @@ mod tests {
         app.run_command("c", AREA);
         let screen = pane(&mut app, "c");
         assert!(screen.contains("Waiting for dependencies"), "{screen}");
+        app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn copy_follows_the_panes_didnt_run_note() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Printing what its command line, which fnug echoes first, doesn't hold
+        let mut app = shell_app(dir.path(), &[("a", "true"), ("b", "echo old $((1 + 1))")]);
+        app.config.commands[1].depends_on = ids(&["a"]);
+        app.run_command("b", AREA);
+        app.handle_app_event(exited(&app, "a", 0));
+        let terminal = std::sync::Arc::clone(&app.processes["b"].terminal);
+        assert!(wait_until(Duration::from_secs(5), || {
+            terminal
+                .parser()
+                .lock()
+                .screen()
+                .contents()
+                .contains("old 2")
+        }));
+        app.handle_app_event(exited(&app, "b", 0));
+
+        // Queued behind `a` again, and stopped before it started
+        app.run_commands(&ids(&["a", "b"]), AREA, None);
+        app.stop_command("b");
+        app.copy_command_output("b");
+
+        let status = &app.status.as_ref().unwrap().text;
+        assert_eq!(status, "Nothing to copy: stopped before it started");
+
+        // Queued again, and cancelled by its dependency's stop
+        app.run_commands(&ids(&["a", "b"]), AREA, None);
+        app.stop_command("a");
+        app.handle_app_event(stopped(&app, "a"));
+        app.copy_command_output("b");
+
+        let status = &app.status.as_ref().unwrap().text;
+        assert_eq!(status, "Nothing to copy: didn't run, as 'a' was stopped");
+        assert!(app.take_outbox().is_empty());
         app.shutdown().await;
     }
 
