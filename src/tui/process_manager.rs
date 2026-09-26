@@ -902,6 +902,49 @@ mod tests {
         app.shutdown().await;
     }
 
+    /// A check result in which each of `ids` failed
+    fn failed_check(ids: &[&str]) -> crate::check::CheckResult {
+        use crate::runner::{CommandReport, Failure, Outcome, RunReport};
+
+        let commands = ids
+            .iter()
+            .map(|id| CommandReport {
+                id: (*id).into(),
+                name: (*id).into(),
+                outcome: Outcome::Failed(Failure::Exit(1)),
+                duration: None,
+                output: None,
+            })
+            .collect();
+        crate::check::CheckResult {
+            exit_code: 1,
+            report: RunReport {
+                commands,
+                ..RunReport::default()
+            },
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handoff_focuses_first_failure_once_reruns_finish() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = chain_app(dir.path());
+        app.run_commands(&ids(&["a"]), AREA, None);
+        app.handle_app_event(exited(&app, "a", 0));
+
+        app.apply_check_result(&failed_check(&["b", "c"]), AREA);
+        assert_eq!(app.current_command_id().as_deref(), Some("b"));
+        app.handle_app_event(exited(&app, "b", 0));
+        app.handle_app_event(exited(&app, "c", 1));
+
+        assert_eq!(app.current_command_id().as_deref(), Some("c"));
+        assert_eq!(app.active_terminal_id.as_deref(), Some("c"));
+        app.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn batch_spawns_dependency_once() {
         if !pty_available() {

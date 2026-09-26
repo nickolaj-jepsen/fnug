@@ -11,7 +11,8 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::layout::Rect;
 
 use fnug::check::CheckResult;
 use fnug::commands::group::CommandGroup;
@@ -129,8 +130,7 @@ pub async fn run(
     // Create app
     let mut app = App::new(config.clone(), cwd, logger.buffer());
     if let Some(ref result) = check_result {
-        let initial_area = ratatui::layout::Rect::new(0, 0, 80, 24);
-        app.apply_check_result(result, initial_area);
+        apply_check_result(&mut terminal, &mut app, result)?;
     } else {
         app.apply_always_selection();
         app.spawn_git_selection();
@@ -174,6 +174,19 @@ pub async fn run(
     Ok(ExitCode::SUCCESS)
 }
 
+/// Draw a first frame, then rerun the check's failures at the pane size it drew: output
+/// already printed never reflows, so fixing the size later would be too late.
+fn apply_check_result<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    result: &CheckResult,
+) -> Result<(), B::Error> {
+    let mut pane = Rect::default();
+    terminal.draw(|frame| pane = app.render(frame).1)?;
+    app.apply_check_result(result, pane);
+    Ok(())
+}
+
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(
@@ -191,8 +204,8 @@ async fn run_event_loop(
     use std::time::Duration;
 
     let mut event_stream = EventStream::new();
-    let mut tree_area = ratatui::layout::Rect::default();
-    let mut terminal_area = ratatui::layout::Rect::default();
+    let mut tree_area = Rect::default();
+    let mut terminal_area = Rect::default();
     let mut needs_render = true;
 
     // Frame rate limiter: ~60 FPS max
@@ -284,7 +297,84 @@ async fn run_event_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::worker_panic_message;
+    use std::path::Path;
+
+    use fnug::check::CheckResult;
+    use fnug::commands::command::Command;
+    use fnug::commands::group::CommandGroup;
+    use fnug::logger::LogBuffer;
+    use fnug::pty::terminal::TerminalSize;
+    use fnug::runner::{CommandReport, Failure, Outcome, RunReport};
+    use fnug::tui::app::App;
+    use portable_pty::{PtySize, native_pty_system};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    use super::{apply_check_result, worker_panic_message};
+
+    /// `first` and `second`, both sleeping in `dir`, which a check reported as failed
+    fn failed_pair(dir: &Path) -> (App, CheckResult) {
+        let ids = ["first", "second"];
+        let config = CommandGroup {
+            id: "root".into(),
+            name: "root".into(),
+            commands: ids
+                .iter()
+                .map(|id| Command {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    cmd: "exec sleep 30".into(),
+                    cwd: dir.to_path_buf(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let report = RunReport {
+            commands: ids
+                .iter()
+                .map(|id| CommandReport {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    outcome: Outcome::Failed(Failure::Exit(1)),
+                    duration: None,
+                    output: None,
+                })
+                .collect(),
+            ..RunReport::default()
+        };
+        let app = App::new(config, dir.to_path_buf(), LogBuffer::new());
+        (
+            app,
+            CheckResult {
+                exit_code: 1,
+                report,
+            },
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handoff_uses_real_area() {
+        if native_pty_system().openpty(PtySize::default()).is_err() {
+            eprintln!("skipping: no PTY available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, result) = failed_pair(dir.path());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        apply_check_result(&mut terminal, &mut app, &result).unwrap();
+
+        let mut pane = Rect::default();
+        terminal.draw(|frame| pane = app.render(frame).1).unwrap();
+        for id in ["first", "second"] {
+            let size = app.processes[id].terminal.size();
+            assert_eq!(size, TerminalSize::new(pane.width, pane.height), "{id}");
+        }
+        assert_eq!(app.active_terminal_id.as_deref(), Some("first"));
+        app.shutdown().await;
+    }
 
     #[test]
     fn only_worker_panics_are_logged() {
