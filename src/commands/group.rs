@@ -16,6 +16,8 @@ pub struct CommandGroup {
     pub env: HashMap<String, String>,
     /// Default [`Command::timeout`] for the group's commands.
     pub timeout: Option<Duration>,
+    /// Default [`Command::exclusive`] for the group's commands.
+    pub exclusive: Option<bool>,
     /// The config file this group is the root of. A child with a source is a workspace package,
     /// which inherits nothing from its parent.
     pub source: Option<PathBuf>,
