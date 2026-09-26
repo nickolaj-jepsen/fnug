@@ -2,9 +2,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 
 use super::app::{App, CommandStatus, Focus};
+use super::selection::SelectionReason;
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: usize) {
     let mut state = ScrollbarState::new(total).position(position);
@@ -212,10 +213,25 @@ impl App {
             }
         }
 
-        // No active terminal — show placeholder
-        let placeholder = Paragraph::new("No command running. Press 'r' to run a command.")
-            .style(Style::default().fg(Color::DarkGray));
+        let placeholder = Paragraph::new(self.placeholder_text())
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false });
         frame.render_widget(placeholder, area);
+    }
+
+    /// What the pane says for a command without output: why it is selected, if it is.
+    fn placeholder_text(&self) -> String {
+        let Some(id) = self.active_terminal_id.as_deref() else {
+            return "No command running. Press 'r' to run a command.".into();
+        };
+        if !self.selected.contains(id) {
+            return "Not run yet. Press 'r' to run it.".into();
+        }
+        let reason = self
+            .selection_reason
+            .get(id)
+            .unwrap_or(&SelectionReason::Manual);
+        format!("{}. Press 'r' to run it.", reason.describe(&self.cwd))
     }
 
     fn render_log_panel(&mut self, frame: &mut Frame, area: Rect) {

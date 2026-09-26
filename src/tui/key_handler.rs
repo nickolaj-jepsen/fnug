@@ -198,8 +198,8 @@ impl App {
                         NodeKind::Command {
                             selected: false, ..
                         } => {
-                            self.selected.insert(node.id.clone());
-                            self.mark_tree_dirty();
+                            let id = node.id.clone();
+                            self.select_by_hand(id);
                         }
                         _ => {}
                     }
