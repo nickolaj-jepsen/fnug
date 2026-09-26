@@ -33,7 +33,7 @@ pub fn run(
     load_opts: &LoadOptions,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let opts = options(args, load_opts)?;
-    let path = fnug::init::run(&opts, fnug::init::prompt).map_err(|e| match e {
+    let created = fnug::init::run(&opts, fnug::init::prompt).map_err(|e| match e {
         InitError::Exists(_) => format!(
             "{e}; run `{}` to replace it",
             force_command(args, load_opts)
@@ -41,7 +41,17 @@ pub fn run(
         .into(),
         e => Box::<dyn std::error::Error>::from(e),
     })?;
-    println!("Created {}", path.display());
+    let path = created.path.display();
+    match (created.workspace, created.packages.as_slice()) {
+        (false, _) => println!("Created {path}"),
+        (true, []) => println!("Created {path}, a workspace root for the package configs below it"),
+        (true, packages) => {
+            println!("Created {path}, a workspace root for these new package configs:");
+            for package in packages {
+                println!("  {}", package.display());
+            }
+        }
+    }
     println!(
         "Run `fnug` to open the TUI, `fnug check` to check your changes, or `fnug setup` to add a pre-commit hook and editor integration."
     );

@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::config_file::{Config, ConfigCommandGroup, WorkspaceConfig, find_config_in_dir};
 use crate::setup::fsutil;
 
-pub use detect::{Proposal, detect};
+pub use detect::{Packages, Proposal, detect, detect_packages};
 pub use render::render;
 
 /// Why a config couldn't be created.
@@ -152,29 +152,49 @@ pub fn prompt(proposals: &[Proposal]) -> Result<Vec<usize>, InitError> {
         let labels: Vec<_> = chosen.iter().map(|o| o.value.label.as_str()).collect();
         labels.join(", ")
     };
-    let chosen = MultiSelect::new(
-        "Which commands should the config include?",
-        proposals.iter().collect(),
-    )
-    .with_all_selected_by_default()
-    .with_formatter(&answer)
-    .raw_prompt()?;
+    let packages = proposals.iter().any(|p| !p.dir.as_os_str().is_empty());
+    let question = if packages {
+        "The packages get a config each, and the top a workspace root that includes them. \
+         Which commands should they include?"
+    } else {
+        "Which commands should the config include?"
+    };
+    let chosen = MultiSelect::new(question, proposals.iter().collect())
+        .with_all_selected_by_default()
+        .with_formatter(&answer)
+        .raw_prompt()?;
     Ok(chosen.into_iter().map(|option| option.index).collect())
 }
 
-/// Create a config for the project in `opts.dir` from what [`detect`] finds there, and return
-/// its path. `choose` picks the proposals to include, as indices, unless `opts.yes` includes
-/// them all. With none picked or found, the config has an example command instead.
+/// The configs [`run`] wrote.
+#[derive(Debug)]
+pub struct Created {
+    /// The project's config.
+    pub path: PathBuf,
+    /// Whether `path` is a workspace root, which includes the package configs below it.
+    pub workspace: bool,
+    /// The package configs it wrote below the project, in path order.
+    pub packages: Vec<PathBuf>,
+}
+
+/// Create a config for the project in `opts.dir` from what [`detect`] finds there. `choose`
+/// picks the proposals to include, as indices, unless `opts.yes` includes them all. With none
+/// picked or found, the config has an example command instead.
+///
+/// With nothing found in `opts.dir` itself, but at least two packages below it (see
+/// [`detect_packages`]), the proposals are the packages': each package without a config gets
+/// one with those picked for it, and the project's config is a workspace root, as long as it
+/// has a package to include.
 ///
 /// # Errors
 ///
 /// Returns `InitError::Dir` if `opts.dir` isn't a directory, `InitError::Exists` if the config
-/// exists and `opts.force` is false (before calling `choose`), whatever `choose` returns, and
-/// `InitError::Write` if the config can't be written.
+/// exists and `opts.force` is false (before calling `choose`), or a package's config appeared
+/// since, whatever `choose` returns, and `InitError::Write` if a config can't be written.
 pub fn run(
     opts: &InitOptions,
     choose: impl FnOnce(&[Proposal]) -> Result<Vec<usize>, InitError>,
-) -> Result<PathBuf, InitError> {
+) -> Result<Created, InitError> {
     let dir_error = |source| InitError::Dir {
         path: opts.dir.clone(),
         source,
@@ -185,26 +205,75 @@ pub fn run(
     }
     target_for(opts, &dir)?;
 
-    let proposals = detect(&dir);
+    let mut proposals = detect(&dir);
+    let mut configured = Vec::new();
+    let mut workspace = false;
     if proposals.is_empty() {
-        warn_nothing_detected(&dir);
+        let packages = detect_packages(&dir);
+        if packages.count() >= 2 {
+            workspace = true;
+            (proposals, configured) = (packages.proposals, packages.configured);
+        } else {
+            warn_nothing_detected(&dir);
+        }
     }
     let chosen = if opts.yes || proposals.is_empty() {
         (0..proposals.len()).collect()
     } else {
         choose(&proposals)?
     };
-    let groups = proposals
+    let chosen: Vec<Proposal> = proposals
         .into_iter()
         .enumerate()
         .filter(|(i, _)| chosen.contains(i))
-        .map(|(_, proposal)| proposal.group)
+        .map(|(_, proposal)| proposal)
         .collect();
-    // Again, in case a config appeared while `choose` asked
-    let config = prepare_at(target_for(opts, &dir)?, &dir, groups, None)?;
-    config.write()?;
-    warn_if_shadowing(&config.path);
-    Ok(config.path)
+    let created = if workspace && !(chosen.is_empty() && configured.is_empty()) {
+        create_workspace(opts, &dir, chosen)?
+    } else {
+        let groups = chosen.into_iter().map(|p| p.group).collect();
+        // Again, in case a config appeared while `choose` asked
+        let config = prepare_at(target_for(opts, &dir)?, &dir, groups, None)?;
+        config.write()?;
+        Created {
+            path: config.path,
+            workspace: false,
+            packages: Vec::new(),
+        }
+    };
+    warn_if_shadowing(&created.path);
+    Ok(created)
+}
+
+/// Write a config for each package that `chosen` proposes groups for, then the project's in
+/// `dir`, a workspace root. Nothing is written if any of them can't be prepared.
+fn create_workspace(
+    opts: &InitOptions,
+    dir: &Path,
+    chosen: Vec<Proposal>,
+) -> Result<Created, InitError> {
+    let mut packages: Vec<(PathBuf, Vec<ConfigCommandGroup>)> = Vec::new();
+    for proposal in chosen {
+        match packages.last_mut() {
+            Some((package, groups)) if *package == proposal.dir => groups.push(proposal.group),
+            _ => packages.push((proposal.dir, vec![proposal.group])),
+        }
+    }
+    let packages = packages
+        .into_iter()
+        .map(|(package, groups)| prepare(&dir.join(package), false, groups, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ws = Some(WorkspaceConfig::Enabled(true));
+    let root = prepare_at(target_for(opts, dir)?, dir, Vec::new(), ws)?;
+    for package in &packages {
+        package.write()?;
+    }
+    root.write()?;
+    Ok(Created {
+        path: root.path,
+        workspace: true,
+        packages: packages.into_iter().map(|p| p.path).collect(),
+    })
 }
 
 /// Warn if `created`, a config fnug finds by searching, hides the one in a parent directory
