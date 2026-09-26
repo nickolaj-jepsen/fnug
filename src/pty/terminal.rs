@@ -153,22 +153,30 @@ enum TerminalUpdate {
     Panic,
 }
 
-/// Spawn a thread to process terminal output and set a dirty flag
+/// Spawn a thread to process terminal output and set a dirty flag. The command's answers to
+/// terminal queries, such as its cursor position, go to `replies`.
 fn spawn_output_writer(
     parser: Arc<Mutex<vt100::Parser>>,
     dirty: Arc<AtomicBool>,
     notify: Option<Arc<Notify>>,
+    replies: Option<crossbeam_channel::Sender<PtyInput>>,
     scrollback: usize,
 ) -> crossbeam_channel::Sender<TerminalUpdate> {
     let (update_tx, terminal_rx) = crossbeam_channel::bounded(1000);
 
     spawn_thread("fnug-pty-parse", move || {
+        let apply = |parser: &mut vt100::Parser, update| {
+            apply_update_guarded(parser, update, scrollback);
+            if let Some(replies) = &replies {
+                forward_replies(parser, replies);
+            }
+        };
         while let Ok(update) = terminal_rx.recv() {
             let mut parser = parser.lock();
-            apply_update_guarded(&mut parser, update, scrollback);
+            apply(&mut parser, update);
             // Bounded batch: an unbounded drain holds the lock for as long as output floods in
             for update in terminal_rx.try_iter().take(MAX_UPDATES_PER_LOCK - 1) {
-                apply_update_guarded(&mut parser, update, scrollback);
+                apply(&mut parser, update);
             }
             drop(parser);
             if !dirty.swap(true, Ordering::AcqRel)
@@ -181,6 +189,17 @@ fn spawn_output_writer(
     });
 
     update_tx
+}
+
+/// Send the parser's pending replies to the command's input.
+fn forward_replies(parser: &mut vt100::Parser, replies: &crossbeam_channel::Sender<PtyInput>) {
+    if parser.has_pending_replies()
+        && replies
+            .try_send(PtyInput::Write(parser.take_replies()))
+            .is_err()
+    {
+        debug!("Dropped a reply to a terminal query: the command is not reading its input");
+    }
 }
 
 /// Apply `update`; if the emulator panics, replace it with a blank one and carry on
@@ -214,6 +233,8 @@ fn apply_update(parser: &mut vt100::Parser, update: TerminalUpdate) {
         }
         TerminalUpdate::Echo(text) => {
             parser.process(text.as_slice());
+            // fnug's own text, which the command never asked about
+            let _ = parser.take_replies();
         }
         TerminalUpdate::Clear => {
             parser.clear();
@@ -400,10 +421,12 @@ impl Terminal {
         let (reaped_tx, reaped_rx) = watch::channel(false);
         let (reader_done_tx, reader_done_rx) = crossbeam_channel::bounded(0);
 
+        let pty_tx = spawn_pty_writer(writer);
         let update_tx = spawn_output_writer(
             Arc::clone(&parser),
             Arc::clone(&dirty),
             opts.output_notify,
+            Some(pty_tx.clone()),
             opts.scrollback,
         );
         spawn_pty_reader(reader, update_tx.clone(), reader_done_tx);
@@ -415,7 +438,6 @@ impl Terminal {
             status_tx,
             reaped_tx,
         );
-        let pty_tx = spawn_pty_writer(writer);
 
         Ok(Self {
             update_tx,
@@ -682,7 +704,7 @@ mod tests {
     }
 
     fn output_writer(parser: &Arc<Mutex<vt100::Parser>>, dirty: &Arc<AtomicBool>) -> Sender {
-        spawn_output_writer(Arc::clone(parser), Arc::clone(dirty), None, 0)
+        spawn_output_writer(Arc::clone(parser), Arc::clone(dirty), None, None, 0)
     }
 
     type Sender = crossbeam_channel::Sender<TerminalUpdate>;
@@ -745,6 +767,7 @@ mod tests {
             Arc::clone(&parser),
             Arc::clone(&dirty),
             Some(Arc::clone(&notify)),
+            None,
             0,
         );
 
@@ -809,6 +832,47 @@ mod tests {
         let exit = waited.expect("command ignored SIGINT").unwrap();
         assert_eq!(exit.signal, Some(libc::SIGINT));
         assert!(exit.stop_requested);
+    }
+
+    #[test]
+    fn dsr_reply_reaches_program() {
+        if !pty_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let _term = spawn(
+            r"stty raw -echo; printf '\033[6n'; head -c 6 > reply",
+            dir.path(),
+        );
+
+        let reply = dir.path().join("reply");
+        let answered = wait_until(Duration::from_secs(5), || {
+            std::fs::read(&reply).is_ok_and(|r| r.len() == 6)
+        });
+        assert!(answered, "no reply to the cursor position query");
+        assert_eq!(std::fs::read(&reply).unwrap(), b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn echo_never_answers_queries() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let (replies_tx, replies_rx) = crossbeam_channel::bounded(10);
+        let tx = spawn_output_writer(
+            Arc::clone(&parser),
+            Arc::clone(&dirty),
+            None,
+            Some(replies_tx),
+            0,
+        );
+
+        tx.send(TerminalUpdate::Echo(b"\x1b[6n".to_vec())).unwrap();
+        tx.send(TerminalUpdate::Process(b"\x1b[5n".to_vec()))
+            .unwrap();
+
+        let reply = replies_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(reply, super::PtyInput::Write(r) if r == b"\x1b[0n"));
+        assert!(replies_rx.try_recv().is_err());
     }
 
     #[test]
