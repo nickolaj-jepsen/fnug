@@ -21,6 +21,7 @@ use super::context_menu::{ContextMenu, ContextMenuAction, ContextMenuTarget};
 use super::log_state::LogBuffer;
 use super::run_summary::{RunRecord, RunSummary};
 use super::selection::{SelectionReason, watch_status};
+use super::stash_wait::HeldBack;
 use super::status::{StatusLevel, StatusMessage};
 use super::toolbar;
 use super::tree_state::{TreeContext, find_command_in_group, find_group_in_group, flatten_group};
@@ -333,6 +334,8 @@ pub struct App {
     pub(super) auto_running: HashSet<String>,
     /// Until when file changes don't run each command, after its last auto-run
     pub(super) quiet_until: HashMap<String, Instant>,
+    /// What file changes set off while a `fnug check --stash` ran, until it ends
+    pub(super) held_back: Option<HeldBack>,
 }
 
 /// Collect all group IDs in the tree (including root).
@@ -435,6 +438,7 @@ impl App {
             auto_run_pending: HashSet::new(),
             auto_running: HashSet::new(),
             quiet_until: HashMap::new(),
+            held_back: None,
         };
         app.rebuild_visible_nodes();
         app
@@ -672,7 +676,7 @@ impl App {
                 self.mark_tree_dirty();
                 self.check_batch_complete();
             }
-            AppEvent::WatcherTriggered(matches) => self.select_watch_matches(matches),
+            AppEvent::WatcherTriggered(matches) => self.handle_file_change(false, matches),
             AppEvent::GitSelectionComplete(generation, selected) => {
                 if generation != self.git_selection_generation {
                     return false;
@@ -692,7 +696,7 @@ impl App {
                 fallback,
             } => self.finish_copy(lines, result, fallback),
             AppEvent::ConfigFileChanged => {
-                self.reload_config();
+                self.handle_file_change(true, Vec::new());
                 return false;
             }
             AppEvent::ConfigReloaded { generation, result } => {
@@ -703,7 +707,7 @@ impl App {
     }
 
     /// Select the commands whose watched files changed, and say which in the toolbar.
-    fn select_watch_matches(&mut self, matches: Vec<WatchMatch>) {
+    pub(super) fn select_watch_matches(&mut self, matches: Vec<WatchMatch>) {
         let names: Vec<String> = matches
             .iter()
             .map(|m| {
@@ -765,10 +769,10 @@ impl App {
     }
 
     /// Whether [`tick`](Self::tick) has anything to do: advance running commands' elapsed
-    /// time, or expire the status message.
+    /// time, expire the status message, or see whether a `fnug check --stash` has ended.
     #[must_use]
     pub fn wants_tick(&self) -> bool {
-        self.has_active_runs() || self.status.is_some()
+        self.has_active_runs() || self.status.is_some() || self.held_back.is_some()
     }
 
     /// Update what changes with time alone, at `now`. Returns whether the screen needs a
@@ -783,7 +787,7 @@ impl App {
             self.mark_tree_dirty();
             changed = true;
         }
-        changed
+        changed | self.resume_after_stash()
     }
 
     /// The process for `id`, unless an event of `generation` comes from an earlier, replaced run
