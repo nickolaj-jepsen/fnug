@@ -17,6 +17,7 @@ use crate::trust::TrustPolicy;
 pub mod check;
 pub mod commands;
 pub mod config_file;
+pub mod init;
 pub mod logger;
 pub mod mcp;
 pub mod process;
