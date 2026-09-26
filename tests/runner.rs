@@ -599,6 +599,56 @@ commands:
     assert!(!report.cancelled);
 }
 
+/// Ignores `SIGTERM`, and so does its background `sleep`.
+const STUBBORN: &str = r#"
+name: root
+commands:
+  - name: stubborn
+    cmd: "trap '' TERM; sleep 30 & echo $! > pid; wait"
+"#;
+
+#[tokio::test]
+async fn timeout_escalates_to_sigkill() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(dir.path(), STUBBORN);
+    let timeout = Duration::from_millis(500);
+    let opts = ExecOptions {
+        default_timeout: Some(timeout),
+        kill_grace: Duration::from_millis(300),
+        ..capture()
+    };
+    let started = Instant::now();
+    let report = tokio::time::timeout(TIMEOUT, run(&config, &cwd, &opts))
+        .await
+        .expect("SIGKILL never followed SIGTERM");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(*outcome(&report, "stubborn"), Outcome::TimedOut(timeout));
+    let pid = common::read_pid(&dir.path().join("pid"));
+    assert!(common::wait_until(TIMEOUT, || !common::process_alive(pid)));
+}
+
+#[tokio::test]
+async fn dropped_run_kills_its_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, cwd) = common::load(dir.path(), STUBBORN);
+    let plan = plan(&config, &all(), &PlanOptions::default()).unwrap();
+    let opts = capture();
+    let mut on_event = |_: RunEvent<'_>| {};
+    let pid_file = dir.path().join("pid");
+    // The run's future is dropped once the command is up
+    let pid = tokio::select! {
+        _ = execute(&plan, &cwd, &opts, &NoHook, &mut on_event) => panic!("the run ended"),
+        pid = tokio::task::spawn_blocking(move || common::read_pid(&pid_file)) => pid.unwrap(),
+    };
+    assert!(common::wait_until(Duration::from_secs(3), || {
+        !common::process_alive(pid)
+    }));
+}
+
 #[tokio::test]
 async fn cancelled_before_start_runs_nothing() {
     let dir = tempfile::tempdir().unwrap();
