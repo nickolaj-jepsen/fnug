@@ -2,7 +2,7 @@
 
 ## What is Fnug?
 
-Fnug is a TUI command runner that auto-selects lint/test commands based on git changes or file watching. Standalone Rust binary (edition 2024, Rust 1.93) with a ratatui TUI. Also provides headless `check` mode for CI/pre-commit and an MCP server for editor integration.
+Fnug is a TUI command runner that auto-selects lint/test commands based on git changes or file watching. Standalone Rust binary (edition 2024; toolchain 1.93 pinned in `rust-toolchain.toml`, MSRV 1.88 in `Cargo.toml`) with a ratatui TUI. Also provides headless `check` mode for CI/pre-commit, `init` and `setup` for getting started, an MCP server for editor integration, and a thin Python wrapper on PyPI.
 
 ## Development
 
@@ -12,28 +12,37 @@ Nix dev environment via `flake.nix` + `direnv`. All tools (rust toolchain, ruff,
 # Rust
 cargo fmt                                              # Format
 cargo clippy --fix --allow-dirty --allow-staged        # Lint (auto-fix)
-cargo clippy --all-targets -- -D warnings              # Lint (check only)
+cargo clippy --all-targets -- -D warnings              # Lint (check only, tests included)
 cargo nextest run                                      # Run tests (cargo test also works)
 cargo test --doc                                       # Doctests (nextest skips them)
+cargo test --manifest-path vendor/vt100/Cargo.toml     # Vendored vt100 fork's tests
 cargo build                                            # Debug build
 
 # Nix
 alejandra --check .                                    # Format check
 statix check .                                         # Lint
-deadnix .                                              # Dead code check
+deadnix --fail .                                       # Dead code check
+nix build -L .#default                                 # Package build
 
 # Python (python/ directory)
 ruff check python/                                     # Lint
 ruff format --check python/                            # Format check
+uv venv && uv pip install maturin pytest pyyaml        # Test venv (once)
+uv run --no-project maturin develop --uv               # Build fnug into the venv
+uv run --no-project pytest python/tests                # Wrapper tests
 
 # Run
 cargo run --bin fnug                                   # TUI mode
 cargo run --bin fnug -- check                          # Headless check
+cargo run --bin fnug -- init                           # Create a config
 cargo run --bin fnug -- setup                          # Interactive setup wizard
 cargo run --bin fnug -- mcp                            # MCP server (stdio)
+cargo run --bin fnug -- schema                         # Config JSON Schema
 ```
 
-The project dogfoods itself — see `.fnug.yaml` for the lint/test config. The fnug MCP server is also available in this workspace for running checks.
+CI (`.github/workflows/ci.yaml`) runs these checks (formatting with `cargo fmt --check`), the Rust tests on macOS too, `cargo +1.88 check --locked --all-targets` for the MSRV (keep it in sync with `rust-version` by hand), and `cargo deny check advisories`.
+
+The project dogfoods itself — see `.fnug.yaml` for the lint/test config. It sets `workspace: true`, so `docs/.fnug.yaml`, the TUI demo that `docs/demo.tape` records with vhs, is merged in as a package; its `auto.check: false` keeps it out of `fnug check` and MCP runs. The fnug MCP server is also available in this workspace for running checks.
 
 ## Architecture
 
@@ -75,39 +84,57 @@ The project dogfoods itself — see `.fnug.yaml` for the lint/test config. The f
 
 ## Testing
 
-Integration tests live in `tests/integration.rs`. Pattern: write config to a `tempfile::tempdir()`, call `load_config()` or `check::run()`, assert results.
+`cargo test` runs the unit tests (`#[cfg(test)]` modules next to the code, with `insta` snapshots in `src/tui/snapshots/`) and the integration tests in `tests/`, one file per area:
+
+| File | Covers |
+|---|---|
+| `config.rs` | Loading, validation, ids, inheritance, the schema file, and the README and dogfood configs |
+| `selectors.rs` | Git scopes, `auto.path`/`auto.regex` matching, selection issues, file watching |
+| `runner.rs` | Planning with git selection, executing plans with real processes |
+| `check_cli.rs` | `fnug check` as a process: output, exit codes, signals |
+| `stash.rs` | `fnug check --staged --stash` |
+| `cli.rs` | Argument parsing, config loading, setup output |
+| `setup.rs` | Hooks (run with `sh` and a shim `fnug` on `PATH`), editor MCP configs |
+| `init.rs` | `fnug init` detection and the config it writes |
+| `mcp_cli.rs` | `fnug mcp` as a process: cancellation and shutdown |
+| `tui.rs` | The binary's TUI in a pseudo-terminal |
+| `integration.rs` | Older end-to-end tests of loading and check |
+
+Shared helpers live in `tests/common/` (`mod common;`): writing and loading a config in a `tempfile::tempdir()`, `wait_until`, process helpers, and `common::git`, which runs the git CLI isolated from the user's git config and from the `GIT_DIR` a hook exports. Pattern:
 
 ```rust
 let dir = tempfile::tempdir().unwrap();
-write_config(dir.path(), r#"..."#);
-let (config, cwd) = load_config(Some(&path), false).unwrap();
+let (config, cwd) = common::load(dir.path(), "fnug_version: 0.1.0\nname: t\ncommands: [...]");
 ```
 
-Unit tests for validation logic are in `lib.rs` (`#[cfg(test)]` module).
+Tests that start the binary use `env!("CARGO_BIN_EXE_fnug")`. Process and PTY tests synchronise through files the commands write and poll with a timeout instead of sleeping, and PTY tests skip themselves when no PTY can be opened. Review changed snapshots with `cargo insta review`, or accept them with `INSTA_UPDATE=always cargo test`.
+
+The Python tests (`python/tests`) run the wrapper against a fake binary that records its arguments; `test_integration.py` needs the real one (`maturin develop`, or `FNUG_TEST_BINARY`) and skips without it.
 
 ## Configuration
 
-Fnug searches for `.fnug.yaml`/`.yml`/`.json` from cwd upward. Config is a tree of `CommandGroup`s containing `Command`s with optional `auto` rules (git, watch, always). Commands support `depends_on`, `env`, and `scrollback`.
+Fnug searches for `.fnug.yaml`/`.yml`/`.json` from cwd upward (`-c` names one instead). Config is a tree of `CommandGroup`s containing `Command`s with optional `auto` rules (`git`, `watch`, `always`, `path`, `regex`, `check`, `run_on_change`). Commands support `id`, `depends_on`, `env`, `timeout`, `exclusive` and `scrollback`. Ids default to the name (the group path when names clash), so `depends_on` can use names. Unknown keys are errors. README.md's "Configuration reference" lists every key.
 
-Workspace mode (`workspace: true` or `workspace: { paths: [...] }`) discovers sub-configs in subdirectories. When run from a subdirectory, fnug resolves upward to the nearest workspace root. Use `--no-workspace` to disable.
+Workspace mode (`workspace: true` or `workspace: { paths: [...] }`) discovers package configs in subdirectories. When run from a package directory, fnug loads the nearest parent workspace root whose discovery includes that config. Use `--no-workspace` to disable, or `--root` to resolve paths against another directory.
 
 ## Releasing
 
-Automated via GitHub Actions (`release.yaml`), triggered when the version in `Cargo.toml` changes on `main`. Publishes to crates.io (fnug-vt100 first, then fnug) and PyPI.
+Automated via GitHub Actions (`release.yaml`). A push to `main` that changes `Cargo.toml` releases its version unless the tag `v$VERSION` already exists. The tag is created last, so a release that failed partway can be retried from the Actions tab (`workflow_dispatch`); registries that already have the version are skipped. After CI passes, it builds binaries and wheels (Linux and macOS, x86_64 and aarch64), publishes fnug-vt100 and then fnug to crates.io, uploads the wheels and sdist to PyPI, and finally tags the commit and creates the GitHub release with the binaries and `SHA256SUMS`.
 
-1. Update version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if vendored crate changed)
+1. Update version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if the vendored crate changed since the last release; CI's `vt100-version` job fails otherwise)
 2. Update the version in the README install commands (`cargo install --locked fnug@X.Y.Z`)
 3. `cargo generate-lockfile`
 4. `git commit -m "chore: bump version to X.Y.Z"`
 
 ## Python Package
 
-Published to PyPI via maturin (`bindings = "bin"`). Wrapper in `python/fnug/` provides `run()`, `check()`, and programmatic config generation (`config.py`).
+Published to PyPI via maturin (`bindings = "bin"`): the wheel ships the binary. The wrapper in `python/fnug/` provides `run()`, `start()` (TUI), `check()` and programmatic config generation (`config.py`, which has to track the Rust config types). An in-memory `Config` is written to a temporary file and run with `--root` set to the caller's working directory.
 
 ```bash
 uv venv && source .venv/bin/activate.fish
-uv pip install maturin pyyaml
+uv pip install maturin pytest pyyaml
 maturin develop --release
+pytest python/tests
 ```
 
 ## Commit Messages
