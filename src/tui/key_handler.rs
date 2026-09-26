@@ -235,6 +235,7 @@ impl App {
                 }
             }
             KeyCode::F(5) => self.reload_config(),
+            KeyCode::Char('w') => self.toggle_auto_run(),
             KeyCode::Char('/') => {
                 self.search = super::app::SearchState::Editing(String::new());
             }

@@ -30,6 +30,7 @@ pub enum ToolbarAction {
     ExpandAll,
     CollapseAll,
     ShowHelp,
+    ToggleAutoRun,
 }
 
 #[derive(Debug)]
@@ -107,6 +108,14 @@ fn get_shortcuts(app: &App) -> Vec<Shortcut> {
         ));
     }
     push_node_shortcuts(app, &mut shortcuts);
+    if app.has_auto_run_commands() {
+        let label = if app.auto_run_enabled {
+            "Auto-run: on"
+        } else {
+            "Auto-run: off"
+        };
+        shortcuts.push(Shortcut::new("w", label, ToolbarAction::ToggleAutoRun));
+    }
 
     shortcuts.push(Shortcut::new("g", "Git select", ToolbarAction::GitSelect));
     shortcuts.push(Shortcut::new(

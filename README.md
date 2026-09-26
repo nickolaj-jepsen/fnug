@@ -267,6 +267,8 @@ commands:
         - "\\.rs$"
 ```
 
+Add `run_on_change: true` to also run the command when a change selects it, as bacon or cargo-watch do. Like the other `auto` keys, it is inherited by child groups and commands. A change while the command is queued or running gets it one more run once that run ends, and changes in the second after an automatic run ends are ignored, so the files a formatter or `clippy --fix` writes don't start it again right away. A change during the run can still start one extra run. Press `w` in the TUI to turn this off, and on again, for the session.
+
 ### Always auto-selection
 
 Mark commands that should always be selected, regardless of git changes or file watching.
@@ -534,6 +536,7 @@ In `.fnug.json`, use a `"$schema"` key with the same URL. `fnug schema` prints t
 | `path`   | list of strings   | Path prefixes to match against (e.g. `"./src"`); they may not exist yet |
 | `regex`  | list of strings   | Patterns for file paths relative to `cwd` (e.g. `"^src/.*\\.rs$"`)      |
 | `check`  | bool              | Include in `fnug check` — set `false` to skip (default `true`)         |
+| `run_on_change` | bool         | In the TUI, run the command when a watched change selects it (default `false`) |
 
 A changed file selects a command when it is under one of its `path` entries and matches one of its `regex` patterns (any file, if there are none). The patterns see the file's path relative to the command's `cwd`, such as `src/main.rs`, or `../shared/lib.rs` for a file outside it. Anchor with `^` to match from the `cwd` (`^tests/`), or write `(^|/)tests/` to match a directory at any depth.
 
@@ -557,6 +560,7 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 | `x`            | Tree       | Clear command            |
 | `g`            | Tree       | Select by git changes    |
 | `F5`           | Tree       | Reload the config        |
+| `w`            | Tree       | Toggle auto-run          |
 | `c`            | Tree       | Copy output              |
 | `Shift+↑/↓`    | Tree       | Scroll output            |
 | `{` / `}`      | Tree       | Output top / bottom      |

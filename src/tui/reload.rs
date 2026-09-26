@@ -142,6 +142,9 @@ impl App {
         self.selection_reason.retain(|id, _| new_ids.contains(id));
         self.error_messages.retain(|id, _| new_ids.contains(id));
         self.queued_generation.retain(|id, _| new_ids.contains(id));
+        self.auto_run_pending.retain(|id| new_ids.contains(id));
+        self.auto_running.retain(|id| new_ids.contains(id));
+        self.quiet_until.retain(|id, _| new_ids.contains(id));
         if let Some(batch) = &mut self.batch_run_ids {
             batch.retain(|id| new_ids.contains(id));
         }

@@ -170,6 +170,7 @@ impl Auto {
             regex: self.regex.clone().or_else(|| other.regex.clone()),
             always: self.always.or(other.always),
             check: self.check.or(other.check),
+            run_on_change: self.run_on_change.or(other.run_on_change),
         }
     }
 }
@@ -199,6 +200,7 @@ impl Inheritable for Auto {
         self.regex.clone_from(&inheritance.auto.regex);
         self.always = inheritance.auto.always;
         self.check = inheritance.auto.check;
+        self.run_on_change = inheritance.auto.run_on_change;
 
         Ok(())
     }
@@ -386,6 +388,7 @@ mod tests {
             regex: None,
             always: Some(false),
             check: None,
+            run_on_change: None,
         };
         let mut group = CommandGroup {
             id: "1".to_string(),
@@ -424,6 +427,7 @@ mod tests {
             regex: None,
             always: Some(false),
             check: None,
+            run_on_change: None,
         };
 
         let child_group = CommandGroup {
@@ -479,6 +483,7 @@ mod tests {
             regex: None,
             always: Some(false),
             check: None,
+            run_on_change: None,
         };
 
         let mut group = CommandGroup {
@@ -563,6 +568,7 @@ mod tests {
                 regex: None,
                 always: Some(false),
                 check: None,
+                run_on_change: None,
             },
             ..Default::default()
         };
@@ -589,6 +595,7 @@ mod tests {
                 regex: None,
                 always: Some(false),
                 check: None,
+                run_on_change: None,
             },
             cwd: root.clone(),
             commands: vec![Command {
@@ -604,6 +611,7 @@ mod tests {
                     regex: None,
                     always: Some(false),
                     check: None,
+                    run_on_change: None,
                 },
                 ..Default::default()
             }],
@@ -624,6 +632,7 @@ mod tests {
                 regex: None,
                 always: Some(false),
                 check: None,
+                run_on_change: None,
             },
             cwd: root.clone(),
             commands: vec![Command {
@@ -639,6 +648,7 @@ mod tests {
                     regex: None,
                     always: Some(false),
                     check: None,
+                    run_on_change: None,
                 },
                 ..Default::default()
             }],
@@ -681,5 +691,37 @@ mod tests {
             Some(true),
             "always: true should be inherited from parent group even without watch/git"
         );
+    }
+
+    #[test]
+    fn run_on_change_inherits_unless_overridden() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let command = |id: &str, run_on_change| Command {
+            id: id.to_string(),
+            name: id.to_string(),
+            auto: Auto {
+                run_on_change,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut group = CommandGroup {
+            id: "parent".to_string(),
+            name: "parent".to_string(),
+            auto: Auto {
+                watch: Some(true),
+                run_on_change: Some(true),
+                ..Default::default()
+            },
+            cwd: root.clone(),
+            commands: vec![command("inherits", None), command("opts-out", Some(false))],
+            ..Default::default()
+        };
+
+        group.inherit(&Inheritance::from(root)).unwrap();
+        assert_eq!(group.commands[0].auto.run_on_change, Some(true));
+        assert_eq!(group.commands[1].auto.run_on_change, Some(false));
     }
 }

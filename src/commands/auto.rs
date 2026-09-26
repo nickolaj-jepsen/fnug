@@ -14,6 +14,8 @@ pub struct Auto {
     pub regex: Option<Vec<LazyRegex>>,
     pub always: Option<bool>,
     pub check: Option<bool>,
+    /// Whether the TUI runs the command when a watched file change selects it
+    pub run_on_change: Option<bool>,
 }
 
 impl Auto {
@@ -54,6 +56,7 @@ impl Auto {
             always,
             regex,
             check,
+            run_on_change: None,
         })
     }
 }
