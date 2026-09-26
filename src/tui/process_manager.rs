@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,6 +13,7 @@ use crate::runner::{self, DagNode, NodeState, PlanOptions, Selection};
 
 use super::app::{App, AppEvent, CommandStatus, Outbound, ProcessInstance, STOP_GRACE};
 use super::clipboard::{self, Backend};
+use super::selection::SelectionReason;
 use super::status::StatusLevel;
 use super::tree_state::find_group_in_group;
 
@@ -131,6 +133,18 @@ impl App {
         }
     }
 
+    /// The changed files that git or the file watcher selected `cmd_id` for, while it is
+    /// selected by them
+    fn matched_files(&self, cmd_id: &str) -> Vec<PathBuf> {
+        if !self.selected.contains(cmd_id) {
+            return Vec::new();
+        }
+        match self.selection_reason.get(cmd_id) {
+            Some(SelectionReason::Git(files) | SelectionReason::Watch(files)) => files.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Start `cmd_id` in a new terminal, stopping its previous run. Returns the message to show
     /// when it can't start.
     fn spawn_pty(&mut self, cmd_id: &str) -> Result<(), String> {
@@ -153,6 +167,7 @@ impl App {
                 .scrollback
                 .unwrap_or_else(Terminal::default_scrollback_size),
             output_notify: Some(Arc::clone(&self.output_notify)),
+            files: self.matched_files(cmd_id),
         };
         let terminal = Terminal::new(&cmd, size, opts)
             .map_err(|e| format!("Failed to start '{}': {e}", cmd.name))?;
@@ -1165,5 +1180,123 @@ mod tests {
             "holder of a finished command survived"
         );
         assert!(running.is_reaped(), "holder of a running command survived");
+    }
+
+    mod matched_files {
+        use std::path::Path;
+        use std::time::Duration;
+
+        use crate::process::ExitInfo;
+        use crate::pty::test_util::{pty_available, wait_until};
+        use crate::selectors::watch::WatchMatch;
+        use crate::tui::app::{App, AppEvent};
+        use crate::tui::test_util::{AREA, git_selected, shell_app};
+
+        /// Appends the `{files}` and `FNUG_FILES` it got to `runs`, then runs `tail`
+        fn show_files(tail: &str) -> String {
+            format!(r#"echo "args:" {{files}} "env:$(echo ${{FNUG_FILES-unset}})" >> runs; {tail}"#)
+        }
+
+        /// `show` running [`show_files`] in `dir`, which holds `a.txt` and `b.txt`
+        fn show_app(dir: &Path, tail: &str) -> App {
+            for file in ["a.txt", "b.txt"] {
+                std::fs::write(dir.join(file), "").unwrap();
+            }
+            shell_app(dir, &[("show", &show_files(tail))])
+        }
+
+        /// Wait until `show` has logged `lines` runs, and return them.
+        fn runs(dir: &Path, lines: usize) -> Vec<String> {
+            let path = dir.join("runs");
+            let mut runs = Vec::new();
+            let logged = wait_until(Duration::from_secs(5), || {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                runs = text.lines().map(String::from).collect();
+                runs.len() >= lines
+            });
+            assert!(logged, "only logged {runs:?}");
+            runs
+        }
+
+        fn changed(dir: &Path, file: &str) -> AppEvent {
+            AppEvent::WatcherTriggered(vec![WatchMatch {
+                id: "show".into(),
+                files: vec![dir.join(file)],
+            }])
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn git_selected_run_gets_its_files() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = show_app(dir.path(), "true");
+            let file = dir.path().join("a.txt");
+            let selected = vec![git_selected("show", &[file.to_str().unwrap()])];
+            app.handle_app_event(AppEvent::GitSelectionComplete(0, selected));
+
+            app.run_selected(AREA);
+
+            assert_eq!(runs(dir.path(), 1), ["args: a.txt env:a.txt"]);
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn watch_run_gets_changed_files() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = show_app(dir.path(), "true");
+            app.config.commands[0].auto.run_on_change = Some(true);
+
+            app.handle_app_event(changed(dir.path(), "b.txt"));
+
+            assert_eq!(runs(dir.path(), 1), ["args: b.txt env:b.txt"]);
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rerun_gets_changes_made_while_it_ran() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = show_app(dir.path(), "exec sleep 30");
+            app.config.commands[0].auto.run_on_change = Some(true);
+            app.handle_app_event(changed(dir.path(), "a.txt"));
+            runs(dir.path(), 1);
+            app.handle_app_event(changed(dir.path(), "b.txt"));
+
+            app.handle_app_event(AppEvent::ProcessExited {
+                id: "show".into(),
+                generation: app.processes["show"].generation,
+                exit: ExitInfo {
+                    code: Some(0),
+                    signal: None,
+                    stop_requested: false,
+                },
+            });
+
+            let runs = runs(dir.path(), 2);
+            assert_eq!(runs[1], "args: a.txt b.txt env:a.txt b.txt");
+            app.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn run_without_matched_files_lists_auto_path() {
+            if !pty_available() {
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = show_app(dir.path(), "true");
+            app.select_by_hand("show".into());
+
+            app.run_command("show", AREA);
+
+            assert_eq!(runs(dir.path(), 1), ["args: . env:unset"]);
+            app.shutdown().await;
+        }
     }
 }

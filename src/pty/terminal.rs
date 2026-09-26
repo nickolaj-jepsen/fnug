@@ -13,6 +13,7 @@ use tokio::sync::{Notify, watch};
 
 use crate::commands::command::Command;
 use crate::process::{ExitInfo, ProcessHandle, StopSignal};
+use crate::runner::process::shell_invocation;
 
 use super::messages::format_emulator_reset_message;
 
@@ -75,6 +76,9 @@ pub struct TerminalOptions {
     pub scrollback: usize,
     /// Notified when output arrives while the terminal is not dirty
     pub output_notify: Option<Arc<Notify>>,
+    /// The changed files that selected the command, as absolute paths: they go to it in
+    /// `FNUG_FILES` and `{files}`, which lists its `auto.path` when there are none
+    pub files: Vec<PathBuf>,
 }
 
 impl Default for TerminalOptions {
@@ -82,6 +86,7 @@ impl Default for TerminalOptions {
         Self {
             scrollback: DEFAULT_SCROLLBACK_SIZE,
             output_notify: None,
+            files: Vec::new(),
         }
     }
 }
@@ -94,7 +99,11 @@ struct SpawnedPty {
     writer: Box<dyn Write + Send>,
 }
 
-fn spawn_pty(command: &Command, size: TerminalSize) -> Result<SpawnedPty, ProcessError> {
+fn spawn_pty(
+    command: &Command,
+    size: TerminalSize,
+    files: &[PathBuf],
+) -> Result<SpawnedPty, ProcessError> {
     debug!("Running PTY for command: {command:?}");
     if !command.cwd.is_dir() {
         return Err(ProcessError::MissingCwd(command.cwd.clone()));
@@ -116,7 +125,11 @@ fn spawn_pty(command: &Command, size: TerminalSize) -> Result<SpawnedPty, Proces
 
     let child = pair
         .slave
-        .spawn_command(CommandBuilder::from(command))
+        .spawn_command(CommandBuilder::from(&shell_invocation(
+            command,
+            &command.cwd,
+            Some(files),
+        )))
         .map_err(|e| ProcessError::Process(e.to_string()))?;
 
     drop(pair.slave); // This will make the reader close when the child process exits
@@ -407,7 +420,7 @@ impl Terminal {
             master,
             reader,
             writer,
-        } = spawn_pty(command, size)?;
+        } = spawn_pty(command, size, &opts.files)?;
         // portable-pty calls setsid, so the child leads its own process group
         let handle = ProcessHandle::new(pid);
 
