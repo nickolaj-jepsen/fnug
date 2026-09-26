@@ -651,7 +651,10 @@ impl App {
                         self.mark_stopped(&id);
                     }
                     CommandStatus::Success => {
-                        self.selected.remove(&id);
+                        // Still selected by the changes its queued rerun is for
+                        if !self.auto_run_pending.contains(&id) {
+                            self.selected.remove(&id);
+                        }
                         self.dag.finish(&id, true);
                     }
                     _ => self.finish_failed(&id),
@@ -718,6 +721,17 @@ impl App {
         self.set_status(watch_status(&matches, &names, &self.cwd), StatusLevel::Info);
         let ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
         for m in matches {
+            // Every change since it last passed goes to its next run
+            if self.selected.contains(&m.id)
+                && let Some(SelectionReason::Watch(files)) = self.selection_reason.get_mut(&m.id)
+            {
+                for file in m.files {
+                    if !files.contains(&file) {
+                        files.push(file);
+                    }
+                }
+                continue;
+            }
             self.selected.insert(m.id.clone());
             self.selection_reason
                 .insert(m.id, SelectionReason::Watch(m.files));
