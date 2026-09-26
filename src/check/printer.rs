@@ -151,8 +151,9 @@ impl Printer {
         let text = match &report.outcome {
             Outcome::Passed => sty.green("PASS"),
             Outcome::Failed(failure) => sty.red(&format!("FAIL ({})", describe_failure(failure))),
+            // The limit stands in for the duration
             Outcome::TimedOut(limit) => {
-                sty.red(&format!("TIMEOUT after {}", format_duration(*limit)))
+                return sty.red(&format!("TIMEOUT after {}", format_duration(*limit)));
             }
             Outcome::Skipped { cause } => {
                 let name = self.names.get(cause).unwrap_or(cause);
