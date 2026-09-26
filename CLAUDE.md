@@ -80,7 +80,7 @@ The project dogfoods itself — see `.fnug.yaml` for the lint/test config. It se
 - **Async** — Tokio multi-thread runtime, built in `main.rs` with a short `shutdown_timeout`; signals become a `CancellationToken`
 - **Redraws** — PTY output marks its terminal dirty and wakes the event loop through a shared `Arc<Notify>`; the loop redraws when the visible terminal is dirty or an event changed something, at most one frame per 16 ms. Only a mouse button press or release draws right away, and only when something besides the visible terminal's output changed since the last frame
 - **Keymap** — `tui/keymap.rs` is the only list of keybindings: the help overlay and toolbar render from it, `key_handler` tests check each entry is handled, and `keymap_matches_readme` fails with the README table to paste when they differ
-- **Schema** — Config structs are `deny_unknown_fields`; a new key means regenerating `schema/fnug.schema.json` (`cargo run --bin fnug -- schema > schema/fnug.schema.json`, enforced by a test) and adding it to `python/fnug/config.py`
+- **Schema** — Config structs are `deny_unknown_fields`; a new key means regenerating `schema/fnug.schema.json` (`cargo run --bin fnug -- schema > schema/fnug.schema.json`, enforced by a test) and adding it to `python/fnug/config.py` (`test_config.py` checks the dataclasses against the schema)
 
 ## Testing
 
@@ -109,7 +109,7 @@ let (config, cwd) = common::load(dir.path(), "fnug_version: 0.1.0\nname: t\ncomm
 
 Tests that start the binary use `env!("CARGO_BIN_EXE_fnug")`. Process and PTY tests synchronise through files the commands write and poll with a timeout instead of sleeping, and PTY tests skip themselves when no PTY can be opened. Review changed snapshots with `cargo insta review`, or accept them with `INSTA_UPDATE=always cargo test`.
 
-The Python tests (`python/tests`) run the wrapper against a fake binary that records its arguments; `test_integration.py` needs the real one (`maturin develop`, or `FNUG_TEST_BINARY`) and skips without it.
+The Python tests (`python/tests`) run the wrapper against a fake binary that records its arguments; `test_integration.py` needs the real one (`maturin develop`, or `FNUG_TEST_BINARY`) and skips without it. `test_config.py` checks `Config.to_dict()` against `fnug schema`, or the committed schema without a binary.
 
 ## Configuration
 
