@@ -162,6 +162,32 @@ fn cancelled_call_kills_command() {
 }
 
 #[test]
+fn starts_with_broken_config_and_reports_it_per_call() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        "name: root\ncommands:\n  - name: a\n    cmd: 'true'\n    colour: red\n",
+    );
+    let mut server = Server::start(dir.path());
+    server.call(2, "list_lints", &json!({}));
+    let result = &server.response(2)["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("colour"),
+        "{result}"
+    );
+
+    // Fixing the config takes effect without a restart
+    common::write_config(dir.path(), HANG_CONFIG);
+    server.call(3, "list_lints", &json!({}));
+    let result = &server.response(3)["result"];
+    assert_eq!(result["isError"], false, "{result}");
+}
+
+#[test]
 fn closing_stdin_stops_commands_and_server() {
     let dir = tempfile::tempdir().unwrap();
     common::write_config(dir.path(), HANG_CONFIG);

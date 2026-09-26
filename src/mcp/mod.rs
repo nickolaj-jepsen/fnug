@@ -4,7 +4,6 @@ mod params;
 mod response;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,12 +16,12 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::command::Command;
-use crate::commands::group::CommandGroup;
 use crate::runner::{
     self, CaptureLimits, ExecOptions, NoHook, OutputMode, PlanError, PlanOptions, Selection,
     commands_with_group_path,
 };
 use crate::selectors::{self, SelectOptions};
+use crate::{LoadOptions, LoadedConfig};
 
 use params::{FailFastParams, ListLintsParams, RunLintParams};
 use response::{AutoRules, LintInfo, RunResult};
@@ -36,8 +35,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct FnugMcp {
-    config: CommandGroup,
-    cwd: PathBuf,
+    /// How to load the config, which every tool call does afresh.
+    load: LoadOptions,
     /// Held for reading by every run; shutdown takes it for writing to wait for them.
     runs: Arc<RwLock<()>>,
     tool_router: ToolRouter<Self>,
@@ -46,6 +45,18 @@ pub struct FnugMcp {
 /// Convert any `Display` error into an MCP internal error.
 fn mcp_err(e: impl std::fmt::Display) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(e.to_string(), None)
+}
+
+/// A tool result that reports a failure to the caller, as opposed to a protocol error.
+fn tool_error(message: String) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(message)])
+}
+
+fn load_error(e: &crate::config_file::ConfigError) -> CallToolResult {
+    tool_error(format!(
+        "Failed to load the fnug config: {e}\nFix it and call the tool again; every call \
+         reloads the config."
+    ))
 }
 
 /// Report an unknown or ambiguous command, or unusable selection, as invalid parameters.
@@ -87,10 +98,9 @@ fn matches_lint_filters(cmd: &Command, group_path: &str, params: &ListLintsParam
 
 #[tool_router]
 impl FnugMcp {
-    fn new(config: CommandGroup, cwd: PathBuf) -> Self {
+    fn new(load: LoadOptions) -> Self {
         Self {
-            config,
-            cwd,
+            load,
             runs: Arc::default(),
             tool_router: Self::tool_router(),
         }
@@ -109,9 +119,8 @@ impl FnugMcp {
         &self,
         Parameters(params): Parameters<ListLintsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let config = self.config.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let flat = commands_with_group_path(&config);
+        let result = self.with_config(move |loaded| {
+            let flat = commands_with_group_path(&loaded.root);
             let commands: Vec<&Command> = flat.iter().map(|(cmd, _)| *cmd).collect();
             let selection = selectors::select(&commands, &SelectOptions::default());
             for issue in &selection.issues {
@@ -139,12 +148,12 @@ impl FnugMcp {
                 })
                 .collect();
 
-            serde_json::to_string_pretty(&infos).map_err(mcp_err)
-        })
-        .await
-        .map_err(mcp_err)??;
-
-        Ok(CallToolResult::success(vec![Content::text(result)]))
+            Ok(serde_json::to_string_pretty(&infos).map_err(mcp_err))
+        });
+        match result.await {
+            Ok(json) => Ok(CallToolResult::success(vec![Content::text(json?)])),
+            Err(result) => Ok(result),
+        }
     }
 
     #[tool(
@@ -209,6 +218,18 @@ impl FnugMcp {
 }
 
 impl FnugMcp {
+    /// Load the config and pass it to `f`, on a blocking thread. A config that fails to load
+    /// becomes the tool's error result.
+    async fn with_config<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(LoadedConfig) -> Result<T, CallToolResult> + Send + 'static,
+    ) -> Result<T, CallToolResult> {
+        let opts = self.load.clone();
+        tokio::task::spawn_blocking(move || f(crate::load(&opts).map_err(|e| load_error(&e))?))
+            .await
+            .unwrap_or_else(|e| Err(tool_error(format!("fnug failed: {e}"))))
+    }
+
     /// Plan and run `selection`, one command at a time with captured output. Cancelling `ct`
     /// kills the running command's process group.
     async fn run_and_serialize(
@@ -218,13 +239,15 @@ impl FnugMcp {
         ct: CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let _running = self.runs.read().await;
-        let config = self.config.clone();
-        let plan = tokio::task::spawn_blocking(move || {
-            runner::plan(&config, &selection, &PlanOptions::default())
-        })
-        .await
-        .map_err(mcp_err)?
-        .map_err(|e| plan_err(&e))?;
+        let planned = self.with_config(move |loaded| {
+            let plan = runner::plan(&loaded.root, &selection, &PlanOptions::default());
+            Ok((plan, loaded.cwd))
+        });
+        let (plan, cwd) = match planned.await {
+            Ok(planned) => planned,
+            Err(result) => return Ok(result),
+        };
+        let plan = plan.map_err(|e| plan_err(&e))?;
         for warning in &plan.warnings {
             warn!("{warning}");
         }
@@ -235,7 +258,7 @@ impl FnugMcp {
             cancel: ct,
             ..ExecOptions::default()
         };
-        let report = runner::execute(&plan, &self.cwd, &opts, &NoHook, &mut |_| {}).await;
+        let report = runner::execute(&plan, &cwd, &opts, &NoHook, &mut |_| {}).await;
         let json = serde_json::to_string_pretty(&RunResult::from(&report)).map_err(mcp_err)?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -276,18 +299,24 @@ impl ServerHandler for FnugMcp {
 
 /// Serve MCP over stdio until the client closes stdin or `shutdown` is cancelled.
 ///
-/// Either way, running tool calls are cancelled, which stops their commands, and the server
-/// waits up to 10 s for them before returning.
+/// Every tool call loads the config with `load`, so edits apply without a restart, and a config
+/// that fails to load is the call's error result rather than a reason not to start. On
+/// shutdown, running tool calls are cancelled, which stops their commands, and the server waits
+/// up to 10 s for them before returning.
 ///
 /// # Errors
 ///
 /// Returns an error if the MCP transport fails.
 pub async fn run(
-    config: CommandGroup,
-    cwd: PathBuf,
+    load: LoadOptions,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let server = FnugMcp::new(config, cwd);
+    // Logs the config's warnings, or why it doesn't load, once at startup
+    let preflight = load.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || crate::load(&preflight)).await? {
+        warn!("{e}; every tool call reports this until the config is fixed");
+    }
+    let server = FnugMcp::new(load);
     let runs = server.runs.clone();
     let service = server.serve(stdio()).await?;
     // Dropping the service, whichever branch wins, cancels every request's token

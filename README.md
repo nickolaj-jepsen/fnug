@@ -172,6 +172,19 @@ In a workspace, setup also offers a hook for each package whose config is in ano
 
 Setup edits the editor configs in place, keeping comments and formatting, and adds or removes only the `fnug` entry. The entry runs `fnug mcp` with the `-c`, `--root` and `--no-workspace` that `fnug setup` was given, with paths relative to the project directory the editor starts it in, since the editor config is usually committed. fnug has to be on the editor's `PATH`. Run setup again with other flags, and it offers to update the entry.
 
+### MCP server
+
+`fnug mcp` lets coding agents run your checks through the Model Context Protocol, over stdio. It has four tools:
+
+| Tool         | Description                                                                 |
+| ------------ | --------------------------------------------------------------------------- |
+| `list_lints` | List the commands, optionally filtered, and whether the current changes select them |
+| `run_lints`  | Run the commands the current git changes select, as `fnug check` does       |
+| `run_lint`   | Run one command by id or name, after its dependencies                       |
+| `run_all`    | Run every command except those with `auto.check: false`                     |
+
+The server loads the config again on every tool call, so edits to it apply without a restart. It also starts when the config is missing or broken; each tool call then fails with the reason until the config is fixed.
+
 ## Configuration
 
 Fnug searches for `.fnug.yaml`, `.fnug.yml`, or `.fnug.json` from the current directory upward.

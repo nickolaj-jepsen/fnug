@@ -5,14 +5,19 @@ use rmcp::model::CallToolResult;
 use tokio_util::sync::CancellationToken;
 
 use super::FnugMcp;
-use super::params::{FailFastParams, RunLintParams};
+use super::params::{FailFastParams, ListLintsParams, RunLintParams};
+use crate::LoadOptions;
 
 fn server(yaml: &str) -> (FnugMcp, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".fnug.yaml");
     std::fs::write(&path, yaml).unwrap();
-    let (config, cwd) = crate::load_config(path.to_str(), true).unwrap();
-    (FnugMcp::new(config, cwd), dir)
+    let load = LoadOptions {
+        config: Some(path),
+        no_workspace: true,
+        ..LoadOptions::default()
+    };
+    (FnugMcp::new(load), dir)
 }
 
 fn json(result: &CallToolResult) -> serde_json::Value {
@@ -30,6 +35,67 @@ fn run_lint(command: &str) -> Parameters<RunLintParams> {
     Parameters(RunLintParams {
         command: command.to_string(),
     })
+}
+
+fn list_all() -> Parameters<ListLintsParams> {
+    Parameters(ListLintsParams {
+        group: None,
+        auto_type: None,
+        name: None,
+    })
+}
+
+/// The ids `list_lints` returns.
+async fn listed_ids(server: &FnugMcp) -> Vec<String> {
+    let result = server.list_lints(list_all()).await.unwrap();
+    json(&result)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lint| lint["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn text(result: &CallToolResult) -> &str {
+    &result.content[0].as_text().unwrap().text
+}
+
+#[tokio::test]
+async fn config_reloaded_between_calls() {
+    let (server, dir) = server("name: root\ncommands:\n  - name: a\n    cmd: 'true'\n");
+    assert_eq!(listed_ids(&server).await, ["a"]);
+
+    std::fs::write(
+        dir.path().join(".fnug.yaml"),
+        "name: root\ncommands:\n  - name: a\n    cmd: 'true'\n  - name: b\n    cmd: 'echo from-b; exit 4'\n",
+    )
+    .unwrap();
+    assert_eq!(listed_ids(&server).await, ["a", "b"]);
+    let result = server
+        .run_lint(run_lint("b"), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(json(&result)["commands"][0]["exit_code"], 4);
+}
+
+#[tokio::test]
+async fn invalid_config_reported_as_tool_error() {
+    let (server, dir) = server("name: root\ncommands:\n  - name: a\n    cmd: 'true'\n");
+    std::fs::write(
+        dir.path().join(".fnug.yaml"),
+        "name: root\ncommands:\n  - name: a\n    cmd: 'true'\n    colour: red\n",
+    )
+    .unwrap();
+
+    let listed = server.list_lints(list_all()).await.unwrap();
+    let ran = server
+        .run_lint(run_lint("a"), CancellationToken::new())
+        .await
+        .unwrap();
+    for result in [listed, ran] {
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(text(&result).contains("colour"), "{}", text(&result));
+    }
 }
 
 #[tokio::test]

@@ -122,11 +122,9 @@ async fn run(cli: Cli, logger: LoggerHandle) -> Result<ExitCode, Box<dyn std::er
             return Ok(ExitCode::SUCCESS);
         }
         Some(Commands::Setup(ref args)) => return setup::run(args, &load_opts),
+        // Loads the config on every tool call
+        Some(Commands::Mcp) => return mcp::run(load_opts).await,
         // Commands that need one
-        Some(Commands::Mcp) => {
-            let loaded = fnug::load(&load_opts)?;
-            return mcp::run(loaded.root, loaded.cwd).await;
-        }
         Some(Commands::Check(ref args)) => {
             let loaded = fnug::load(&load_opts)?;
             match check::run(args, &loaded.root, &loaded.cwd).await? {
