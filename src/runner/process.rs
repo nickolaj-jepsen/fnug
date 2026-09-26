@@ -1,6 +1,8 @@
 //! Starting a command's shell, and making sure it doesn't outlive its run.
 
 use std::ffi::OsString;
+use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 
@@ -44,6 +46,22 @@ pub fn shell_invocation(cmd: &Command, fallback_cwd: &Path) -> ShellInvocation {
         args: ["-c".into(), cmd.cmd.clone().into()],
         cwd: cmd.effective_cwd(fallback_cwd).to_path_buf(),
         env,
+    }
+}
+
+/// Make `command` start as the leader of a new session, and so of a new process group whose id
+/// is its pid. It has no controlling terminal, so opening `/dev/tty` fails with `ENXIO` instead
+/// of stopping it as a background job.
+pub(crate) fn new_session(command: &mut std::process::Command) {
+    // Not together with `process_group(0)`: setsid fails with EPERM in a group leader.
+    // SAFETY: setsid is async-signal-safe, and the closure touches nothing else.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 

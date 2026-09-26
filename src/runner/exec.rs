@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
@@ -20,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use super::dag::DagState;
 use super::output::{CaptureLimits, CapturedOutput};
 use super::plan::{Plan, PlannedCommand};
-use super::process::{GroupGuard, ShellInvocation, shell_invocation};
+use super::process::{GroupGuard, ShellInvocation, new_session, shell_invocation};
 use super::report::{CommandReport, Failure, Outcome, RunReport};
 use crate::process::{ExitInfo, ProcessHandle, StopSignal};
 
@@ -38,7 +37,8 @@ pub enum OutputMode {
     /// group, so they can use the terminal and get its Ctrl+C; only one runs at a time.
     Inherit,
     /// Into a [`CapturedOutput`] per command, stdout and stderr merged in order. Each command
-    /// leads its own process group, which timeouts and cancellation kill as a whole.
+    /// leads its own session without a terminal, and its process group, which timeouts and
+    /// cancellation kill as a whole.
     Capture(CaptureLimits),
 }
 
@@ -344,8 +344,8 @@ impl Spawned {
                 command
                     .stdin(Stdio::null())
                     .stdout(writer.try_clone()?)
-                    .stderr(writer)
-                    .process_group(0);
+                    .stderr(writer);
+                new_session(&mut command);
                 Some((reader, limits))
             }
         };
