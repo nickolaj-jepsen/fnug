@@ -50,8 +50,9 @@ impl fmt::Display for Proposal {
 /// Propose a command group for each kind of tooling found in `dir`: Rust, Python, Node, Go and
 /// Nix, in that order. Each group's commands are selected by uncommitted changes and watched
 /// edits to the files it checks. Tooling without commands to run is not proposed: a
-/// `package.json` without a `format:check`, `lint`, `typecheck` or `test` script, or a
-/// `flake.nix` when none of alejandra, statix and deadnix is on `PATH`.
+/// `package.json` without a `format:check`, `lint`, `typecheck` or `test` script (npm's
+/// placeholder test script doesn't count), or a `flake.nix` when none of alejandra, statix and
+/// deadnix is on `PATH`.
 #[must_use]
 pub fn detect(dir: &Path) -> Vec<Proposal> {
     let project = Project { dir };
@@ -182,6 +183,9 @@ const NODE_LOCKFILES: [(&str, &str); 6] = [
 /// The `package.json` scripts that check a project, in the order they run.
 const NODE_SCRIPTS: [&str; 4] = ["format:check", "lint", "typecheck", "test"];
 
+/// Part of the test script `npm init` writes: `echo "Error: no test specified" && exit 1`.
+const NPM_PLACEHOLDER: &str = "Error: no test specified";
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PackageJson {
@@ -209,7 +213,18 @@ fn node(project: &Project) -> Option<Proposal> {
     );
     let commands: Vec<_> = NODE_SCRIPTS
         .into_iter()
-        .filter(|script| manifest.scripts.contains_key(*script))
+        .filter(|script| {
+            manifest.scripts.get(*script).is_some_and(|body| {
+                // `npm init` writes a test script that only fails
+                let placeholder = body
+                    .as_str()
+                    .is_some_and(|body| body.contains(NPM_PLACEHOLDER));
+                if placeholder {
+                    info!("not proposing the {script} script: it is npm's placeholder");
+                }
+                !placeholder
+            })
+        })
         .map(|script| {
             let mut command = command(script, format!("{runner} run {script}"));
             if script == "test" {
