@@ -22,6 +22,8 @@ fn fnug(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_fnug"))
         .current_dir(dir)
         .args(args)
+        // It sets the stderr threshold, which some tests rely on being the default
+        .env_remove("FNUG_LOG")
         .output()
         .unwrap()
 }
@@ -241,6 +243,7 @@ fn mcp_stdout_is_pure_jsonrpc() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_fnug"))
         .current_dir(dir.path())
         .args(["--log-level", "debug", "mcp"])
+        .env_remove("FNUG_LOG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
