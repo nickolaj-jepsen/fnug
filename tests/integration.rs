@@ -1,18 +1,38 @@
+use fnug::check::{CheckOptions, CheckResult};
 use fnug::config_file::ConfigError;
 use fnug::load_config;
 use fnug::tui::app::App;
 use fnug::tui::log_state::LogBuffer;
+use tokio_util::sync::CancellationToken;
 
 fn write_config(dir: &std::path::Path, content: &str) {
     std::fs::write(dir.join(".fnug.yaml"), content).unwrap();
 }
 
-fn load_and_check(dir: &std::path::Path, fail_fast: bool) -> i32 {
+fn load_and_check(dir: &std::path::Path, fail_fast: bool) -> CheckResult {
     let path = dir.join(".fnug.yaml").to_string_lossy().to_string();
     let (config, cwd) = load_config(Some(&path), false).unwrap();
-    fnug::check::run(&config, &cwd, fail_fast, false, false)
+    let opts = CheckOptions {
+        fail_fast,
+        ..CheckOptions::default()
+    };
+    tokio::runtime::Runtime::new()
         .unwrap()
-        .exit_code
+        .block_on(fnug::check::run(
+            &config,
+            &cwd,
+            &opts,
+            CancellationToken::new(),
+        ))
+        .unwrap()
+}
+
+/// Assert the exit code and `(passed, failed, skipped, not_run)` of the total.
+fn assert_check(result: &CheckResult, exit_code: i32, total: usize, counts: [usize; 4]) {
+    let c = result.report.counts();
+    assert_eq!(result.exit_code, exit_code);
+    assert_eq!(c.total, total, "{c:?}");
+    assert_eq!([c.passed, c.failed, c.skipped, c.not_run], counts, "{c:?}");
 }
 
 #[test]
@@ -262,7 +282,7 @@ commands:
       always: true
 "#,
     );
-    assert_eq!(load_and_check(dir.path(), false), 0);
+    assert_check(&load_and_check(dir.path(), false), 0, 2, [2, 0, 0, 0]);
 }
 
 #[test]
@@ -282,7 +302,7 @@ commands:
       always: true
 "#,
     );
-    assert_eq!(load_and_check(dir.path(), false), 1);
+    assert_check(&load_and_check(dir.path(), false), 1, 1, [0, 1, 0, 0]);
 }
 
 #[test]
@@ -314,7 +334,7 @@ commands:
             marker.display()
         ),
     );
-    assert_eq!(load_and_check(dir.path(), false), 0);
+    assert_check(&load_and_check(dir.path(), false), 0, 2, [2, 0, 0, 0]);
 }
 
 #[test]
@@ -341,7 +361,7 @@ commands:
       always: true
 "#,
     );
-    assert_eq!(load_and_check(dir.path(), false), 1);
+    assert_check(&load_and_check(dir.path(), false), 1, 2, [0, 1, 1, 0]);
 }
 
 #[test]
@@ -359,7 +379,7 @@ commands:
     cmd: "true"
 "#,
     );
-    assert_eq!(load_and_check(dir.path(), false), 0);
+    assert_check(&load_and_check(dir.path(), false), 0, 0, [0, 0, 0, 0]);
 }
 
 #[test]
@@ -388,7 +408,7 @@ commands:
             marker.display()
         ),
     );
-    assert_eq!(load_and_check(dir.path(), true), 1);
+    assert_check(&load_and_check(dir.path(), true), 1, 2, [0, 1, 0, 1]);
     assert!(!marker.exists(), "second command should not have run");
 }
 
