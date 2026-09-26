@@ -191,11 +191,23 @@ pub fn pending(cwd: &Path) -> Option<PathBuf> {
 /// the user's.
 #[must_use]
 pub fn active(cwd: &Path) -> bool {
-    let Ok(git) = Git::locate(cwd) else {
-        return false;
-    };
+    lock_path(cwd).is_some_and(|lock| held(&lock))
+}
+
+/// Where a `fnug check --stash` in the work tree containing `cwd` puts its lock, or `None`
+/// outside a work tree. It runs git to find the git dir, which doesn't move, so keep the
+/// result and check it with [`held`].
+#[must_use]
+pub fn lock_path(cwd: &Path) -> Option<PathBuf> {
+    Git::locate(cwd).ok().map(|git| git.git_dir.join(LOCK_NAME))
+}
+
+/// Whether a live `fnug check --stash` other than this process holds `lock`, a path from
+/// [`lock_path`].
+#[must_use]
+pub fn held(lock: &Path) -> bool {
     matches!(
-        read_lock(&git.git_dir.join(LOCK_NAME)),
+        read_lock(lock),
         Ok(Some(state)) if state.pid != std::process::id() && pid_alive(state.pid)
     )
 }
