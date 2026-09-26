@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::Args;
+use clap::{ArgGroup, Args};
 use tokio_util::sync::CancellationToken;
 
 use fnug::check::{CheckOptions, CheckResult};
@@ -17,7 +17,21 @@ use crate::signals;
 
 #[derive(Args, Debug)]
 #[allow(clippy::struct_excessive_bools)]
+#[command(group(ArgGroup::new("source").multiple(false)))]
 pub struct CheckArgs {
+    /// Run these commands, by id or name, after their dependencies, instead of the ones changes
+    /// select. They run even with `auto.check: false`
+    #[arg(value_name = "TARGET", group = "source")]
+    targets: Vec<String>,
+
+    /// Run every command instead of the ones changes select
+    #[arg(long, group = "source")]
+    all: bool,
+
+    /// Also run commands with `auto.check: false`
+    #[arg(long, conflicts_with = "targets")]
+    include_manual: bool,
+
     /// Stop on first failure
     #[arg(long)]
     fail_fast: bool,
@@ -29,10 +43,6 @@ pub struct CheckArgs {
     /// Suppress stdout/stderr for commands that pass
     #[arg(long)]
     mute_success: bool,
-
-    /// Include commands with `auto.check: false`
-    #[arg(long)]
-    all: bool,
 
     /// Kill commands that run longer than DURATION (seconds, or e.g. 90s, 5m), unless their
     /// config sets `timeout`
@@ -46,6 +56,21 @@ pub struct CheckArgs {
 }
 
 impl CheckArgs {
+    /// The commands the flags ask for.
+    fn selection(&self) -> Selection {
+        let include_manual = self.include_manual;
+        if !self.targets.is_empty() {
+            Selection::Targets(self.targets.clone())
+        } else if self.all {
+            Selection::All { include_manual }
+        } else {
+            Selection::Auto {
+                options: SelectOptions::default(),
+                include_manual,
+            }
+        }
+    }
+
     fn jobs(&self) -> NonZeroUsize {
         NonZeroUsize::new(self.jobs)
             .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
@@ -73,10 +98,7 @@ pub async fn run(
 ) -> Result<CheckOutcome, Box<dyn std::error::Error>> {
     let signals = signals::install()?;
     let opts = CheckOptions {
-        selection: Selection::Auto {
-            options: SelectOptions::default(),
-            include_manual: args.all,
-        },
+        selection: args.selection(),
         fail_fast: args.fail_fast,
         mute_success: args.mute_success,
         jobs: args.jobs(),
