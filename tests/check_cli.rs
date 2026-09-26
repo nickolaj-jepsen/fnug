@@ -999,3 +999,90 @@ fn staged_honours_commit_path() {
     let (committed, err) = git_commit(dir.path(), &["-qm", "path", "src/a.rs"]);
     assert!(committed, "{err}");
 }
+
+const FIXER: &str = r"
+name: root
+auto:
+  always: true
+commands:
+  - name: fmt
+    cmd: sed -i.bak 's/x=1/x = 1/' src/a.py && rm src/a.py.bak
+  - name: report
+    cmd: 'echo report > report.txt'
+  - name: revert
+    cmd: printf 'y=2\n' > src/b.py
+  - name: broken
+    cmd: 'exit 3'
+";
+
+/// A clean repo in `dir` with [`FIXER`], an unformatted `src/a.py` and `src/b.py`.
+fn fixer_repo(dir: &Path) -> git2::Repository {
+    let repo = git2::Repository::init(dir).unwrap();
+    common::write_config(dir, FIXER);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.py"), "x=1\n").unwrap();
+    std::fs::write(dir.join("src/b.py"), "y=2\n").unwrap();
+    common::commit_all(&repo);
+    repo
+}
+
+#[test]
+fn fixer_fails_in_check() {
+    let dir = tempfile::tempdir().unwrap();
+    fixer_repo(dir.path());
+
+    let output = check(dir.path(), &[]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("fmt FAIL (modified: src/a.py — review and re-stage)"),
+        "{err}"
+    );
+    // Neither a new untracked file nor rewriting a clean file's content is a modification,
+    // and a failure keeps its own reason
+    assert!(err.contains("report PASS"), "{err}");
+    assert!(err.contains("revert PASS"), "{err}");
+    assert!(err.contains("broken FAIL (exit 3)"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/a.py")).unwrap(),
+        "x = 1\n"
+    );
+
+    // Formatted now, so it passes
+    let output = check(dir.path(), &["fmt"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+}
+
+#[test]
+fn fixer_on_dirty_file_detected_by_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    fixer_repo(dir.path());
+    // Both already modified: one the fixer changes again, one it leaves alone
+    std::fs::write(dir.path().join("src/a.py"), "x=1\nz=3\n").unwrap();
+    std::fs::write(dir.path().join("src/b.py"), "y=3\n").unwrap();
+
+    let output = check(dir.path(), &["fmt", "--mute-success"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("fmt FAIL (modified: src/a.py — "), "{err}");
+
+    // Reverting a modification changes the file too
+    let output = check(dir.path(), &["revert"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("revert FAIL (modified: src/b.py — "), "{err}");
+}
+
+#[test]
+fn allow_modifications_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    fixer_repo(dir.path());
+
+    let output = check(dir.path(), &["fmt", "--allow-modifications"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("fmt PASS"), "{}", stderr(&output));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/a.py")).unwrap(),
+        "x = 1\n"
+    );
+}
