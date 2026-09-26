@@ -150,8 +150,7 @@ impl App {
                                         self.run_command(&node.id, terminal_area);
                                     }
                                     NodeKind::Group { expanded, .. } => {
-                                        self.expanded.insert(node.id.clone(), !expanded);
-                                        self.mark_tree_dirty();
+                                        self.set_expanded_by_user(&node.id, !expanded);
                                     }
                                 }
                             } else {

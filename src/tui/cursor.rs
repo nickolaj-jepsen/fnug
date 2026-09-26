@@ -110,7 +110,8 @@ mod tests {
     #[test]
     fn background_expand_keeps_cursor_node() {
         let mut app = two_groups();
-        // Collapses alpha, keeps beta open
+        // Collapses both groups, then opens beta
+        app.apply_always_selection();
         app.handle_app_event(watcher_selects(&["b2"]));
         draw(&mut app, 80, 24);
         move_down(&mut app, 3);
