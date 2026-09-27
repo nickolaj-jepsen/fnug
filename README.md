@@ -728,3 +728,7 @@ Neither `git` nor `watch` counts files that git ignores (through `.gitignore`, `
 | ----------- | --------------- | ------------------- | ---------------------------------------------------------------- |
 | `paths`     | list of strings | none: walk the tree | Glob patterns for package directories, relative to the config    |
 | `max_depth` | integer         | `5`                 | How many directory levels the walk descends; unused with `paths` |
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release, including breaking changes and what to do about them.
