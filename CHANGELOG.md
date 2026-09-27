@@ -11,7 +11,7 @@ Releases up to 0.1.0-alpha.13 are described on
 
 ### Added
 
-- `fnug init` writes a starter config from the project's tooling, with package configs and a workspace root in monorepos
+- `fnug init` and `fnug setup` write a starter config from the project's tooling, with a workspace root in monorepos
 - `fnug schema` prints the config's JSON Schema, for editor completion and validation
 - `--root <DIR>` resolves the config's paths against another directory
 - `-V`/`--version`
@@ -26,7 +26,8 @@ Releases up to 0.1.0-alpha.13 are described on
 - The TUI shows why each command was selected, and reloads the config when it changes or on `F5`
 - The TUI shows status messages in the toolbar and renders dim, strikethrough and combining characters
 - MCP: `base`, `include_manual`, `timeout_secs` and `jobs` parameters, and `runs_in_check` in `list_lints`
-- Python wrapper: `all_`, `no_workspace` and the new `fnug check` options
+- Python wrapper: `all_`, `no_workspace`, `root`, `log_level` and the new `fnug check` options
+- Python `Config`: `timeout`, `exclusive`, `run_on_change` and `$schema`
 
 ### Changed
 
@@ -57,7 +58,7 @@ Releases up to 0.1.0-alpha.13 are described on
 - **Breaking:** MCP `run_lint` reports an ambiguous or unknown name as a tool error; tools reject unknown parameters
 - **Breaking:** MCP `run_all` skips `auto.check: false` commands; set `include_manual` to run them
 - The MCP server reloads the config on every call and starts even when it is invalid
-- **Breaking:** The Python wrapper runs an in-memory `Config` from the caller's working directory
+- **Breaking:** The Python wrapper runs an in-memory `Config` from the caller's directory, where its workspace looks for packages
 - **Breaking:** The `fnug` library API changed throughout; it has no stability promise yet
 
 ### Removed
