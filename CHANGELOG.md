@@ -15,6 +15,8 @@ Releases up to 0.1.0-alpha.13 are described on
 - `--root <DIR>` resolves the config's paths against another directory
 - `-V`/`--version`
 - `depends_on` accepts command names as well as ids
+- Per-command `timeout`, inherited by child groups and commands
+- `fnug check --jobs N` runs independent commands in parallel; `exclusive: true` keeps a command to itself
 - Python wrapper: `all_` and `no_workspace` options
 
 ### Changed
@@ -29,12 +31,16 @@ Releases up to 0.1.0-alpha.13 are described on
 - **Breaking:** `auto.regex` matches paths relative to the command's `cwd`; rewrite `/tests/` as `(^|/)tests/`
 - **Breaking:** `auto.watch` ignores gitignored files and `.git`; list an ignored directory as a watch `path` to watch it
 - **Breaking:** On Linux, `auto.watch` no longer follows symlinked directories; watch the link's target instead
+- **Breaking:** Without a terminal (hook, CI, `--jobs`), commands can't prompt on `/dev/tty` and their leftover processes are stopped
 - **Breaking:** `fnug setup` installs the hook where git reads it (`core.hooksPath` or the main repo); rerun it
 - **Breaking:** fnug's hook lines are fenced by `# >>> fnug >>>` right after the shebang; rerun `fnug setup` to update
 - **Breaking:** `fnug setup` offers sub-repo hooks only for workspace packages in another repository
 - `fnug setup` edits editor MCP configs in place, keeping comments, and passes on `-c`, `--root` and `--no-workspace`
 - **Breaking:** TUI stop, restart and clear send `SIGINT` to the whole process group, then `SIGKILL` after 2 s
 - **Breaking:** `Esc` in the TUI tree no longer quits; use `q` or `Ctrl+C`
+- A TUI run waits for every dependency in it and starts each command once; rerunning stops the previous run
+- **Breaking:** MCP results merge stdout and stderr into one `output` and list every planned command's status
+- **Breaking:** MCP `run_lint` reports a name matching several commands as an error instead of running the first
 - **Breaking:** MCP `run_all` skips `auto.check: false` commands, like `fnug check`
 - **Breaking:** The Python wrapper runs an in-memory `Config` from the caller's working directory
 - **Breaking:** The `fnug` library API changed throughout; it has no stability promise yet
@@ -52,6 +58,7 @@ Releases up to 0.1.0-alpha.13 are described on
 - Workspaces outside a git repository find their packages, and each package's `fnug_version` is checked
 - File watching reacts within 500 ms and keeps watching files that editors replace on save
 - `fnug check` keeps its failing exit code after handing off to the TUI
+- `fnug check` passes the signal it gets on to its commands, and lists commands that never ran
 - `fnug setup` writes Cursor's MCP config under `mcpServers`
 - A command whose `cwd` is missing fails with a clear error, and so do the commands that depend on it
 - The TUI clears stale errors on rerun, and clearing a queued command cancels its dependents
