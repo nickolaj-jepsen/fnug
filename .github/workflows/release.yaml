@@ -41,6 +41,17 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Fails before anything is published when CHANGELOG.md has no section for the version.
+      - name: Read the release notes from CHANGELOG.md
+        if: steps.version.outputs.changed == 'true'
+        run: scripts/release-notes.sh "${{ steps.version.outputs.version }}" > release-notes.md
+
+      - uses: actions/upload-artifact@v5
+        if: steps.version.outputs.changed == 'true'
+        with:
+          name: release-notes
+          path: release-notes.md
+
       - name: Create and push tag
         if: steps.version.outputs.changed == 'true'
         run: |
@@ -152,7 +163,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: fnug-*
 
   pypi-build:
