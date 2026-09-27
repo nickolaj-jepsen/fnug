@@ -31,7 +31,7 @@ Linux and macOS only; commands run via `sh -c`.
 Only prereleases are published so far. `cargo install fnug` skips prereleases, so name the version explicitly:
 
 ```bash
-cargo install --locked fnug@0.1.0-alpha.13
+cargo install --locked fnug@0.1.0-alpha.14
 ```
 
 ### From PyPI

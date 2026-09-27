@@ -1,6 +1,6 @@
 [package]
 name = "fnug"
-version = "0.1.0-alpha.13"
+version = "0.1.0-alpha.14"
 edition = "2024"
 rust-version = "1.88"
 description = "A TUI command runner based on git changes"

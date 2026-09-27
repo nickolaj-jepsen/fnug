@@ -9,6 +9,8 @@ Releases up to 0.1.0-alpha.13 are described on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.14] - 2026-09-27
+
 ### Added
 
 - `fnug init` and `fnug setup` write a starter config from the project's tooling, with a workspace root in monorepos
@@ -88,4 +90,5 @@ Releases up to 0.1.0-alpha.13 are described on
 
 - **Breaking:** fnug refuses a config it found that another user owns; pass it with `-c` or trust it in `FNUG_SAFE_DIRECTORIES`
 
-[Unreleased]: https://github.com/nickolaj-jepsen/fnug/compare/v0.1.0-alpha.13...HEAD
+[Unreleased]: https://github.com/nickolaj-jepsen/fnug/compare/v0.1.0-alpha.14...HEAD
+[0.1.0-alpha.14]: https://github.com/nickolaj-jepsen/fnug/compare/v0.1.0-alpha.13...v0.1.0-alpha.14
