@@ -393,6 +393,8 @@ mod tests {
         );
     }
 
+    // Waits for a file event, which macOS's FSEvents reports with its own timing and paths
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reload_message_not_replaced_by_known_watch_problems() {
         let dir = tempfile::tempdir().unwrap();
