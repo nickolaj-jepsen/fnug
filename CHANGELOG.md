@@ -13,6 +13,7 @@ Releases up to 0.1.0-alpha.13 are described on
 
 - `fnug schema` prints the config's JSON Schema, for editor completion and validation
 - `--root <DIR>` resolves the config's paths against another directory
+- `-V`/`--version`
 - `depends_on` accepts command names as well as ids
 - Python wrapper: `all_` and `no_workspace` options
 
@@ -25,6 +26,13 @@ Releases up to 0.1.0-alpha.13 are described on
 - **Breaking:** Workspace packages don't inherit the root's `cwd`, `auto` or `env`, and their ids get a package prefix
 - **Breaking:** `-c` loads that file as the root; a parent workspace is used only if it includes the nearest config
 - `fnug_version` is optional
+- **Breaking:** `auto.regex` matches paths relative to the command's `cwd`; rewrite `/tests/` as `(^|/)tests/`
+- **Breaking:** `auto.watch` ignores gitignored files and `.git`; list an ignored directory as a watch `path` to watch it
+- **Breaking:** On Linux, `auto.watch` no longer follows symlinked directories; watch the link's target instead
+- **Breaking:** `fnug setup` installs the hook where git reads it (`core.hooksPath` or the main repo); rerun it
+- **Breaking:** fnug's hook lines are fenced by `# >>> fnug >>>` right after the shebang; rerun `fnug setup` to update
+- **Breaking:** `fnug setup` offers sub-repo hooks only for workspace packages in another repository
+- `fnug setup` edits editor MCP configs in place, keeping comments, and passes on `-c`, `--root` and `--no-workspace`
 - **Breaking:** TUI stop, restart and clear send `SIGINT` to the whole process group, then `SIGKILL` after 2 s
 - **Breaking:** `Esc` in the TUI tree no longer quits; use `q` or `Ctrl+C`
 - **Breaking:** MCP `run_all` skips `auto.check: false` commands, like `fnug check`
@@ -39,8 +47,10 @@ Releases up to 0.1.0-alpha.13 are described on
 
 - `-c` and other global options work after the subcommand, with relative and `..` paths
 - Git selection works in linked worktrees and submodules
+- Selection keeps working for paths outside git and file names that aren't UTF-8
 - Each `auto` field inherits from the parent group on its own
 - Workspaces outside a git repository find their packages, and each package's `fnug_version` is checked
+- File watching reacts within 500 ms and keeps watching files that editors replace on save
 - `fnug check` keeps its failing exit code after handing off to the TUI
 - `fnug setup` writes Cursor's MCP config under `mcpServers`
 - A command whose `cwd` is missing fails with a clear error, and so do the commands that depend on it
