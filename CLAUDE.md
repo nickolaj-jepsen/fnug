@@ -98,6 +98,7 @@ The project dogfoods itself — see `.fnug.yaml` for the lint/test config. It se
 | `init.rs` | `fnug init` detection and the config it writes |
 | `mcp_cli.rs` | `fnug mcp` as a process: cancellation and shutdown |
 | `tui.rs` | The binary's TUI in a pseudo-terminal |
+| `changelog.rs` | `CHANGELOG.md`'s Keep a Changelog format and entry length |
 
 Shared helpers live in `tests/common/` (`mod common;`): writing and loading a config in a `tempfile::tempdir()`, running the binary (`fnug_command`, `check_command`), process helpers (`wait_until`, `wait_exit`, `read_pid`, `KillOnDrop`), libgit2 repo builders (`commit_all`, `init_gitlink_repo`), `common::git`, which runs the git CLI isolated from the user's git config and from the `GIT_DIR` a hook exports, and `common::pty`, which runs a process on a pseudo-terminal. Pattern:
 
@@ -122,8 +123,9 @@ Automated via GitHub Actions (`release.yaml`). A push to `main` that changes `Ca
 
 1. Update version in `Cargo.toml` (and `vendor/vt100/Cargo.toml` if the vendored crate changed since the last release; CI's `vt100-version` job fails otherwise)
 2. Update the version in the README install commands (`cargo install --locked fnug@X.Y.Z`)
-3. `cargo generate-lockfile`
-4. `git commit -m "chore: bump version to X.Y.Z"`
+3. Release the `CHANGELOG.md` entries (see [Changelog](#changelog))
+4. `cargo generate-lockfile`
+5. `git commit -m "chore: bump version to X.Y.Z"`
 
 ## Python Package
 
