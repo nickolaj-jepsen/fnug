@@ -94,6 +94,12 @@ impl Tui {
         master.input.write_all(keys).unwrap();
     }
 
+    /// Type `keys` into the terminal, which fails on macOS once every process has closed it.
+    fn try_send(&mut self, keys: &[u8]) -> std::io::Result<()> {
+        let master = self.master.as_mut().expect("terminal hung up");
+        master.input.write_all(keys)
+    }
+
     /// Close the master side, as closing a terminal window does. The kernel then sends fnug,
     /// the session leader, SIGHUP, and every write to its terminal fails.
     fn hang_up(&mut self) {
@@ -243,8 +249,9 @@ fn tui_error_exits_2() {
     unsafe { libc::kill(cat, libc::SIGKILL) };
     assert!(wait_until(Duration::from_secs(5), || !process_alive(cat)));
 
-    // The help overlay changes the screen, so it is drawn
-    tui.send(b"?");
+    // The help overlay changes the screen, so it is drawn. fnug may already have exited after
+    // a draw of its own, so the key can fail to arrive
+    let _ = tui.try_send(b"?");
     let status = dir.path().join("status");
     let mut code = String::new();
     let exited = wait_until(Duration::from_secs(10), || {
