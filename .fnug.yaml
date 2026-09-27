@@ -70,3 +70,13 @@ children:
           path:
             - "./docs/demo.tape"
           check: false
+  - name: changelog
+    auto:
+      watch: true
+      git: true
+      path:
+        - "./CHANGELOG.md"
+    commands:
+      - name: format
+        id: changelog-format
+        cmd: cargo test --test changelog

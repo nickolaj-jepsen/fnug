@@ -102,7 +102,7 @@ maturin develop --release
 
 - Conventional commits (`feat:`, `fix:`, `chore:`, etc.)
 - Concise, max 72 chars wide, no body unless necessary
-- `BREAKING CHANGE:` in body for breaking changes
+- `BREAKING CHANGE:` in body for breaking changes, plus a `**Breaking:**` entry in `CHANGELOG.md`
 - Split large changes into multiple commits
 
 ## Code Style
@@ -111,3 +111,18 @@ maturin develop --release
 - **Python**: ruff with `select = ALL` (see pyproject.toml for ignores)
 - **Nix**: alejandra + statix + deadnix
 - **Vendored dep**: `vendor/vt100` is a modified vt100 fork published as `fnug-vt100` — version must be bumped separately when changed
+
+## Changelog
+
+`CHANGELOG.md` follows [Keep a Changelog 1.1](https://keepachangelog.com/en/1.1.0/). Every user-visible change (CLI, config, TUI, MCP, hooks, Python wrapper, packaging) adds an entry under `## [Unreleased]` in the same PR. Refactors, tests, CI and internal docs get none.
+
+Readers skim it, so be as brief as possible:
+
+- One line per entry, at most 160 characters (`tests/changelog.rs` enforces this). Say what changed for the user, not how it was built
+- Sections in this order, only when non-empty: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`
+- Prefix breaking changes with `**Breaking:**` and name what to do instead, e.g. ``**Breaking:** `--all` skips `auto.check: false` commands; add `--include-manual` ``
+- The `fnug` library API has no stability promise yet: cover its changes with at most one `**Breaking:**` line per release
+- Edit an existing Unreleased entry rather than adding a second one about the same feature; a fix to something added in the same release needs no entry
+- Leave detail to the README; link a section (`[details](README.md#...)`) only when an entry can't stand alone
+
+To release, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add an empty `## [Unreleased]` above it, and update the link references at the bottom. `release.yaml` publishes that section as the GitHub release notes (`scripts/release-notes.sh`) and fails before publishing anything without it.
